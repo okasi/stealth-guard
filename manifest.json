@@ -1,0 +1,65 @@
+{
+  "version": "1.0",
+  "manifest_version": 2,
+  "name": "Stealth Guard by okasi",
+  "author": "okasi.me",
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "notifications",
+    "privacy",
+    "proxy",
+    "tabs",
+    "webNavigation",
+    "webRequest",
+    "webRequestBlocking",
+    "declarativeNetRequest",
+    "<all_urls>"
+  ],
+  "homepage_url": "https://github.com/okasi/",
+  "description": "Fingerprinting protection: Canvas, WebGL, Font, Audio, Timezone, User-Agent spoofing, WebRTC leak prevention & proxy",
+  "background": {
+    "scripts": [
+      "lib/storage.js",
+      "lib/config.js",
+      "lib/domainFilter.js",
+      "lib/proxy.js",
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "browser_action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Stealth Guard",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "64": "icons/64.png",
+      "128": "icons/128.png"
+    }
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "all_frames": true,
+      "matches": [
+        "<all_urls>"
+      ],
+      "match_about_blank": true,
+      "run_at": "document_start",
+      "js": [
+        "lib/domainFilter.js",
+        "content-scripts/injector.js"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "64": "icons/64.png",
+    "128": "icons/128.png"
+  }
+}

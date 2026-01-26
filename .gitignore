@@ -1,0 +1,23 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Packages
+*.zip
+*.crx
+*.pem
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+.claude

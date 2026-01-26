@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stealth Guard</title>
+  <link rel="stylesheet" href="popup.css">
+  <script src="../lib/domainFilter.js"></script>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div class="header-title">
+        <img src="../icons/64.png" alt="Stealth Guard Icon" class="header-icon">
+        <h1>Stealth Guard</h1>
+      </div>
+      <div class="header-controls">
+        <div class="global-toggle">
+          <label class="switch">
+            <input type="checkbox" id="global-enabled">
+            <span class="slider"></span>
+          </label>
+          <span>Enabled</span>
+        </div>
+        <div class="global-toggle">
+          <label class="switch">
+            <input type="checkbox" id="notifications-enabled">
+            <span class="slider"></span>
+          </label>
+          <span>Debug</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Features -->
+    <div class="features">
+      <div class="feature-row">
+        <div class="feature-icon">🌍</div>
+        <div class="feature-name">Proxy</div>
+        <div class="proxy-info" id="proxy-info">
+          <span id="proxy-status">No proxy</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="proxy-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-icon">🌐</div>
+        <div class="feature-name">User-Agent</div>
+        <select id="useragent-quick-select" class="timezone-select">
+          <option value="macos">macOS Safari</option>
+          <option value="macos_chrome">macOS Chrome</option>
+          <option value="windows">Windows Edge</option>
+          <option value="iphone">iPhone Safari</option>
+          <option value="android">Android Chrome</option>
+        </select>
+        <label class="switch">
+          <input type="checkbox" id="useragent-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-icon">🕐</div>
+        <div class="feature-name">Timezone</div>
+        <select id="timezone-quick-select" class="timezone-select">
+          <option value="America/Los_Angeles|-480">PST/Pacific (-8)</option>
+          <option value="America/Denver|-420">MST/Mountain (-7)</option>
+          <option value="America/Chicago|-360">CST/Central (-6)</option>
+          <option value="America/New_York|-300">EST/Eastern (-5)</option>
+          <option value="Europe/London|0">GMT/London (+0)</option>
+          <option value="Europe/Paris|60">CET/Paris (+1)</option>
+          <option value="Europe/Athens|120">EET/Athens (+2)</option>
+          <option value="Europe/Istanbul|180">TRT/Istanbul (+3)</option>
+          <option value="Asia/Dubai|240">GST/Dubai (+4)</option>
+          <option value="Asia/Jakarta|420">WIB/Jakarta (+7)</option>
+          <option value="Asia/Shanghai|480">China/Shanghai (+8)</option>
+          <option value="Asia/Tokyo|540">JST/Tokyo (+9)</option>
+        </select>
+        <label class="switch">
+          <input type="checkbox" id="timezone-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-icon">📡</div>
+        <div class="feature-name">WebRTC</div>
+        <label class="switch">
+          <input type="checkbox" id="webrtc-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-icon">🎨</div>
+        <div class="feature-name">Canvas</div>
+        <label class="switch">
+          <input type="checkbox" id="canvas-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-icon">📐</div>
+        <div class="feature-name">ClientRects</div>
+        <label class="switch">
+          <input type="checkbox" id="clientrects-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-icon">🔤</div>
+        <div class="feature-name">Font</div>
+        <label class="switch">
+          <input type="checkbox" id="font-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-icon">🔊</div>
+        <div class="feature-name">AudioContext</div>
+        <label class="switch">
+          <input type="checkbox" id="audiocontext-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-icon">🕹️</div>
+        <div class="feature-name">WebGL</div>
+        <select id="webgl-quick-select" class="timezone-select">
+          <option value="auto">Auto (based on User-Agent)</option>
+          <option value="apple">Apple</option>
+          <option value="pixel_4">Pixel 4</option>
+          <option value="surface_pro_7">Surface Pro 7</option>
+        </select>
+        <label class="switch">
+          <input type="checkbox" id="webgl-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-icon">🎮</div>
+        <div class="feature-name">WebGPU</div>
+        <label class="switch">
+          <input type="checkbox" id="webgpu-enabled">
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <div class="legend">
+        <div class="legend-item">
+          <span class="legend-color legend-green"></span>
+          <span>Blocked</span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-color legend-yellow"></span>
+          <span>Allowlisted</span>
+        </div>
+      </div>
+      <button id="open-options" class="btn-secondary">Advanced Settings</button>
+      <button id="test-webrtc" class="btn-secondary">Test WebRTC/DNS Leak</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stealth Guard - Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-title">
+        <img src="../icons/64.png" alt="Stealth Guard Icon" class="header-icon">
+        <h1>Stealth Guard Settings</h1>
+      </div>
+      <p>Configure privacy protection features and domain allowlists</p>
+    </header>
+
+    <div class="content">
+      <!-- Global Settings -->
+      <section class="card">
+        <h2>Global Settings</h2>
+
+        <div class="field">
+          <label for="global-whitelist">Global Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="global-whitelist" rows="3" placeholder="*.facebook.com, example.com, localhost"></textarea>
+          <small>Use *.domain.com to match all subdomains. Protection will be DISABLED on these domains.</small>
+        </div>
+
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="notifications-enabled">
+            Show notifications when fingerprinting is detected
+          </label>
+        </div>
+
+        <div class="field">
+          <label>Export / Import Settings</label>
+          <div style="display: flex; gap: 10px; margin-top: 5px;">
+            <button id="export-config" class="btn-secondary">📤 Export</button>
+            <button id="import-config" class="btn-secondary">📥 Import</button>
+            <input type="file" id="import-file" accept=".json" style="display: none;">
+          </div>
+        </div>
+      </section>
+
+      <!-- Proxy Settings -->
+      <section class="card" id="proxy-section">
+        <h2><span>🌍 SOCKS5 Proxy Support</span><a href="https://browserleaks.com/ip" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Route traffic through SOCKS4/5 or HTTP/HTTPS proxy servers.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="proxy-enabled">
+            Enable Proxy
+          </label>
+        </div>
+
+        <!-- Active Profile Selection -->
+        <div class="field">
+          <label for="proxy-active-profile">Active Profile (for all traffic)</label>
+          <select id="proxy-active-profile">
+            <option value="">None (Direct)</option>
+          </select>
+          <small>Select a proxy profile to route all traffic through. Leave as "None" to only use domain-specific routing.</small>
+        </div>
+
+        <!-- Proxy Profiles -->
+        <div class="field">
+          <label>Proxy Profiles</label>
+          <div id="proxy-profiles-list" style="margin-bottom: 10px;">
+            <!-- Profiles will be dynamically added here -->
+          </div>
+          <details style="margin-top: 10px;">
+            <summary style="cursor: pointer; color: #1a73e8; font-weight: 500;">Add New Proxy Profile</summary>
+            <div style="margin-top: 10px; padding: 15px; background: #f5f5f5; border-radius: 4px;">
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                <div>
+                  <label for="new-proxy-host" style="display: block; margin-bottom: 5px; font-size: 0.9em;">Host/IP</label>
+                  <input type="text" id="new-proxy-host" placeholder="192.168.1.1" style="width: 100%; padding: 8px;">
+                </div>
+                <div>
+                  <label for="new-proxy-port" style="display: block; margin-bottom: 5px; font-size: 0.9em;">Port</label>
+                  <input type="number" id="new-proxy-port" placeholder="1080" style="width: 100%; padding: 8px;">
+                </div>
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                <div>
+                  <label for="new-proxy-scheme" style="display: block; margin-bottom: 5px; font-size: 0.9em;">Scheme</label>
+                  <select id="new-proxy-scheme" style="width: 100%; padding: 8px;">
+                    <option value="socks5">SOCKS v5</option>
+                    <option value="socks4">SOCKS v4</option>
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="new-proxy-name" style="display: block; margin-bottom: 5px; font-size: 0.9em;">Name (optional)</label>
+                  <input type="text" id="new-proxy-name" placeholder="Auto-detected from IP" style="width: 100%; padding: 8px;">
+                </div>
+              </div>
+              <div style="margin-bottom: 10px;">
+                <label style="display: flex; align-items: center; cursor: pointer;">
+                  <input type="checkbox" id="new-proxy-remote-dns" checked>
+                  <span style="margin-left: 5px;">Use Remote DNS (recommended for SOCKS5)</span>
+                </label>
+              </div>
+              <button id="add-proxy-profile" class="btn-primary" style="width: 100%;">Add Profile</button>
+            </div>
+          </details>
+        </div>
+
+        <!-- Bypass/Direct List -->
+        <div class="field">
+          <label for="proxy-bypass-list">Bypass/Direct List (comma-separated)</label>
+          <textarea id="proxy-bypass-list" rows="6" placeholder="localhost, 127.0.0.1, 192.168.*, 10.*"></textarea>
+          <small>Domains/IPs that bypass the proxy and connect directly</small>
+        </div>
+      </section>
+
+      <!-- User-Agent Settings -->
+      <section class="card" id="useragent-section">
+        <h2><span>🌐 User-Agent Spoofing</span><a href="https://browserleaks.com/javascript" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Spoof navigator.userAgent, navigator.platform, and HTTP User-Agent headers.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="useragent-enabled">
+            Enable User-Agent Spoofing (navigator object)
+          </label>
+        </div>
+        <div class="field">
+          <label for="useragent-whitelist">Per-Feature Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="useragent-whitelist" rows="2"></textarea>
+        </div>
+        <div class="field">
+          <label for="useragent-preset">User-Agent Preset</label>
+          <select id="useragent-preset">
+            <option value="macos">macOS Safari</option>
+            <option value="macos_chrome">macOS Chrome</option>
+            <option value="windows">Windows Edge</option>
+            <option value="iphone">iPhone Safari</option>
+            <option value="android">Android Chrome</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="useragent-string">User-Agent String</label>
+          <textarea id="useragent-string" rows="3" readonly style="background-color: #f5f5f5; cursor: default;"></textarea>
+          <small>This is the user-agent string that will be used for the selected preset.</small>
+        </div>
+      </section>
+
+      <!-- Timezone Settings -->
+      <section class="card" id="timezone-section">
+        <h2><span>🕐 Timezone Spoofing</span><a href="https://webbrowsertools.com/timezone/" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Override Date.getTimezoneOffset() and Intl.DateTimeFormat to spoof timezone.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="timezone-enabled">
+            Enable Timezone Spoofing (may break some websites)
+          </label>
+        </div>
+        <div class="field">
+          <label for="timezone-whitelist">Per-Feature Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="timezone-whitelist" rows="2"></textarea>
+        </div>
+        <div class="field">
+          <label for="timezone-select">Timezone</label>
+          <select id="timezone-select">
+            <option value="America/Los_Angeles|-480">PST/Pacific (-8)</option>
+            <option value="America/Denver|-420">MST/Mountain (-7)</option>
+            <option value="America/Chicago|-360">CST/Central (-6)</option>
+            <option value="America/New_York|-300">EST/Eastern (-5)</option>
+            <option value="Europe/London|0">GMT/London (+0)</option>
+            <option value="Europe/Paris|60">CET/Paris (+1)</option>
+            <option value="Europe/Athens|120">EET/Athens (+2)</option>
+            <option value="Europe/Istanbul|180">TRT/Istanbul (+3)</option>
+            <option value="Asia/Dubai|240">GST/Dubai (+4)</option>
+            <option value="Asia/Jakarta|420">WIB/Jakarta (+7)</option>
+            <option value="Asia/Shanghai|480">China/Shanghai (+8)</option>
+            <option value="Asia/Tokyo|540">JST/Tokyo (+9)</option>
+          </select>
+        </div>
+      </section>
+
+      <!-- WebRTC Settings -->
+      <section class="card" id="webrtc-section">
+        <h2><span>📡 WebRTC Leak Protection</span><a href="https://browserleaks.com/webrtc" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Control WebRTC ICE candidate policy via chrome.privacy API.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="webrtc-enabled">
+            Enable WebRTC Leak Protection
+          </label>
+        </div>
+        <div class="field">
+          <label for="webrtc-whitelist">Per-Feature Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="webrtc-whitelist" rows="2" placeholder="meet.google.com, *.zoom.us"></textarea>
+        </div>
+        <div class="field">
+          <label for="webrtc-policy">Protection Mode</label>
+          <select id="webrtc-policy">
+            <option value="disable_non_proxied_udp">Disable non-proxied UDP (recommended)</option>
+            <option value="default_public_interface_only">Public interface only</option>
+            <option value="default">Default (no protection)</option>
+          </select>
+        </div>
+      </section>
+
+      <!-- Canvas Settings -->
+      <section class="card" id="canvas-section">
+        <h2><span>🎨 Canvas Fingerprint Protection</span><a href="https://browserleaks.com/canvas" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Inject noise into toDataURL(), toBlob(), and getImageData() outputs.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="canvas-enabled">
+            Enable Canvas Protection
+          </label>
+        </div>
+        <div class="field">
+          <label for="canvas-whitelist">Per-Feature Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="canvas-whitelist" rows="2" placeholder="example.com, test.com"></textarea>
+        </div>
+      </section>
+
+      <!-- ClientRects Settings -->
+      <section class="card" id="clientrects-section">
+        <h2><span>📐 ClientRects Fingerprint Protection</span><a href="https://browserleaks.com/rects" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Add noise to DOMRect and getBoundingClientRect() measurements.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="clientrects-enabled">
+            Enable ClientRects Protection
+          </label>
+        </div>
+        <div class="field">
+          <label for="clientrects-whitelist">Per-Feature Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="clientrects-whitelist" rows="2"></textarea>
+        </div>
+      </section>
+
+      <!-- Font Settings -->
+      <section class="card" id="font-section">
+        <h2><span>🔤 Font Fingerprint Protection</span><a href="https://browserleaks.com/fonts" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Randomize offsetWidth/offsetHeight to disrupt font detection scripts.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="font-enabled">
+            Enable Font Protection
+          </label>
+        </div>
+        <div class="field">
+          <label for="font-whitelist">Per-Feature Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="font-whitelist" rows="2"></textarea>
+        </div>
+      </section>
+
+      <!-- AudioContext Settings -->
+      <section class="card" id="audiocontext-section">
+        <h2><span>🔊 AudioContext Fingerprint Protection</span><a href="https://webbrowsertools.com/audiocontext-fingerprint/" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Inject noise into AudioBuffer and AnalyserNode frequency data.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="audiocontext-enabled">
+            Enable AudioContext Protection
+          </label>
+        </div>
+        <div class="field">
+          <label for="audiocontext-whitelist">Per-Feature Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="audiocontext-whitelist" rows="2"></textarea>
+        </div>
+      </section>
+
+      <!-- WebGL Settings -->
+      <section class="card" id="webgl-section">
+        <h2><span>🕹️ WebGL Fingerprint Protection</span><a href="https://browserleaks.com/webgl" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Spoof getParameter() for VENDOR, RENDERER, and GPU capabilities.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="webgl-enabled">
+            Enable WebGL Protection
+          </label>
+        </div>
+        <div class="field">
+          <label for="webgl-whitelist">Per-Feature Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="webgl-whitelist" rows="2"></textarea>
+        </div>
+        <div class="field">
+          <label for="webgl-preset">Device Preset</label>
+          <select id="webgl-preset">
+            <option value="auto">Auto (based on User-Agent)</option>
+            <option value="apple">Apple</option>
+            <option value="pixel_4">Pixel 4</option>
+            <option value="surface_pro_7">Surface Pro 7</option>
+          </select>
+        </div>
+      </section>
+
+      <!-- WebGPU Settings -->
+      <section class="card" id="webgpu-section">
+        <h2><span>🎮 WebGPU Fingerprint Protection</span><a href="https://browserleaks.com/webgpu" target="_blank" class="test-link">Test</a></h2>
+        <p class="section-desc">Add noise to GPUAdapter limits and buffer operations.</p>
+        <div class="field checkbox">
+          <label>
+            <input type="checkbox" id="webgpu-enabled">
+            Enable WebGPU Protection
+          </label>
+        </div>
+        <div class="field">
+          <label for="webgpu-whitelist">Per-Feature Whitelist/Allowlist (comma-separated domains)</label>
+          <textarea id="webgpu-whitelist" rows="2"></textarea>
+        </div>
+      </section>
+
+
+
+      <!-- Save/Reset Buttons -->
+      <div class="actions">
+        <button id="save-settings" class="btn-primary">Save All Changes & Refresh All Tabs</button>
+        <button id="reset-settings" class="btn-danger">Reset to Defaults</button>
+      </div>
+      <p style="text-align: center; color: #444; font-size: 0.9em; margin-top: 8px;">
+        Changes are auto-saved. Use the button above to refresh all tabs and apply changes immediately.
+      </p>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>
