@@ -33,11 +33,8 @@ Stealth Guard is a privacy-focused browser extension that protects against vario
 
 ## 📥 Installation
 
-### Chrome Web Store
-*Coming soon*
-
 ### Opera Add-ons
-*Coming soon*
+<https://addons.opera.com/extensions/details/stealth-guard>
 
 ### 🔧 Manual Installation (Developer Mode)
 
