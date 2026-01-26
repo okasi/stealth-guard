@@ -81,7 +81,7 @@ If we make changes to this privacy policy, we will update the "Last updated" dat
 
 Stealth Guard is open source. You can review the complete source code to verify our privacy practices:
 
-- GitHub: [https://github.com/okasi/Stealth-Guard-by-okasi](https://github.com/okasi/Stealth-Guard-by-okasi)
+- GitHub: <https://github.com/okasi/stealth-guard>
 
 ## Contact
 
