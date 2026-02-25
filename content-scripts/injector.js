@@ -437,6 +437,10 @@
         return patterns.some(pattern => {
           const normalizedHostname = hostname.toLowerCase();
           const normalizedPattern = pattern.toLowerCase();
+          const hasOnlyLeadingWildcard =
+            normalizedPattern.startsWith("*") &&
+            !normalizedPattern.startsWith("*.") &&
+            normalizedPattern.indexOf("*", 1) === -1;
 
           // Exact match
           if (normalizedHostname === normalizedPattern) {
@@ -460,13 +464,29 @@
             if (normalizedHostname.endsWith("." + domain)) {
               return true;
             }
-          } else if (normalizedPattern.startsWith("*") && !normalizedPattern.startsWith("*.")) {
+          } else if (hasOnlyLeadingWildcard) {
             // Handle *example.com format (no dot after asterisk)
             const domain = normalizedPattern.substring(1);  // Remove "*"
             if (normalizedHostname === domain) {
               return true;
             }
             if (normalizedHostname.endsWith("." + domain)) {
+              return true;
+            }
+          }
+
+          // Generic wildcard support for patterns like *localhost*
+          if (
+            normalizedPattern.includes("*") &&
+            !normalizedPattern.endsWith(".*") &&
+            !normalizedPattern.startsWith("*.") &&
+            !hasOnlyLeadingWildcard
+          ) {
+            const escapedPattern = normalizedPattern
+              .replace(/[.+?^{}$()|[\\]\\\\]/g, "\\\\$&")
+              .replace(/\\*/g, ".*");
+            const wildcardRegex = new RegExp("^" + escapedPattern + "$");
+            if (wildcardRegex.test(normalizedHostname)) {
               return true;
             }
           }
