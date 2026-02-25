@@ -1924,6 +1924,21 @@
 
   const mkey = "stealth-guard-sandboxed-frame";
 
+  // Clean up temporary marker attributes so frameworks (e.g. Next.js)
+  // don't see extension-only attributes during hydration.
+  const transientSandboxMarkers = [
+    "stealth-guard-webgl-sandboxed-frame",
+    "stealth-guard-clientrects-sandboxed-frame",
+    "stealth-guard-webgpu-sandboxed-frame",
+    "stealth-guard-audiocontext-sandboxed-frame"
+  ];
+  for (let i = 0; i < transientSandboxMarkers.length; i++) {
+    const marker = transientSandboxMarkers[i];
+    if (document.documentElement.hasAttribute(marker)) {
+      document.documentElement.removeAttribute(marker);
+    }
+  }
+
   // Notify parent frames about sandboxed context
   if (!document.documentElement.hasAttribute(mkey)) {
     try {
