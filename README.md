@@ -1,6 +1,8 @@
-# 🛡️ Stealth Guard
-
-**Advanced browser fingerprinting protection for Chrome and Opera**
+<div align="center">
+  <img src="icons/128.png" alt="Stealth Guard Logo" width="128" />
+  <h1>🛡️ Stealth Guard</h1>
+  <p><strong>Advanced browser fingerprinting protection for Chrome and Opera</strong></p>
+</div>
 
 Stealth Guard is a privacy-focused browser extension that protects against various fingerprinting techniques used to track users across the web. It provides comprehensive defense against canvas, WebGL, font, audio, and other fingerprinting methods while maintaining website compatibility.
 

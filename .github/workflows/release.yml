@@ -1,0 +1,27 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Package extension
+        run: |
+          zip -r stealth-guard.zip manifest.json background.js content-scripts icons lib options popup README.md LICENSE PRIVACY.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: stealth-guard.zip
+          generate_release_notes: true
