@@ -4,6 +4,26 @@
 (function () {
   'use strict';
 
+  const CONFIG_VERSION = "1.0.2";  // Increment this to force cache refresh
+  const CONFIG_CACHE_KEY = "__STEALTH_GUARD_CONFIG_CACHE__";
+  const CONFIG_CACHE_REFRESH_TS_KEY = "__STEALTH_GUARD_CONFIG_CACHE_REFRESH_TS__";
+  const CONFIG_CACHE_REFRESH_TTL_MS = 3000;
+  const TURNSTILE_SESSION_KEY = "__STEALTH_GUARD_TURNSTILE_TS__";
+  const TURNSTILE_BYPASS_TTL_MS = 3 * 60 * 1000;
+  const TURNSTILE_OBSERVER_TIMEOUT_MS = 12000;
+  const TURNSTILE_TRIGGER_CHECK_EVENT = "stealth-guard-trigger-check";
+  const FINGERPRINT_ALERT_MAP = {
+    "stealth-guard-canvas-alert": "canvas",
+    "stealth-guard-webgl-alert": "webgl",
+    "stealth-guard-font-alert": "font",
+    "stealth-guard-clientrects-alert": "clientrects",
+    "stealth-guard-webgpu-alert": "webgpu",
+    "stealth-guard-audiocontext-alert": "audiocontext",
+    "stealth-guard-timezone-alert": "timezone",
+    "stealth-guard-useragent-alert": "user-agent",
+    "stealth-guard-webrtc-alert": "webrtc"
+  };
+
   // Check if already injected
   if (window.__STEALTH_GUARD_INJECTED__) {
     return;
@@ -37,12 +57,11 @@
   // ========== IMMEDIATE INLINE INJECTION ==========
 
   // Try to read cached config from sessionStorage (synchronous!)
-  const CONFIG_VERSION = "1.0.2";  // Increment this to force cache refresh
   let config;
   let configFromCache = false;
 
   try {
-    const cached = sessionStorage.getItem('__STEALTH_GUARD_CONFIG_CACHE__');
+    const cached = sessionStorage.getItem(CONFIG_CACHE_KEY);
     if (cached) {
       const parsedCache = JSON.parse(cached);
       // Check if cache has version and globalWhitelist field (new in 1.0.1)
@@ -93,7 +112,7 @@
     // Force cache update
     try {
       config._version = CONFIG_VERSION;
-      sessionStorage.setItem('__STEALTH_GUARD_CONFIG_CACHE__', JSON.stringify(config));
+      sessionStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(config));
     } catch (e) {}
   }
   // Migrate vendor/renderer -> preset
@@ -111,53 +130,69 @@
     debugLog("[Stealth Guard] Migrated User-Agent config to preset structure");
   }
 
-  // Refresh cache in background (for next page load)
-  chrome.storage.local.get("stealth-guard-config", (result) => {
-    const storedConfig = result["stealth-guard-config"] || {};
-    const freshConfig = {
-      _version: CONFIG_VERSION,
-      enabled: typeof storedConfig.enabled !== 'undefined' ? storedConfig.enabled : config.enabled,
-      globalWhitelist: typeof storedConfig.globalWhitelist !== 'undefined' ? storedConfig.globalWhitelist : (config.globalWhitelist || ""),
-      canvas: storedConfig.canvas || config.canvas,
-      webgl: storedConfig.webgl || config.webgl,
-      font: storedConfig.font || config.font,
-      clientrects: storedConfig.clientrects || config.clientrects,
-      webgpu: storedConfig.webgpu || config.webgpu,
-      audiocontext: storedConfig.audiocontext || config.audiocontext,
-      timezone: storedConfig.timezone || config.timezone,
-      useragent: storedConfig.useragent || config.useragent,
-      webrtc: storedConfig.webrtc || config.webrtc,
-      notifications: storedConfig.notifications || config.notifications
-    };
+  // Refresh cache in background (for next page load), throttled to avoid per-frame storage churn.
+  let shouldRefreshCache = true;
+  try {
+    const lastRefreshTs = parseInt(sessionStorage.getItem(CONFIG_CACHE_REFRESH_TS_KEY) || "0", 10);
+    shouldRefreshCache = Number.isNaN(lastRefreshTs) || (Date.now() - lastRefreshTs >= CONFIG_CACHE_REFRESH_TTL_MS);
+  } catch (e) {
+    shouldRefreshCache = true;
+  }
 
-    // Migrate old structures
-    // Add global enabled field if missing
-    if (typeof freshConfig.enabled === 'undefined') {
-      freshConfig.enabled = true;
-    }
-    // CRITICAL: Ensure globalWhitelist exists
-    if (typeof freshConfig.globalWhitelist === 'undefined' || freshConfig.globalWhitelist === null) {
-      freshConfig.globalWhitelist = "";
-    }
-    // Empty string "" is valid - means no domains are excluded
-    if (freshConfig.webgl && !freshConfig.webgl.preset) {
-      freshConfig.webgl.preset = "auto";
-    }
-    // Migrate old Apple device presets to unified "apple" preset
-    if (freshConfig.webgl && (freshConfig.webgl.preset === "m1_air" || freshConfig.webgl.preset === "intel_mbp" || freshConfig.webgl.preset === "iphone_x")) {
-      freshConfig.webgl.preset = "apple";
-    }
-    if (freshConfig.useragent && !freshConfig.useragent.preset) {
-      freshConfig.useragent.preset = navigator.platform.includes("Mac") ? "macos" : "windows";
-    }
-
+  if (shouldRefreshCache) {
     try {
-      sessionStorage.setItem('__STEALTH_GUARD_CONFIG_CACHE__', JSON.stringify(freshConfig));
-      debugLog("[Stealth Guard] Config cache updated for next page load");
+      sessionStorage.setItem(CONFIG_CACHE_REFRESH_TS_KEY, String(Date.now()));
     } catch (e) {
       // Ignore errors
     }
-  });
+
+    chrome.storage.local.get("stealth-guard-config", (result) => {
+      const storedConfig = result["stealth-guard-config"] || {};
+      const freshConfig = {
+        _version: CONFIG_VERSION,
+        enabled: typeof storedConfig.enabled !== 'undefined' ? storedConfig.enabled : config.enabled,
+        globalWhitelist: typeof storedConfig.globalWhitelist !== 'undefined' ? storedConfig.globalWhitelist : (config.globalWhitelist || ""),
+        canvas: storedConfig.canvas || config.canvas,
+        webgl: storedConfig.webgl || config.webgl,
+        font: storedConfig.font || config.font,
+        clientrects: storedConfig.clientrects || config.clientrects,
+        webgpu: storedConfig.webgpu || config.webgpu,
+        audiocontext: storedConfig.audiocontext || config.audiocontext,
+        timezone: storedConfig.timezone || config.timezone,
+        useragent: storedConfig.useragent || config.useragent,
+        webrtc: storedConfig.webrtc || config.webrtc,
+        notifications: storedConfig.notifications || config.notifications
+      };
+
+      // Migrate old structures
+      // Add global enabled field if missing
+      if (typeof freshConfig.enabled === 'undefined') {
+        freshConfig.enabled = true;
+      }
+      // CRITICAL: Ensure globalWhitelist exists
+      if (typeof freshConfig.globalWhitelist === 'undefined' || freshConfig.globalWhitelist === null) {
+        freshConfig.globalWhitelist = "";
+      }
+      // Empty string "" is valid - means no domains are excluded
+      if (freshConfig.webgl && !freshConfig.webgl.preset) {
+        freshConfig.webgl.preset = "auto";
+      }
+      // Migrate old Apple device presets to unified "apple" preset
+      if (freshConfig.webgl && (freshConfig.webgl.preset === "m1_air" || freshConfig.webgl.preset === "intel_mbp" || freshConfig.webgl.preset === "iphone_x")) {
+        freshConfig.webgl.preset = "apple";
+      }
+      if (freshConfig.useragent && !freshConfig.useragent.preset) {
+        freshConfig.useragent.preset = navigator.platform.includes("Mac") ? "macos" : "windows";
+      }
+
+      try {
+        sessionStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(freshConfig));
+        debugLog("[Stealth Guard] Config cache updated for next page load");
+      } catch (e) {
+        // Ignore errors
+      }
+    });
+  }
 
   // Skip injection entirely if global protection is disabled
   if (!config.enabled) {
@@ -263,8 +298,8 @@
   // Helper to check bypass status
   const isBypassingTurnstile = () => {
     try {
-      const ts = sessionStorage.getItem('__STEALTH_GUARD_TURNSTILE_TS__');
-      return ts && (Date.now() - parseInt(ts, 10) < 180000); // 3 mins
+      const ts = sessionStorage.getItem(TURNSTILE_SESSION_KEY);
+      return ts && (Date.now() - parseInt(ts, 10) < TURNSTILE_BYPASS_TTL_MS);
     } catch(e) { return false; }
   };
 
@@ -309,9 +344,23 @@
   } else {
     // If not detected immediately, set up observers for late detection
     if (document.readyState !== 'complete') {
-      const observer = new MutationObserver((mutations) => {
-        if (detectTurnstile()) {
+      let observer = null;
+      let observerTimeoutId = null;
+
+      const disconnectTurnstileObserver = () => {
+        if (observerTimeoutId) {
+          clearTimeout(observerTimeoutId);
+          observerTimeoutId = null;
+        }
+        if (observer) {
           observer.disconnect();
+          observer = null;
+        }
+      };
+
+      observer = new MutationObserver(() => {
+        if (detectTurnstile()) {
+          disconnectTurnstileObserver();
 
           if (isBypassingTurnstile()) {
             debugLog("[Stealth Guard] Turnstile detected late but bypass mode active - skipping notification");
@@ -339,10 +388,14 @@
         subtree: true
       });
 
+      observerTimeoutId = setTimeout(() => {
+        disconnectTurnstileObserver();
+      }, TURNSTILE_OBSERVER_TIMEOUT_MS);
+
       // Also check on DOMContentLoaded
       window.addEventListener('DOMContentLoaded', () => {
         if (detectTurnstile()) {
-          observer.disconnect();
+          disconnectTurnstileObserver();
 
           if (isBypassingTurnstile()) {
             debugLog("[Stealth Guard] Turnstile detected (DOMContentLoaded) but bypass mode active - skipping notification");
@@ -362,8 +415,10 @@
               hostname: topHostname
             });
           } catch (e) {}
+        } else {
+          disconnectTurnstileObserver();
         }
-      });
+      }, { once: true });
     }
   }
 
@@ -374,28 +429,6 @@
 
       const config = ` + JSON.stringify(config) + `;
       const hasTurnstile = ${hasTurnstile};
-
-      // Check for Turnstile bypass flag in sessionStorage
-      let turnstileBypassActive = false;
-      let turnstileBypassTimestamp = null;
-      try {
-        const turnstileTs = sessionStorage.getItem('__STEALTH_GUARD_TURNSTILE_TS__');
-        if (turnstileTs) {
-          turnstileBypassTimestamp = turnstileTs;
-          const ts = parseInt(turnstileTs, 10);
-          const now = Date.now();
-          const age = now - ts;
-          if (age < 3 * 60 * 1000) { // 3 minutes
-            turnstileBypassActive = true;
-            debugLog('[Stealth Guard] SessionStorage bypass flag found. Age:', Math.round(age/1000) + 's');
-          } else {
-            debugLog('[Stealth Guard] SessionStorage bypass flag EXPIRED. Age:', Math.round(age/1000) + 's');
-            sessionStorage.removeItem('__STEALTH_GUARD_TURNSTILE_TS__');
-          }
-        }
-      } catch (e) {
-        debugWarn('[Stealth Guard] Failed to read sessionStorage:', e);
-      }
 
       // Helper function for debug logging
       const debugLog = function(...args) {
@@ -414,6 +447,28 @@
         // Always log errors
         console.error(...args);
       };
+
+      // Check for Turnstile bypass flag in sessionStorage
+      let turnstileBypassActive = false;
+      let turnstileBypassTimestamp = null;
+      try {
+        const turnstileTs = sessionStorage.getItem('${TURNSTILE_SESSION_KEY}');
+        if (turnstileTs) {
+          turnstileBypassTimestamp = turnstileTs;
+          const ts = parseInt(turnstileTs, 10);
+          const now = Date.now();
+          const age = now - ts;
+          if (age < ${TURNSTILE_BYPASS_TTL_MS}) {
+            turnstileBypassActive = true;
+            debugLog('[Stealth Guard] SessionStorage bypass flag found. Age:', Math.round(age/1000) + 's');
+          } else {
+            debugLog('[Stealth Guard] SessionStorage bypass flag EXPIRED. Age:', Math.round(age/1000) + 's');
+            sessionStorage.removeItem('${TURNSTILE_SESSION_KEY}');
+          }
+        }
+      } catch (e) {
+        debugWarn('[Stealth Guard] Failed to read sessionStorage:', e);
+      }
 
       // If Turnstile bypass is active, we used to disable ALL protections.
       // Now we only disable User-Agent spoofing (handled in specific feature check)
@@ -1853,7 +1908,7 @@
             debugLog("[Stealth Guard] Disabling UA spoofing due to Turnstile signal from background");
           }
         }, { once: true });
-        window.dispatchEvent(new CustomEvent("stealth-guard-trigger-check", { detail: { eventName: checkEvent } }));
+        window.dispatchEvent(new CustomEvent("${TURNSTILE_TRIGGER_CHECK_EVENT}", { detail: { eventName: checkEvent } }));
       } catch(e) {}
 
       debugLog("[Stealth Guard] User-Agent protection activated:", userAgent);
@@ -1961,7 +2016,7 @@
           ...request.config,
           _version: CONFIG_VERSION
         };
-        sessionStorage.setItem('__STEALTH_GUARD_CONFIG_CACHE__', JSON.stringify(configWithVersion));
+        sessionStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(configWithVersion));
         debugEnabled = request.config.notifications && request.config.notifications.enabled;
         debugLog("[Stealth Guard] Config updated, debug logging now:", debugEnabled ? "enabled" : "disabled");
       } catch (e) {
@@ -1974,21 +2029,8 @@
   window.addEventListener("message", function (e) {
     if (!e.data) return;
 
-    // Map of alert messages to feature names
-    const alertMap = {
-      "stealth-guard-canvas-alert": "canvas",
-      "stealth-guard-webgl-alert": "webgl",
-      "stealth-guard-font-alert": "font",
-      "stealth-guard-clientrects-alert": "clientrects",
-      "stealth-guard-webgpu-alert": "webgpu",
-      "stealth-guard-audiocontext-alert": "audiocontext",
-      "stealth-guard-timezone-alert": "timezone",
-      "stealth-guard-useragent-alert": "user-agent",
-      "stealth-guard-webrtc-alert": "webrtc"
-    };
-
     // Check if this is a fingerprint alert
-    const feature = alertMap[e.data];
+    const feature = FINGERPRINT_ALERT_MAP[e.data];
     if (feature) {
       debugLog("[Stealth Guard Injector] Received alert for feature:", feature, "on", window.location.hostname);
       // Forward to background script
@@ -2014,7 +2056,7 @@
   }, false);
 
   // Listen for Turnstile check requests from MAIN world (for iframes without sessionStorage access)
-  window.addEventListener("stealth-guard-trigger-check", function(e) {
+  window.addEventListener(TURNSTILE_TRIGGER_CHECK_EVENT, function(e) {
     if (!e.detail || !e.detail.eventName) return;
 
     try {

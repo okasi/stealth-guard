@@ -2,6 +2,8 @@
 
 let currentConfig = null;
 let currentTab = null;
+let pendingReloadTimeout = null;
+const POPUP_RELOAD_DEBOUNCE_MS = 250;
 
 // ========== INITIALIZATION ==========
 
@@ -266,7 +268,8 @@ function updateCurrentSite() {
   const buttonElement = document.getElementById('toggle-current-site');
 
   if (!urlElement || !buttonElement) {
-    console.error("Current site elements not found in DOM");
+    // Current popup layout does not always include current-site controls.
+    // Treat these controls as optional and skip this section when absent.
     return;
   }
 
@@ -618,6 +621,21 @@ function setupEventListeners() {
 
 // ========== SAVE CONFIG ==========
 
+function scheduleCurrentTabReload() {
+  if (!currentTab || !currentTab.id) {
+    return;
+  }
+
+  if (pendingReloadTimeout) {
+    clearTimeout(pendingReloadTimeout);
+  }
+
+  pendingReloadTimeout = setTimeout(() => {
+    pendingReloadTimeout = null;
+    chrome.tabs.reload(currentTab.id);
+  }, POPUP_RELOAD_DEBOUNCE_MS);
+}
+
 function saveConfig() {
   try {
     chrome.runtime.sendMessage({
@@ -629,10 +647,8 @@ function saveConfig() {
         return;
       }
 
-      // Reload current tab to apply changes
-      if (currentTab && currentTab.id) {
-        chrome.tabs.reload(currentTab.id);
-      }
+      // Reload current tab to apply changes (debounced for rapid toggle bursts)
+      scheduleCurrentTabReload();
     });
 
   } catch (e) {

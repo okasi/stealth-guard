@@ -2,6 +2,8 @@
 
 let currentConfig = null;
 let saveTimeout = null;
+let lastSavedConfigSerialized = null;
+let saveInFlightSerialized = null;
 const DEBOUNCE_DELAY = 1000; // 1 second debounce
 
 // ========== AUTO-SAVE ==========
@@ -19,53 +21,88 @@ function autoSave() {
   }, DEBOUNCE_DELAY);
 }
 
+function serializeConfigSnapshot(config) {
+  try {
+    return JSON.stringify(config);
+  } catch (e) {
+    return null;
+  }
+}
+
+function refreshAllHttpTabsWithToast() {
+  chrome.tabs.query({}, (tabs) => {
+    if (chrome.runtime.lastError) {
+      console.error("Failed to query tabs:", chrome.runtime.lastError);
+      showToast("Settings saved! Please reload pages manually to apply changes.", "success");
+      return;
+    }
+
+    let reloadCount = 0;
+    for (const tab of tabs) {
+      if (tab.url && (tab.url.startsWith("http://") || tab.url.startsWith("https://"))) {
+        chrome.tabs.reload(tab.id, {}, () => {
+          if (!chrome.runtime.lastError) {
+            reloadCount++;
+          }
+        });
+      }
+    }
+
+    // Show toast with reload count after a brief delay
+    setTimeout(() => {
+      if (reloadCount > 0) {
+        showToast(`Settings saved! ${reloadCount} tab(s) refreshed.`, "success");
+      } else {
+        showToast("Settings saved!", "success");
+      }
+    }, 500);
+  });
+}
+
 function saveConfig(refreshTabs = false) {
+  const serializedConfig = serializeConfigSnapshot(currentConfig);
+  if (!serializedConfig) {
+    showToast("Failed to save settings", "error");
+    return;
+  }
+
+  if (serializedConfig === lastSavedConfigSerialized || serializedConfig === saveInFlightSerialized) {
+    if (refreshTabs) {
+      refreshAllHttpTabsWithToast();
+    }
+    return;
+  }
+
+  saveInFlightSerialized = serializedConfig;
+
   try {
     chrome.runtime.sendMessage({
       type: "update-config",
       config: currentConfig
     }, (response) => {
+      if (saveInFlightSerialized === serializedConfig) {
+        saveInFlightSerialized = null;
+      }
+
       if (chrome.runtime.lastError) {
         console.error("Failed to save config:", chrome.runtime.lastError);
         showToast("Failed to save settings", "error");
         return;
       }
 
+      lastSavedConfigSerialized = serializedConfig;
+
       if (refreshTabs) {
-        // Reload all tabs to apply changes
-        chrome.tabs.query({}, (tabs) => {
-          if (chrome.runtime.lastError) {
-            console.error("Failed to query tabs:", chrome.runtime.lastError);
-            showToast("Settings saved! Please reload pages manually to apply changes.", "success");
-            return;
-          }
-
-          let reloadCount = 0;
-          for (const tab of tabs) {
-            if (tab.url && (tab.url.startsWith("http://") || tab.url.startsWith("https://"))) {
-              chrome.tabs.reload(tab.id, {}, () => {
-                if (!chrome.runtime.lastError) {
-                  reloadCount++;
-                }
-              });
-            }
-          }
-
-          // Show toast with reload count after a brief delay
-          setTimeout(() => {
-            if (reloadCount > 0) {
-              showToast(`Settings saved! ${reloadCount} tab(s) refreshed.`, "success");
-            } else {
-              showToast("Settings saved!", "success");
-            }
-          }, 500);
-        });
+        refreshAllHttpTabsWithToast();
       } else {
         showToast("Settings saved", "success");
       }
     });
 
   } catch (e) {
+    if (saveInFlightSerialized === serializedConfig) {
+      saveInFlightSerialized = null;
+    }
     console.error("Failed to save config:", e);
     showToast("Failed to save settings", "error");
   }
@@ -105,13 +142,22 @@ window.addEventListener('beforeunload', () => {
   if (currentConfig) {
     if (saveTimeout) {
       clearTimeout(saveTimeout);
+      saveTimeout = null;
     }
     collectValues();
+    const serializedConfig = serializeConfigSnapshot(currentConfig);
+    if (!serializedConfig) {
+      return;
+    }
+    if (serializedConfig === lastSavedConfigSerialized || serializedConfig === saveInFlightSerialized) {
+      return;
+    }
     // Use sendMessage synchronously before unload
     chrome.runtime.sendMessage({
       type: "update-config",
       config: currentConfig
     });
+    lastSavedConfigSerialized = serializedConfig;
   }
 });
 
@@ -159,11 +205,15 @@ function loadConfig() {
             }
 
             currentConfig = retryResponse.config;
+            lastSavedConfigSerialized = serializeConfigSnapshot(currentConfig);
+            saveInFlightSerialized = null;
             populateFields();
           });
         }, 100);
       } else {
         currentConfig = response.config;
+        lastSavedConfigSerialized = serializeConfigSnapshot(currentConfig);
+        saveInFlightSerialized = null;
         populateFields();
       }
     });

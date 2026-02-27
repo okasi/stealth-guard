@@ -3,12 +3,22 @@
 
 // Global state
 let currentConfig = null;
+let currentDomainFilter = null;
 let lastNotificationTime = {};
 let configLoaded = false;
 let initializationPromise = null;
 let turnstileTimestamps = {}; // Track domains with Turnstile: { hostname: timestamp }
 let proxyDisabledForWhitelist = false; // Track if proxy is temporarily disabled for whitelisted tab
 let triggeredFeaturesPerTab = {}; // Track triggered features per tab: { tabId: { hostname: string, features: Set } }
+let lastAppliedWebRTCPolicy = null;
+let pendingWebRTCPolicy = null;
+
+// Timing / behavior constants
+const TURNSTILE_BYPASS_TTL_MS = 3 * 60 * 1000;
+const TURNSTILE_RELOAD_DELAY_MS = 1000;
+const ACTIVATION_RECHECK_DELAY_MS = 377;
+const NOTIFICATION_THROTTLE_MS = 3770;
+const TURNSTILE_SESSION_KEY = "__STEALTH_GUARD_TURNSTILE_TS__";
 
 // Debug logging helpers
 const debugLog = function(...args) {
@@ -28,13 +38,223 @@ const debugError = function(...args) {
   console.error(...args);
 };
 
+// Utility helpers
+function getHostnameFromUrl(url) {
+  try {
+    return new URL(url).hostname;
+  } catch (e) {
+    return null;
+  }
+}
+
+function resolveTabHostname(sender, fallbackHostname = null) {
+  if (sender && sender.tab && sender.tab.url) {
+    const tabHostname = getHostnameFromUrl(sender.tab.url);
+    if (tabHostname) {
+      return tabHostname;
+    }
+  }
+  return fallbackHostname;
+}
+
+function setCurrentConfig(config) {
+  currentConfig = config;
+  currentDomainFilter = config ? new DomainFilter(config) : null;
+}
+
+function getDomainFilter(config = currentConfig) {
+  if (!config) {
+    return null;
+  }
+
+  if (!currentDomainFilter || currentDomainFilter.config !== config) {
+    currentDomainFilter = new DomainFilter(config);
+  }
+
+  return currentDomainFilter;
+}
+
+function isHostnameOnGlobalAllowlist(hostname, config = currentConfig) {
+  if (!hostname || !config) {
+    return false;
+  }
+
+  const filter = getDomainFilter(config);
+  return filter ? filter.isWhitelisted(hostname, config.globalWhitelist || "") : false;
+}
+
+function isHostnameOnFeatureAllowlist(hostname, whitelist, config = currentConfig) {
+  if (!hostname || !whitelist || !config) {
+    return false;
+  }
+
+  const filter = getDomainFilter(config);
+  return filter ? filter.isWhitelisted(hostname, whitelist) : false;
+}
+
+function pruneExpiredTurnstileEntries(now = Date.now()) {
+  for (const domain in turnstileTimestamps) {
+    if (now - turnstileTimestamps[domain] >= TURNSTILE_BYPASS_TTL_MS) {
+      delete turnstileTimestamps[domain];
+    }
+  }
+}
+
+function getExactTurnstileBypass(hostname) {
+  if (!hostname) {
+    return { active: false, remainingMs: 0 };
+  }
+
+  const now = Date.now();
+  const timestamp = turnstileTimestamps[hostname];
+  if (!timestamp) {
+    return { active: false, remainingMs: 0 };
+  }
+
+  const age = now - timestamp;
+  if (age >= TURNSTILE_BYPASS_TTL_MS) {
+    delete turnstileTimestamps[hostname];
+    return { active: false, remainingMs: 0 };
+  }
+
+  return {
+    active: true,
+    remainingMs: TURNSTILE_BYPASS_TTL_MS - age
+  };
+}
+
+function getTurnstileBypassIncludingParents(hostname) {
+  if (!hostname) {
+    return { active: false, matchedDomain: null, remainingMs: 0 };
+  }
+
+  pruneExpiredTurnstileEntries();
+
+  const labels = hostname.split(".");
+  for (let i = 0; i < labels.length; i++) {
+    const domain = labels.slice(i).join(".");
+    const bypass = getExactTurnstileBypass(domain);
+    if (bypass.active) {
+      return {
+        active: true,
+        matchedDomain: domain,
+        remainingMs: bypass.remainingMs
+      };
+    }
+  }
+
+  return { active: false, matchedDomain: null, remainingMs: 0 };
+}
+
+function isCloudflareChallengeHostname(hostname) {
+  return hostname === "challenges.cloudflare.com" || hostname.endsWith(".challenges.cloudflare.com");
+}
+
+async function ensureBackgroundInitialized() {
+  if (!configLoaded) {
+    debugLog("[Background] Config not loaded yet, waiting for initialization...");
+    await initializationPromise;
+    debugLog("[Background] Initialization complete");
+  }
+}
+
+function markTriggeredFeatureForTab(tabId, hostname, feature) {
+  if (!tabId) {
+    return;
+  }
+
+  if (!triggeredFeaturesPerTab[tabId] || triggeredFeaturesPerTab[tabId].hostname !== hostname) {
+    triggeredFeaturesPerTab[tabId] = { hostname: hostname, features: new Set() };
+  }
+
+  triggeredFeaturesPerTab[tabId].features.add(feature);
+}
+
+function queryTabs(queryInfo) {
+  return new Promise((resolve) => {
+    chrome.tabs.query(queryInfo, (tabs) => {
+      if (chrome.runtime.lastError) {
+        debugWarn("[Background] Failed to query tabs for broadcast:", chrome.runtime.lastError.message);
+        resolve([]);
+        return;
+      }
+      resolve(tabs || []);
+    });
+  });
+}
+
+function sendMessageToTabIgnoringErrors(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, () => {
+      // Read runtime.lastError to suppress "Unchecked runtime.lastError" noise.
+      // These two failures are expected during tab broadcasts:
+      // 1) Tab has no content script, 2) Receiver doesn't send a response.
+      const error = chrome.runtime.lastError;
+      if (error) {
+        const msg = error.message || "";
+        const expected =
+          msg.includes("Could not establish connection. Receiving end does not exist.") ||
+          msg.includes("The message port closed before a response was received.");
+        if (!expected) {
+          debugWarn("[Background] tabs.sendMessage warning for tab", tabId + ":", msg);
+        }
+      }
+      resolve();
+    });
+  });
+}
+
+async function broadcastConfigUpdated(config) {
+  const tabs = await queryTabs({ url: ["http://*/*", "https://*/*"] });
+  await Promise.all(
+    tabs
+      .filter(tab => typeof tab.id === "number")
+      .map(tab => sendMessageToTabIgnoringErrors(tab.id, { type: "config-updated", config }))
+  );
+}
+
+function addFeatureIfActive(injectionConfig, filter, config, url, featureName, label) {
+  const isActive = filter.shouldActivateFeature(url, featureName);
+  debugLog(`[Background] ${label} active:`, isActive);
+  if (isActive) {
+    injectionConfig[featureName] = config[featureName];
+  }
+  return isActive;
+}
+
+function setTurnstileSessionFlagAndReload(tabId, timestamp) {
+  if (typeof tabId !== "number") {
+    return;
+  }
+
+  const code = `
+    try {
+      // Set Turnstile timestamp for injector to read synchronously
+      sessionStorage.setItem('${TURNSTILE_SESSION_KEY}', '${timestamp}');
+    } catch (e) {
+      // Ignore errors
+    }
+  `;
+
+  chrome.tabs.executeScript(tabId, {
+    code: code,
+    runAt: "document_start"
+  }, () => {
+    debugLog("[Background] SessionStorage flag set, scheduling reload in 1s for tab:", tabId);
+    setTimeout(() => {
+      debugLog("[Background] Reloading tab now:", tabId);
+      chrome.tabs.reload(tabId, { bypassCache: true });
+    }, TURNSTILE_RELOAD_DELAY_MS);
+  });
+}
+
 // ========== INITIALIZATION ==========
 
 // Initialize config immediately when background script loads
 initializationPromise = (async function initializeBackground() {
   try {
     // Initial logs before config is loaded - use console.log since debugLog isn't ready yet
-    currentConfig = await loadConfig();
+    setCurrentConfig(await loadConfig());
 
     configLoaded = true;
     await applyUserAgentSpoofing();
@@ -54,7 +274,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
   // Ensure config is loaded
   if (!configLoaded) {
-    currentConfig = await loadConfig();
+    setCurrentConfig(await loadConfig());
     configLoaded = true;
   }
 
@@ -79,7 +299,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 // Initialize on startup
 chrome.runtime.onStartup.addListener(async () => {
   debugLog("Stealth Guard starting");
-  currentConfig = await loadConfig();
+  setCurrentConfig(await loadConfig());
   configLoaded = true;
   await applyUserAgentSpoofing();
   await applyWebRTCPolicy();
@@ -87,8 +307,9 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 
 // ========== DYNAMIC CONFIG INJECTION ==========
-// Config injection is now handled by injector.js content script
-// which requests the config via "get-injection-config" message
+// Config injection is handled by injector.js content script.
+// The injector currently reads from session/storage cache directly.
+// "get-injection-config" is retained as a legacy compatibility endpoint.
 
 // ========== USER-AGENT SPOOFING ==========
 // HTTP User-Agent header modification using declarativeNetRequest API
@@ -157,25 +378,24 @@ async function applyUserAgentSpoofing() {
       }
 
       // Check specific Cloudflare challenge domain first
-      if (hostname === 'challenges.cloudflare.com' || hostname.endsWith('.challenges.cloudflare.com')) {
-         debugLog("[UA Listener] BYPASS: Cloudflare challenge domain:", hostname);
-         return { requestHeaders: details.requestHeaders };
+      if (isCloudflareChallengeHostname(hostname)) {
+        debugLog("[UA Listener] BYPASS: Cloudflare challenge domain:", hostname);
+        return { requestHeaders: details.requestHeaders };
       }
 
-      // Check Turnstile timestamp validity
-      // Check exact match or if the tracked domain is a suffix (e.g. tracked "example.com" matches "www.example.com")
-      const trackedDomains = Object.keys(turnstileTimestamps);
-      for (const domain of trackedDomains) {
-        if (hostname === domain || hostname.endsWith('.' + domain)) {
-          const age = Date.now() - turnstileTimestamps[domain];
-          if (age < 3 * 60 * 1000) {
-            // Bypass active: Don't modify headers (send real UA)
-            debugLog("[UA Listener] BYPASS: Turnstile domain", domain, "age:", Math.round(age/1000) + "s", "for URL:", details.url.substring(0, 100));
-            return { requestHeaders: details.requestHeaders };
-          } else {
-            delete turnstileTimestamps[domain];
-          }
-        }
+      // Check Turnstile bypass window
+      const bypassInfo = getTurnstileBypassIncludingParents(hostname);
+      if (bypassInfo.active) {
+        // Bypass active: Don't modify headers (send real UA)
+        debugLog(
+          "[UA Listener] BYPASS: Turnstile domain",
+          bypassInfo.matchedDomain,
+          "age:",
+          Math.round((TURNSTILE_BYPASS_TTL_MS - bypassInfo.remainingMs) / 1000) + "s",
+          "for URL:",
+          details.url.substring(0, 100)
+        );
+        return { requestHeaders: details.requestHeaders };
       }
 
       // Modify the User-Agent header
@@ -215,23 +435,29 @@ async function applyUserAgentSpoofing() {
 
 // ========== WEBRTC POLICY ==========
 
+async function applyWebRTCPolicyValue(policy) {
+  if (lastAppliedWebRTCPolicy === policy || pendingWebRTCPolicy === policy) {
+    return;
+  }
+
+  pendingWebRTCPolicy = policy;
+  try {
+    await chrome.privacy.network.webRTCIPHandlingPolicy.set({ value: policy });
+    lastAppliedWebRTCPolicy = policy;
+  } finally {
+    if (pendingWebRTCPolicy === policy) {
+      pendingWebRTCPolicy = null;
+    }
+  }
+}
+
 async function applyWebRTCPolicy() {
   try {
     const config = await getConfig();
 
-    if (config.webrtc.enabled) {
-      // Apply WebRTC leak protection
-      await chrome.privacy.network.webRTCIPHandlingPolicy.set({
-        value: config.webrtc.policy
-      });
-      debugLog("WebRTC policy applied:", config.webrtc.policy);
-    } else {
-      // Restore default
-      await chrome.privacy.network.webRTCIPHandlingPolicy.set({
-        value: "default"
-      });
-      debugLog("WebRTC policy restored to default");
-    }
+    const policy = config.webrtc.enabled ? config.webrtc.policy : "default";
+    await applyWebRTCPolicyValue(policy);
+    debugLog("[WebRTC] Base policy applied:", policy);
   } catch (e) {
     console.error("Failed to apply WebRTC policy:", e);
   }
@@ -242,25 +468,29 @@ function setWebRTCPolicy(url) {
   getConfig().then(config => {
     if (!config.webrtc.enabled) {
       // Protection disabled - allow WebRTC everywhere
-      chrome.privacy.network.webRTCIPHandlingPolicy.set({
-        value: "default"
-      });
-      debugLog("[WebRTC] Protection disabled, allowing WebRTC");
+      applyWebRTCPolicyValue("default")
+        .then(() => {
+          debugLog("[WebRTC] Protection disabled, allowing WebRTC");
+        })
+        .catch((error) => {
+          debugError("[WebRTC] Failed to set default policy:", error);
+        });
       return;
     }
 
     // Check if URL is on whitelist/allowlist
-    const filter = new DomainFilter(config);
-    const hostname = filter.extractHostname(url);
-    const isOnAllowlist = hostname && filter.isWhitelisted(hostname, config.webrtc.whitelist);
+    const hostname = getHostnameFromUrl(url);
+    const isOnAllowlist = isHostnameOnFeatureAllowlist(hostname, config.webrtc.whitelist, config);
 
     // Set policy: allow if on allowlist, block otherwise
     const policy = isOnAllowlist ? "default" : config.webrtc.policy;
-    chrome.privacy.network.webRTCIPHandlingPolicy.set({
-      value: policy
-    });
-
-    debugLog("[WebRTC] Policy set to:", policy, "for:", url);
+    applyWebRTCPolicyValue(policy)
+      .then(() => {
+        debugLog("[WebRTC] Policy set to:", policy, "for:", url);
+      })
+      .catch((error) => {
+        debugError("[WebRTC] Failed to set policy:", error);
+      });
   }).catch(e => {
     debugError("[WebRTC] Failed to set policy:", e);
   });
@@ -317,7 +547,7 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
       setWebRTCPolicy(tab.url);
       updateProxyForActiveTab(tab.url);
 
-      // Delayed check after 377ms to ensure policy is applied
+      // Delayed check to ensure policy is applied after activation
       setTimeout(() => {
         chrome.tabs.get(activeInfo.tabId, (currentTab) => {
           if (chrome.runtime.lastError) {
@@ -329,8 +559,7 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
             setWebRTCPolicy(currentTab.url);
           }
         });
-        // 377ms: Fibonacci number, Doherty threshold for perceived responsiveness
-      }, 377);
+      }, ACTIVATION_RECHECK_DELAY_MS);
     }
   });
 });
@@ -351,8 +580,7 @@ async function updateProxyForActiveTab(url) {
     const hostname = urlObj.hostname;
 
     // Check if this domain is on the global whitelist
-    const filter = new DomainFilter(currentConfig);
-    const isWhitelisted = filter.isWhitelisted(hostname, currentConfig.globalWhitelist || "");
+    const isWhitelisted = isHostnameOnGlobalAllowlist(hostname, currentConfig);
 
     if (isWhitelisted && !proxyDisabledForWhitelist) {
       // Disable proxy completely for whitelisted tab
@@ -408,8 +636,7 @@ chrome.webRequest.onBeforeRequest.addListener(
       }
 
       // Check if this domain is whitelisted
-      const filter = new DomainFilter(currentConfig);
-      const isWhitelisted = filter.isWhitelisted(hostname, currentConfig.globalWhitelist || "");
+      const isWhitelisted = isHostnameOnGlobalAllowlist(hostname, currentConfig);
 
       if (isWhitelisted) {
         // Cancel this request, disable proxy, then re-navigate
@@ -448,8 +675,7 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
     try {
       const url = new URL(details.url);
       const hostname = url.hostname;
-      const filter = new DomainFilter(currentConfig);
-      const isWhitelisted = filter.isWhitelisted(hostname, currentConfig.globalWhitelist || "");
+      const isWhitelisted = isHostnameOnGlobalAllowlist(hostname, currentConfig);
 
       if (!isWhitelisted) {
         debugLog("[Proxy] Navigating away from whitelisted domain, re-enabling proxy");
@@ -464,392 +690,269 @@ chrome.webNavigation.onBeforeNavigate.addListener((details) => {
 
 // ========== MESSAGE HANDLING ==========
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  debugLog("Received message:", request.type, "from:", sender.tab ? "tab" : "popup/options");
+async function buildInjectionConfigForRequest(request, sender) {
+  await ensureBackgroundInitialized();
 
-  // Turnstile detected - add to temporary whitelist
-  if (request.type === "turnstile-detected") {
-    let hostname = request.hostname;
+  const config = await getConfig();
+  const requestUrl = request.url;
+  debugLog("[Background] Building injection config for URL:", requestUrl);
 
-    // CRITICAL FIX: Use the tab's top-level hostname if available
-    // The content script might be in an iframe and unable to see the top URL
-    // We want to whitelist the SITE the user is visiting, not just the iframe
-    if (sender.tab && sender.tab.url) {
-      try {
-        const tabHostname = new URL(sender.tab.url).hostname;
-        debugLog("[Background] Overriding request hostname", hostname, "with tab hostname:", tabHostname);
-        hostname = tabHostname;
-      } catch (e) {
-        // Fallback to request.hostname
-      }
-    }
+  const filter = new DomainFilter(config);
+  const injectionConfig = {};
 
-    const now = Date.now();
+  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "canvas", "Canvas");
+  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "webgl", "WebGL");
+  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "font", "Font");
+  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "clientrects", "ClientRects");
+  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "webgpu", "WebGPU");
+  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "audiocontext", "AudioContext");
+  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "timezone", "Timezone");
 
-    // Check if we recently handled this domain (prevent infinite reload loop)
-    if (turnstileTimestamps[hostname]) {
-      const threeMinutes = 3 * 60 * 1000;
-      const timeSinceLastDetection = now - turnstileTimestamps[hostname];
+  // User-Agent handling: disable all inline protections while exact-domain Turnstile bypass is active.
+  const userAgentActive = filter.shouldActivateFeature(requestUrl, "useragent");
+  const topHostname = resolveTabHostname(sender, getHostnameFromUrl(requestUrl));
+  const exactBypass = getExactTurnstileBypass(topHostname);
+  if (exactBypass.active) {
+    debugLog("[Background] Turnstile active on top domain:", topHostname, "- disabling protections for frame:", requestUrl);
+    return { enabled: false, globalWhitelist: config.globalWhitelist };
+  }
 
-      // If a bypass is already active (detected < 3 mins ago), ignore new detections
-      // This prevents infinite reloads when frames without sessionStorage access (re)detect Turnstile
-      if (timeSinceLastDetection < threeMinutes) {
-        debugLog("[Background] Turnstile bypass already active for", hostname, "- ignoring re-detection");
-        sendResponse({ success: true, ignored: true });
-        return;
-      }
-    }
+  debugLog("[Background] User-Agent active:", userAgentActive);
+  if (userAgentActive) {
+    injectionConfig.useragent = config.useragent;
+  }
 
-    debugLog("[Background] Turnstile detected for:", hostname, "- Adding to bypass list");
+  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "webrtc", "WebRTC");
 
-    // Store timestamp for 3 minutes
-    turnstileTimestamps[hostname] = now;
+  debugLog("[Background] Sending injection config:", injectionConfig);
+  return injectionConfig;
+}
 
-    // Clean up old entries
-    const threeMinutes = 3 * 60 * 1000;
-    for (const domain in turnstileTimestamps) {
-      if (now - turnstileTimestamps[domain] > threeMinutes) {
-        delete turnstileTimestamps[domain];
-        debugLog("[Background] Cleared expired Turnstile entry for:", domain);
-      }
-    }
+function handleTurnstileDetectedMessage(request, sender) {
+  const requestedHostname = request.hostname;
+  const hostname = resolveTabHostname(sender, requestedHostname);
 
-    debugLog("[Background] Turnstile domains now tracked:", Object.keys(turnstileTimestamps));
+  if (requestedHostname && hostname && requestedHostname !== hostname) {
+    debugLog("[Background] Overriding request hostname", requestedHostname, "with tab hostname:", hostname);
+  }
 
-    // Update UA rules to exclude this domain
-    applyUserAgentSpoofing().then(() => {
-      // Tell content script to set timestamp flag (without clearing tracking cookies/storage)
-      if (sender.tab && sender.tab.id) {
-        const code = `
-          try {
-            // Set Turnstile timestamp for injector to read synchronously
-            sessionStorage.setItem('__STEALTH_GUARD_TURNSTILE_TS__', '${now}');
-          } catch(e) {
-            // Ignore errors
-          }
-        `;
+  if (!hostname) {
+    debugWarn("[Background] turnstile-detected received without a valid hostname");
+    return { success: false, error: "Missing hostname" };
+  }
 
-        chrome.tabs.executeScript(sender.tab.id, {
-          code: code,
-          runAt: 'document_start'
-        }, () => {
-          debugLog("[Background] SessionStorage flag set, scheduling reload in 1s for tab:", sender.tab.id);
-          setTimeout(() => {
-            debugLog("[Background] Reloading tab now:", sender.tab.id);
-            chrome.tabs.reload(sender.tab.id, { bypassCache: true });
-          }, 1000);
-        });
-      }
+  const existingBypass = getExactTurnstileBypass(hostname);
+  if (existingBypass.active) {
+    debugLog("[Background] Turnstile bypass already active for", hostname, "- ignoring re-detection");
+    return { success: true, ignored: true };
+  }
+
+  const now = Date.now();
+  turnstileTimestamps[hostname] = now;
+  pruneExpiredTurnstileEntries(now);
+
+  debugLog("[Background] Turnstile detected for:", hostname, "- Added to bypass list");
+  debugLog("[Background] Turnstile domains now tracked:", Object.keys(turnstileTimestamps));
+
+  // Re-apply UA listener and trigger one reload so page scripts run with bypass flag.
+  applyUserAgentSpoofing()
+    .then(() => setTurnstileSessionFlagAndReload(sender && sender.tab ? sender.tab.id : undefined, now))
+    .catch((error) => {
+      debugError("[Background] Failed to apply Turnstile bypass:", error);
     });
 
-    sendResponse({ success: true });
-    return;
-  }
+  return { success: true };
+}
 
-  // Check if UA should be disabled for this domain (synchronous check)
-  if (request.type === "check-turnstile-status") {
-    // CRITICAL: Use the TAB's hostname, not the frame's hostname
-    // This ensures we match against the same hostname stored in turnstileTimestamps
-    let hostname = request.hostname;
-    if (sender.tab && sender.tab.url) {
-      try {
-        hostname = new URL(sender.tab.url).hostname;
-      } catch (e) {}
-    }
+function handleCheckTurnstileStatusMessage(request, sender) {
+  // Use top tab hostname when available so all frames in a tab share bypass state.
+  const hostname = resolveTabHostname(sender, request.hostname);
+  const bypassInfo = getTurnstileBypassIncludingParents(hostname);
 
-    const threeMinutes = 3 * 60 * 1000;
-
-    // Check exact match first
-    if (turnstileTimestamps[hostname]) {
-      const age = Date.now() - turnstileTimestamps[hostname];
-      if (age < threeMinutes) {
-        const remainingSeconds = Math.ceil((threeMinutes - age) / 1000);
-        debugLog("[Background] check-turnstile-status: BYPASS ACTIVE for", hostname, "remaining:", remainingSeconds + "s");
-        sendResponse({
-          skipUA: true,
-          remainingSeconds: remainingSeconds
-        });
-        return;
-      } else {
-        delete turnstileTimestamps[hostname];
-      }
-    }
-
-    // Also check if hostname is a subdomain of a tracked domain (like uaListener does)
-    const trackedDomains = Object.keys(turnstileTimestamps);
-    for (const domain of trackedDomains) {
-      if (hostname.endsWith('.' + domain)) {
-        const age = Date.now() - turnstileTimestamps[domain];
-        if (age < threeMinutes) {
-          const remainingSeconds = Math.ceil((threeMinutes - age) / 1000);
-          debugLog("[Background] check-turnstile-status: BYPASS ACTIVE for subdomain", hostname, "of", domain);
-          sendResponse({
-            skipUA: true,
-            remainingSeconds: remainingSeconds
-          });
-          return;
-        }
-      }
-    }
-
-    debugLog("[Background] check-turnstile-status: No bypass for", hostname, "tracked:", trackedDomains);
-    sendResponse({ skipUA: false });
-    return;
-  }
-
-  // Fingerprint detected
-  if (request.type === "fingerprint-detected") {
-    debugLog("[Background] Fingerprint detected:", request.feature, "on", request.hostname);
-
-    // Track per tab and hostname
-    if (sender.tab && sender.tab.id) {
-      const tabId = sender.tab.id;
-      const hostname = request.hostname;
-
-      if (!triggeredFeaturesPerTab[tabId]) {
-        triggeredFeaturesPerTab[tabId] = { hostname: hostname, features: new Set() };
-      }
-
-      // If hostname changed, reset the features
-      if (triggeredFeaturesPerTab[tabId].hostname !== hostname) {
-        triggeredFeaturesPerTab[tabId] = { hostname: hostname, features: new Set() };
-      }
-
-      triggeredFeaturesPerTab[tabId].features.add(request.feature);
-      debugLog("[Background] Tracked feature", request.feature, "for tab", tabId, "on", hostname);
-    }
-
-    handleFingerprintDetection(request.feature, request.hostname);
-    sendResponse({ success: true });
-    return;
-  }
-
-  // Get injection config (for content script)
-  if (request.type === "get-injection-config") {
-    // Wait for initialization to complete if needed
-    const handleRequest = async () => {
-      if (!configLoaded) {
-        debugLog("[Background] Config not loaded yet, waiting for initialization...");
-        await initializationPromise;
-        debugLog("[Background] Initialization complete, proceeding with request");
-      }
-
-      const config = await getConfig();
-      debugLog("[Background] Building injection config for URL:", request.url);
-      debugLog("[Background] Full config:", config);
-
-      const filter = new DomainFilter(config);
-      const injectionConfig = {};
-
-      // Check each feature
-      const canvasActive = filter.shouldActivateFeature(request.url, "canvas");
-      debugLog("[Background] Canvas active:", canvasActive);
-      if (canvasActive) {
-        injectionConfig.canvas = config.canvas;
-      }
-
-      const webglActive = filter.shouldActivateFeature(request.url, "webgl");
-      debugLog("[Background] WebGL active:", webglActive);
-      if (webglActive) {
-        injectionConfig.webgl = config.webgl;
-      }
-
-      const fontActive = filter.shouldActivateFeature(request.url, "font");
-      debugLog("[Background] Font active:", fontActive);
-      if (fontActive) {
-        injectionConfig.font = config.font;
-      }
-
-      const clientrectsActive = filter.shouldActivateFeature(request.url, "clientrects");
-      debugLog("[Background] ClientRects active:", clientrectsActive);
-      if (clientrectsActive) {
-        injectionConfig.clientrects = config.clientrects;
-      }
-
-      const webgpuActive = filter.shouldActivateFeature(request.url, "webgpu");
-      debugLog("[Background] WebGPU active:", webgpuActive);
-      if (webgpuActive) {
-        injectionConfig.webgpu = config.webgpu;
-      }
-
-      const audiocontextActive = filter.shouldActivateFeature(request.url, "audiocontext");
-      debugLog("[Background] AudioContext active:", audiocontextActive);
-      if (audiocontextActive) {
-        injectionConfig.audiocontext = config.audiocontext;
-      }
-
-      const timezoneActive = filter.shouldActivateFeature(request.url, "timezone");
-      debugLog("[Background] Timezone active:", timezoneActive);
-      if (timezoneActive) {
-        injectionConfig.timezone = config.timezone;
-      }
-
-      // Check User-Agent - but disable if Turnstile recently detected
-      const useragentActive = filter.shouldActivateFeature(request.url, "useragent");
-      let turnstileBypassActive = false;
-
-      // Extract hostname from TAB URL (to cover all frames in the tab)
-      try {
-        let topHostname = null;
-        if (sender && sender.tab && sender.tab.url) {
-          topHostname = new URL(sender.tab.url).hostname;
-        } else {
-          // Fallback to request url if tab info missing
-          topHostname = new URL(request.url).hostname;
-        }
-
-        // Check if this domain has recent Turnstile detection
-        if (topHostname && turnstileTimestamps[topHostname]) {
-          const threeMinutes = 3 * 60 * 1000;
-          const age = Date.now() - turnstileTimestamps[topHostname];
-
-          if (age < threeMinutes) {
-            turnstileBypassActive = true;
-            debugLog("[Background] Turnstile active on top domain:", topHostname, "- disabling protections for frame:", request.url);
-          } else {
-            // Expired, clean up
-            delete turnstileTimestamps[topHostname];
-          }
-        }
-      } catch (e) {
-        debugLog("[Background] Error checking Turnstile status:", e);
-      }
-
-      // If Turnstile bypass is active, return disabled config
-      if (turnstileBypassActive) {
-        return { enabled: false, globalWhitelist: config.globalWhitelist };
-      }
-
-      debugLog("[Background] User-Agent active:", useragentActive);
-      if (useragentActive) {
-        injectionConfig.useragent = config.useragent;
-      }
-
-      const webrtcActive = filter.shouldActivateFeature(request.url, "webrtc");
-      debugLog("[Background] WebRTC active:", webrtcActive);
-      if (webrtcActive) {
-        injectionConfig.webrtc = config.webrtc;
-      }
-
-      debugLog("[Background] Sending injection config:", injectionConfig);
-      return injectionConfig;
-    };
-
-    // Execute async handler
-    handleRequest()
-      .then(injectionConfig => {
-        sendResponse({ config: injectionConfig });
-      })
-      .catch(error => {
-        console.error("Error getting injection config:", error);
-        sendResponse({ config: null, error: error.message });
-      });
-
-    return true;  // Async response
-  }
-
-  // Get config
-  if (request.type === "get-config") {
-    debugLog("Getting config, current:", currentConfig ? "loaded" : "not loaded");
-    getConfig().then(config => {
-      debugLog("Sending config response:", config ? "success" : "null");
-      sendResponse({ config: config });
-    }).catch(error => {
-      console.error("Error getting config:", error);
-      sendResponse({ config: null, error: error.message });
-    });
-    return true;  // Async response
-  }
-
-  // Update config
-  if (request.type === "update-config") {
-    saveConfig(request.config).then(async () => {
-      currentConfig = request.config;
-      await applyUserAgentSpoofing();
-      await applyWebRTCPolicy();
-      await applyProxySettings();
-
-      // Broadcast config update to all tabs and wait for completion
-      return new Promise((resolve) => {
-        chrome.tabs.query({}, (tabs) => {
-          let remaining = tabs.length;
-          if (remaining === 0) {
-            resolve();
-            return;
-          }
-
-          tabs.forEach(tab => {
-            chrome.tabs.sendMessage(tab.id, {
-              type: "config-updated",
-              config: request.config
-            }, () => {
-              // Ignore errors (tab might not have content script)
-              if (chrome.runtime.lastError) {
-                // Silent
-              }
-              remaining--;
-              if (remaining === 0) {
-                resolve();
-              }
-            });
-          });
-        });
-      });
-    }).then(() => {
-      sendResponse({ success: true });
-    });
-    return true;  // Async response
-  }
-
-  // Add domain to whitelist/allowlist
-  if (request.type === "add-to-whitelist") {
-    getConfig().then(async config => {
-      const filter = new DomainFilter(config);
-      config.globalWhitelist = filter.addDomainToWhitelist(request.domain, config.globalWhitelist);
-      await saveConfig(config);
-      currentConfig = config;
-      await applyProxySettings(); // Re-apply proxy settings to update PAC script
-      sendResponse({ success: true, whitelist: config.globalWhitelist });
-    });
-    return true;
-  }
-
-  // Remove domain from whitelist/allowlist
-  if (request.type === "remove-from-whitelist") {
-    getConfig().then(async config => {
-      const filter = new DomainFilter(config);
-      config.globalWhitelist = filter.removeDomainFromWhitelist(request.domain, config.globalWhitelist);
-      await saveConfig(config);
-      currentConfig = config;
-      await applyProxySettings(); // Re-apply proxy settings to update PAC script
-      sendResponse({ success: true, whitelist: config.globalWhitelist });
-    });
-    return true;
-  }
-
-  // Reset config to defaults
-  if (request.type === "reset-config") {
-    resetConfig().then(async () => {
-      currentConfig = await loadConfig();
-      await applyWebRTCPolicy();
-      await applyProxySettings();
-      sendResponse({ success: true });
-    });
-    return true;
-  }
-
-  // Get triggered features for a specific tab (for popup highlighting)
-  if (request.type === "get-triggered-features") {
-    const tabId = request.tabId;
-    const tabData = triggeredFeaturesPerTab[tabId];
-    if (tabData && tabData.features) {
-      sendResponse({ features: Array.from(tabData.features) });
+  if (bypassInfo.active) {
+    const remainingSeconds = Math.ceil(bypassInfo.remainingMs / 1000);
+    if (bypassInfo.matchedDomain === hostname) {
+      debugLog("[Background] check-turnstile-status: BYPASS ACTIVE for", hostname, "remaining:", remainingSeconds + "s");
     } else {
-      sendResponse({ features: [] });
+      debugLog("[Background] check-turnstile-status: BYPASS ACTIVE for subdomain", hostname, "of", bypassInfo.matchedDomain);
     }
+    return { skipUA: true, remainingSeconds };
+  }
+
+  debugLog("[Background] check-turnstile-status: No bypass for", hostname, "tracked:", Object.keys(turnstileTimestamps));
+  return { skipUA: false };
+}
+
+function handleFingerprintDetectedMessage(request, sender) {
+  debugLog("[Background] Fingerprint detected:", request.feature, "on", request.hostname);
+
+  if (sender.tab && sender.tab.id) {
+    markTriggeredFeatureForTab(sender.tab.id, request.hostname, request.feature);
+    debugLog("[Background] Tracked feature", request.feature, "for tab", sender.tab.id, "on", request.hostname);
+  }
+
+  handleFingerprintDetection(request.feature, request.hostname).catch((error) => {
+    debugError("[Background] Failed to process fingerprint detection:", error);
+  });
+
+  return { success: true };
+}
+
+async function handleGetInjectionConfigMessage(request, sender) {
+  try {
+    const injectionConfig = await buildInjectionConfigForRequest(request, sender);
+    return { config: injectionConfig };
+  } catch (error) {
+    debugError("Error getting injection config:", error);
+    return { config: null, error: error.message };
+  }
+}
+
+async function handleGetConfigMessage() {
+  try {
+    debugLog("Getting config, current:", currentConfig ? "loaded" : "not loaded");
+    const config = await getConfig();
+    debugLog("Sending config response:", config ? "success" : "null");
+    return { config };
+  } catch (error) {
+    debugError("Error getting config:", error);
+    return { config: null, error: error.message };
+  }
+}
+
+function serializeConfigValue(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    return String(value);
+  }
+}
+
+function didConfigSectionChange(previousConfig, nextConfig, key) {
+  return serializeConfigValue(previousConfig ? previousConfig[key] : undefined) !==
+    serializeConfigValue(nextConfig ? nextConfig[key] : undefined);
+}
+
+async function handleUpdateConfigMessage(request) {
+  const previousConfig = await getConfig();
+  const nextConfig = request.config;
+  const configChanged = serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
+
+  if (!configChanged) {
+    return { success: true };
+  }
+
+  const globalEnabledChanged = didConfigSectionChange(previousConfig, nextConfig, "enabled");
+  const globalWhitelistChanged = didConfigSectionChange(previousConfig, nextConfig, "globalWhitelist");
+  const userAgentChanged = didConfigSectionChange(previousConfig, nextConfig, "useragent") || globalEnabledChanged;
+  const webrtcChanged =
+    didConfigSectionChange(previousConfig, nextConfig, "webrtc") ||
+    globalWhitelistChanged ||
+    globalEnabledChanged;
+  const proxyChanged =
+    didConfigSectionChange(previousConfig, nextConfig, "proxy") ||
+    globalWhitelistChanged ||
+    globalEnabledChanged;
+
+  await saveConfig(nextConfig);
+  setCurrentConfig(nextConfig);
+
+  if (userAgentChanged) {
+    await applyUserAgentSpoofing();
+  }
+
+  if (webrtcChanged) {
+    await applyWebRTCPolicy();
+  }
+
+  if (proxyChanged) {
+    await applyProxySettings();
+  }
+
+  await broadcastConfigUpdated(nextConfig);
+
+  return { success: true };
+}
+
+async function updateGlobalWhitelist(request, mutator) {
+  const config = await getConfig();
+  const filter = new DomainFilter(config);
+  config.globalWhitelist = mutator(filter, request.domain, config.globalWhitelist);
+  await saveConfig(config);
+  setCurrentConfig(config);
+  await applyWebRTCPolicy();
+  await applyProxySettings();
+  await broadcastConfigUpdated(config);
+  return { success: true, whitelist: config.globalWhitelist };
+}
+
+async function handleAddToWhitelistMessage(request) {
+  return updateGlobalWhitelist(request, (filter, domain, whitelist) => {
+    return filter.addDomainToWhitelist(domain, whitelist);
+  });
+}
+
+async function handleRemoveFromWhitelistMessage(request) {
+  return updateGlobalWhitelist(request, (filter, domain, whitelist) => {
+    return filter.removeDomainFromWhitelist(domain, whitelist);
+  });
+}
+
+async function handleResetConfigMessage() {
+  await resetConfig();
+  setCurrentConfig(await loadConfig());
+  await applyUserAgentSpoofing();
+  await applyWebRTCPolicy();
+  await applyProxySettings();
+  return { success: true };
+}
+
+function handleGetTriggeredFeaturesMessage(request) {
+  const tabData = triggeredFeaturesPerTab[request.tabId];
+  return { features: tabData && tabData.features ? Array.from(tabData.features) : [] };
+}
+
+const messageHandlers = {
+  "turnstile-detected": handleTurnstileDetectedMessage,
+  "check-turnstile-status": handleCheckTurnstileStatusMessage,
+  "fingerprint-detected": handleFingerprintDetectedMessage,
+  "get-injection-config": handleGetInjectionConfigMessage,
+  "get-config": handleGetConfigMessage,
+  "update-config": handleUpdateConfigMessage,
+  "add-to-whitelist": handleAddToWhitelistMessage,
+  "remove-from-whitelist": handleRemoveFromWhitelistMessage,
+  "reset-config": handleResetConfigMessage,
+  "get-triggered-features": handleGetTriggeredFeaturesMessage
+};
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  const messageType = request && request.type;
+  debugLog("Received message:", messageType, "from:", sender.tab ? "tab" : "popup/options");
+
+  const handler = messageHandlers[messageType];
+  if (!handler) {
     return;
   }
 
+  try {
+    const result = handler(request, sender);
+    if (result && typeof result.then === "function") {
+      result
+        .then((payload) => {
+          sendResponse(payload === undefined ? { success: true } : payload);
+        })
+        .catch((error) => {
+          debugError(`[Background] Handler failed for "${messageType}":`, error);
+          sendResponse({ success: false, error: error.message });
+        });
+      return true;
+    }
+
+    sendResponse(result === undefined ? { success: true } : result);
+  } catch (error) {
+    debugError(`[Background] Handler crashed for "${messageType}":`, error);
+    sendResponse({ success: false, error: error.message });
+  }
 });
 
 // ========== FINGERPRINT DETECTION HANDLING ==========
@@ -879,14 +982,13 @@ async function handleFingerprintDetection(feature, hostname) {
   }
 
   // Check if domain is on the whitelist/allowlist for this feature
-  const filter = new DomainFilter(config);
   const featureWhitelist = featureConfig.whitelist || "";
-  if (hostname && filter.isWhitelisted(hostname, featureWhitelist)) {
+  if (isHostnameOnFeatureAllowlist(hostname, featureWhitelist, config)) {
     debugLog("[Background] Domain", hostname, "is on whitelist/allowlist for", feature, "- skipping notification");
     return;
   }
 
-  // Throttle notifications (max 1 per 3770ms per feature-hostname combo)
+  // Throttle notifications (max 1 per throttle window per feature-hostname combo)
   const key = `${feature}-${hostname}`;
   const now = Date.now();
   const lastTime = lastNotificationTime[key] || 0;
@@ -894,10 +996,10 @@ async function handleFingerprintDetection(feature, hostname) {
   debugLog("[Background] Throttle check:", {
     key: key,
     timeSinceLastNotification: now - lastTime,
-    throttleLimit: 3770
+    throttleLimit: NOTIFICATION_THROTTLE_MS
   });
 
-  if (now - lastTime < 3770) {
+  if (now - lastTime < NOTIFICATION_THROTTLE_MS) {
     debugLog("[Background] Notification throttled (too soon)");
     return;  // Too soon
   }
@@ -977,7 +1079,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       // Add to whitelist/allowlist
       config.globalWhitelist = filter.addDomainToWhitelist(hostname, config.globalWhitelist);
       await saveConfig(config);
-      currentConfig = config;
+      setCurrentConfig(config);
 
       // Show notification
       chrome.notifications.create({
@@ -994,7 +1096,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       // Remove from whitelist/allowlist
       config.globalWhitelist = filter.removeDomainFromWhitelist(hostname, config.globalWhitelist);
       await saveConfig(config);
-      currentConfig = config;
+      setCurrentConfig(config);
 
       // Show notification
       chrome.notifications.create({
@@ -1046,7 +1148,7 @@ async function getConfig() {
   if (currentConfig) {
     return currentConfig;
   }
-  currentConfig = await loadConfig();
+  setCurrentConfig(await loadConfig());
   return currentConfig;
 }
 
