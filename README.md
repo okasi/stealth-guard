@@ -12,15 +12,16 @@ Stealth Guard is a privacy-focused browser extension that protects against vario
 
 | Protection | Description |
 |------------|-------------|
-| **🎨 Canvas** | Adds imperceptible noise to canvas data exports, preventing canvas fingerprinting |
-| **🖥️ WebGL** | Spoofs GPU vendor/renderer information and adds noise to WebGL buffers |
-| **🔤 Font** | Randomizes font measurement values to prevent font enumeration |
-| **📐 ClientRects** | Adds noise to element bounding rectangle measurements |
-| **⚡ WebGPU** | Spoofs WebGPU adapter limits and buffer operations |
-| **🔊 AudioContext** | Injects noise into audio frequency data to prevent audio fingerprinting |
-| **🌍 Timezone** | Spoofs timezone information (configurable, default: UTC+1) |
-| **🌐 User-Agent** | Spoofs browser User-Agent string in both HTTP headers and JavaScript |
+| **🌍 Proxy** | Masks your IP address by routing traffic through SOCKS4/5 or HTTP/HTTPS proxy servers |
+| **� User-Agent** | Spoofs browser User-Agent string in both HTTP headers and JavaScript |
+| **� Timezone** | Spoofs timezone information (configurable, default: UTC+1) |
 | **📡 WebRTC** | Prevents IP address leaks through WebRTC connections |
+| **🎨 Canvas** | Adds imperceptible noise to canvas data exports, preventing canvas fingerprinting |
+| **📐 ClientRects** | Adds noise to element bounding rectangle measurements |
+| **🔤 Font** | Randomizes font measurement values to prevent font enumeration |
+| **🔊 AudioContext** | Injects noise into audio frequency data to prevent audio fingerprinting |
+| **�️ WebGL** | Spoofs GPU vendor/renderer information and adds noise to WebGL buffers |
+| **� WebGPU** | Spoofs WebGPU adapter limits and buffer operations |
 
 ### 🚀 Additional Features
 
