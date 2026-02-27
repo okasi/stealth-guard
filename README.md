@@ -39,10 +39,10 @@ Stealth Guard is a privacy-focused browser extension that protects against vario
 
 1. Download or clone this repository
 2. Open your browser's extension page:
+   - **Opera**: Navigate to `opera://extensions/`
    - **Brave**: Navigate to `brave://extensions/`
    - **Vivaldi**: Navigate to `vivaldi://extensions/`
    - **Edge**: Navigate to `edge://extensions/`
-   - **Opera**: Navigate to `opera://extensions/`
 3. Enable **Developer mode** (toggle in top-right corner)
 4. Click **Load unpacked**
 5. Select the extension folder
