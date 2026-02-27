@@ -1,7 +1,7 @@
 <div align="center">
   <img src="icons/128.png" alt="Stealth Guard Logo" width="128" />
   <h1>🛡️ Stealth Guard</h1>
-  <p><strong>Advanced browser fingerprinting protection for Chrome and Opera</strong></p>
+  <p><strong>Advanced browser fingerprinting protection for MV2-compatible browsers (Opera, Brave, Vivaldi, Edge)</strong></p>
 </div>
 
 Stealth Guard is a privacy-focused browser extension that protects against various fingerprinting techniques used to track users across the web. It provides comprehensive defense against canvas, WebGL, font, audio, and other fingerprinting methods while maintaining website compatibility.
@@ -140,7 +140,10 @@ lib/
 
 ### 📋 Manifest Version
 
-This extension uses **Manifest V2** for maximum API compatibility. Key features like `webRequestBlocking` and synchronous header modification require MV2.
+This extension intentionally uses **Manifest V2** for maximum API compatibility. Key features like `webRequestBlocking` and synchronous header modification require MV2 and are restricted or impossible in Manifest V3.
+
+> [!WARNING]
+> Because of Manifest V2, **this extension will no longer work on standard versions of Google Chrome** due to the MV2 phase-out. It is designed for browsers that maintain support for Manifest V2 extensions (such as Opera, Brave, Vivaldi, and potentially Enterprise Edge).
 
 ### 🔐 Permissions
 
@@ -165,13 +168,13 @@ Stealth Guard:
 
 ## 🌐 Browser Compatibility
 
-| Browser | Support |
-|---------|---------|
-| Google Chrome | Full support |
-| Opera | Full support |
-| Brave | Full support |
-| Microsoft Edge | Full support |
-| Vivaldi | Full support |
+| Browser | Support | Notes |
+|---------|---------|-------|
+| Opera | ✅ Full support | Built-in functionality maintains MV2 support |
+| Brave | ✅ Full support | Built-in functionality maintains MV2 support |
+| Vivaldi | ✅ Full support | Built-in functionality maintains MV2 support |
+| Microsoft Edge | ⚠️ Limited | Supported via enterprise policies (until phase-out) |
+| Google Chrome | ❌ Unsupported | Standard Chrome has phased out Manifest V2 |
 
 *Note: Firefox uses a different extension format and is not currently supported.*
 
