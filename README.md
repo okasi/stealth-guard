@@ -23,7 +23,7 @@ Stealth Guard is a privacy-focused browser extension that protects against vario
 ### 🚀 Additional Features
 
 - **🔌 SOCKS5/HTTP/HTTPS Proxy Support** - Route traffic through proxy servers with per-profile configuration
-- **🗺️ Domain-based Routing** - Configure different proxies for different domains using PAC scripts
+- **🗺️ Domain-based Routing Engine** - PAC-based domain routing is supported in core proxy logic (UI route editor is not currently exposed)
 - **✅ Global & Per-Feature Allowlists** - Whitelist sites globally or per protection feature
 - **🎯 Wildcard Domain Patterns** - Support for `*.example.com` and `webmail.*` patterns
 - **☁️ Cloudflare Turnstile Compatibility** - Auto-detects Turnstile challenges and temporarily disables User-Agent spoofing
@@ -60,11 +60,11 @@ Click the Stealth Guard icon in your browser toolbar to:
 
 ### ⚙️ Advanced Settings
 
-Right-click the extension icon and select **Options** (or click "Advanced Settings" in the popup) to access:
+Open **Advanced Settings** from the popup to access:
 - Per-feature allowlists
 - Proxy profile management
-- Domain routing rules
-- WebGL presets (Apple M1, Pixel 4, Surface Pro 7)
+- Proxy active profile + bypass list
+- WebGL presets (Apple, Pixel 4, Surface Pro 7)
 - Export/import configuration
 - WebRTC policy settings
 
@@ -83,31 +83,32 @@ Stealth Guard supports flexible domain matching:
 | `example.com` | `example.com` and `www.example.com` |
 | `*.example.com` | All subdomains (`sub.example.com`, `deep.sub.example.com`) |
 | `webmail.*` | Any domain starting with `webmail.` (`webmail.company.com`) |
+| `*pattern*` | Generic wildcard matching (`foo-localhost-bar`) |
 
 ### 🌐 User-Agent Presets
 
 Choose from predefined User-Agent strings:
-- macOS Safari 18.0
-- macOS Chrome 131
-- Windows Edge 131
-- iPhone Safari 18.0
-- Android Chrome 131
+- macOS Safari
+- macOS Chrome
+- Windows Edge
+- iPhone Safari
+- Android Chrome
 
 ### 🕐 Timezone Presets
 
 Available timezones:
 - UTC-8 (Los Angeles)
+- UTC-7 (Denver)
+- UTC-6 (Chicago)
 - UTC-5 (New York)
 - UTC+0 (London)
 - UTC+1 (Paris) - *Default*
-- UTC+2 (Cairo)
-- UTC+3 (Moscow)
-- UTC+5:30 (Mumbai)
-- UTC+7 (Bangkok)
-- UTC+8 (Singapore)
+- UTC+2 (Athens)
+- UTC+3 (Istanbul)
+- UTC+4 (Dubai)
+- UTC+7 (Jakarta)
+- UTC+8 (Shanghai)
 - UTC+9 (Tokyo)
-- UTC+10 (Sydney)
-- UTC+12 (Auckland)
 
 ## 🧪 Testing Your Protection
 
@@ -123,16 +124,16 @@ Visit these sites to verify your fingerprinting protection:
 ### 📁 Architecture
 
 ```
-background.js              → Main orchestrator (privacy APIs, proxy, DNR)
+background.js              → Runtime orchestrator (webRequest UA spoofing, WebRTC policy, proxy lifecycle, message hub)
     ↓
 content-scripts/
-  injector.js              → Injects protection code into page context
+  injector.js              → Session-cached bootstrap + MAIN-world protection injection
     ↓
 lib/
-  config.js                → Configuration management
-  domainFilter.js          → Domain matching logic
-  proxy.js                 → Proxy management
-  storage.js               → Chrome storage wrapper
+  config.js                → Config defaults + merge/persistence helpers
+  domainFilter.js          → Domain extraction + wildcard allowlist matching
+  proxy.js                 → Proxy mode/PAC generation and profile helpers
+  storage.js               → Promise wrapper for chrome.storage.local
 ```
 
 ### 📋 Manifest Version
@@ -147,7 +148,7 @@ This extension uses **Manifest V2** for maximum API compatibility. Key features 
 | `privacy` | Control WebRTC IP handling policy |
 | `proxy` | Configure SOCKS5/HTTP proxy |
 | `webRequest` / `webRequestBlocking` | Modify User-Agent headers |
-| `declarativeNetRequest` | Declarative header rules |
+| `declarativeNetRequest` | Legacy compatibility cleanup for prior UA rule path |
 | `tabs` | Detect active tab for context menu |
 | `contextMenus` | Right-click menu integration |
 | `notifications` | Fingerprint detection alerts |
