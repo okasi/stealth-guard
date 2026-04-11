@@ -1071,14 +1071,70 @@
       if (isDomainWhitelisted(config.timezone.whitelist)) {
         debugLog("[Stealth Guard] Timezone protection bypassed - domain is whitelisted");
       } else {
+        const parsedConfiguredOffset = Number(config.timezone.offset);
+        // Stored config offset is UTC-relative minutes (UTC+1 => 60).
+        // Date#getTimezoneOffset uses inverse sign (UTC+1 => -60).
+        const fallbackTimezoneOffset = Number.isFinite(parsedConfiguredOffset) ? -parsedConfiguredOffset : 300;
         const options = {
-          value: config.timezone.offset || -300,
+          fallbackOffset: fallbackTimezoneOffset,
           name: config.timezone.name || "America/New_York"
         };
 
         try {
           let timezoneAlertSent = false;
           const getTimezoneOffset = Date.prototype.getTimezoneOffset;
+          const NativeIntlDateTimeFormat = Intl.DateTimeFormat;
+          const timezoneOffsetCache = new Map();
+
+          const parseTimeZoneOffset = function(timeZoneName) {
+            if (!timeZoneName) return null;
+            const normalized = String(timeZoneName).replace(/\u2212/g, "-").replace(/^UTC/, "GMT");
+            if (normalized === "GMT") return 0;
+            const match = normalized.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/);
+            if (!match) return null;
+            const sign = match[1] === "+" ? -1 : 1; // JS offset uses inverted sign
+            const hours = parseInt(match[2], 10);
+            const minutes = parseInt(match[3] || "0", 10);
+            return sign * (hours * 60 + minutes);
+          };
+
+          const getSpoofedTimezoneOffset = function(dateObj) {
+            if (!options.name) return options.fallbackOffset;
+            const timeValue = dateObj && typeof dateObj.getTime === "function" ? dateObj.getTime() : Date.now();
+            if (!Number.isFinite(timeValue)) return options.fallbackOffset;
+
+            // Cache by hour boundary; timezone offsets only change at coarse boundaries.
+            const cacheKey = String(Math.floor(timeValue / 3600000));
+            if (timezoneOffsetCache.has(cacheKey)) {
+              return timezoneOffsetCache.get(cacheKey);
+            }
+
+            let offset = options.fallbackOffset;
+            try {
+              const formatter = new NativeIntlDateTimeFormat("en-US", {
+                timeZone: options.name,
+                timeZoneName: "longOffset",
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit"
+              });
+              const parts = formatter.formatToParts(new Date(timeValue));
+              const zonePart = parts.find(part => part.type === "timeZoneName");
+              const parsed = parseTimeZoneOffset(zonePart && zonePart.value);
+              if (parsed !== null) {
+                offset = parsed;
+              }
+            } catch (e) {
+              // Fall back to configured numeric offset if formatter isn't available
+            }
+
+            timezoneOffsetCache.set(cacheKey, offset);
+            if (timezoneOffsetCache.size > 96) {
+              const oldestKey = timezoneOffsetCache.keys().next().value;
+              timezoneOffsetCache.delete(oldestKey);
+            }
+            return offset;
+          };
 
         const processedNames = [
           "_date", "_offset", "getTime", "setTime", "getTimezoneOffset",
@@ -1107,7 +1163,8 @@
         Object.defineProperty(Date.prototype, "_date", {
           configurable: true,
           get() {
-            return this._newdate !== undefined ? this._newdate : new Date(this.getTime() + (this._offset - options.value) * 60 * 1000);
+            const spoofedOffset = getSpoofedTimezoneOffset(this);
+            return this._newdate !== undefined ? this._newdate : new Date(this.getTime() + (this._offset - spoofedOffset) * 60 * 1000);
           }
         });
 
@@ -1117,7 +1174,7 @@
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
             }
-            return isNaN(self) ? Reflect.apply(target, self, args) : options.value;
+            return isNaN(self) ? Reflect.apply(target, self, args) : getSpoofedTimezoneOffset(self);
           }
         });
 
@@ -1175,7 +1232,7 @@
             }
             const result = Reflect.apply(target, self._date, args);
             const replace_1 = convertToGMT(self._offset);
-            const replace_2 = convertToGMT(options.value);
+            const replace_2 = convertToGMT(getSpoofedTimezoneOffset(self));
             const replace_3 = "(" + options.name.replace(/\\//g, " ") + " Standard Time)";
             return isNaN(self) ? Reflect.apply(target, self, args) : result.replace(replace_1, replace_2).replace(/\\(.*\\)/, replace_3);
           }
