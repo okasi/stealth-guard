@@ -168,8 +168,34 @@
           <span>Allowlisted</span>
         </div>
       </div>
-      <button id="open-options" class="btn-secondary">Advanced Settings</button>
-      <button id="test-webrtc" class="btn-secondary">Test WebRTC/DNS Leak</button>
+      <button id="open-options" class="btn-secondary">
+        <span class="btn-icon-inline" aria-hidden="true">⚙️</span>
+        <span>Advanced Settings</span>
+      </button>
+      <button id="test-webrtc" class="btn-secondary">
+        <span class="btn-icon-inline" aria-hidden="true">🧪</span>
+        <span>Test WebRTC/DNS Leak</span>
+      </button>
+    </div>
+
+    <div class="session-switcher">
+      <div class="session-switcher-header">
+        <h2>Session Switcher</h2>
+        <span id="session-domain">No active site</span>
+      </div>
+      <div class="session-switcher-actions">
+        <input type="text" id="session-name-input" placeholder="Session name (optional)">
+        <button id="save-session" class="btn-session-primary">
+          <span class="btn-icon-inline" aria-hidden="true">💾</span>
+          <span>Save Current Session</span>
+        </button>
+        <button id="clear-current-session" class="btn-session-secondary">
+          <span class="btn-icon-inline" aria-hidden="true">✨</span>
+          <span>New Empty Session</span>
+        </button>
+      </div>
+      <div id="session-status" class="session-status"></div>
+      <div id="session-list" class="session-list"></div>
     </div>
   </div>
 

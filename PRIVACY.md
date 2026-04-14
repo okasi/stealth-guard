@@ -10,7 +10,7 @@ Stealth Guard is a privacy-focused browser extension designed to protect users f
 
 ## Data Collection
 
-**Stealth Guard does not collect, store, or transmit any personal data.**
+**Stealth Guard does not collect or transmit any personal data.**
 
 ### What We Don't Collect
 
@@ -18,7 +18,7 @@ Stealth Guard is a privacy-focused browser extension designed to protect users f
 - No personal information
 - No usage statistics
 - No analytics or telemetry
-- No cookies or tracking data
+- No remote collection of cookies or tracking data
 
 ### Local Storage Only
 
@@ -27,6 +27,7 @@ All extension settings and configurations are stored locally in your browser usi
 - Your protection preferences (enabled/disabled features)
 - Custom allowlists (domains you've whitelisted)
 - Proxy configurations (if configured)
+- Saved per-site session snapshots (cookies, localStorage, and sessionStorage) only when you use the Session Switcher feature
 
 ## Network Requests
 
@@ -53,6 +54,7 @@ The extension requests certain browser permissions to function. Here's why each 
 | Permission | Purpose |
 |------------|---------|
 | `storage` | Store your settings locally |
+| `cookies` | Save and restore per-site sessions locally |
 | `privacy` | Control WebRTC IP handling |
 | `proxy` | Configure proxy settings |
 | `webRequest` | Modify HTTP headers for User-Agent spoofing |

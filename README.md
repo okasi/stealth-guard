@@ -26,6 +26,7 @@ Stealth Guard is a privacy-focused browser extension that protects against vario
 ### 🚀 Additional Features
 
 - **🔌 SOCKS5/HTTP/HTTPS Proxy Support** - Route traffic through proxy servers with per-profile configuration
+- **🔄 Per-Site Session Switcher** - Save, rename, delete, clear, and switch login sessions (cookies + local/session storage) from the popup
 - **🗺️ Domain-based Routing Engine** - PAC-based domain routing is supported in core proxy logic (UI route editor is not currently exposed)
 - **✅ Global & Per-Feature Allowlists** - Whitelist sites globally or per protection feature
 - **🎯 Wildcard Domain Patterns** - Support for `*.example.com` and `webmail.*` patterns
@@ -150,6 +151,7 @@ This extension intentionally uses **Manifest V2** for maximum API compatibility.
 | Permission | Purpose |
 |------------|---------|
 | `storage` | Save user settings |
+| `cookies` | Save and restore per-site login sessions |
 | `privacy` | Control WebRTC IP handling policy |
 | `proxy` | Configure SOCKS5/HTTP proxy |
 | `webRequest` / `webRequestBlocking` | Modify User-Agent headers |

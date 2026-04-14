@@ -19,6 +19,9 @@ const TURNSTILE_RELOAD_DELAY_MS = 1000;
 const ACTIVATION_RECHECK_DELAY_MS = 377;
 const NOTIFICATION_THROTTLE_MS = 3770;
 const TURNSTILE_SESSION_KEY = "__STEALTH_GUARD_TURNSTILE_TS__";
+const SESSION_STORAGE_KEY = "stealth-guard-sessions";
+const ACTIVE_SESSIONS_STORAGE_KEY = "stealth-guard-active-sessions";
+const MAX_SAVED_SESSIONS_PER_DOMAIN = 20;
 
 // Debug logging helpers
 const debugLog = function(...args) {
@@ -246,6 +249,349 @@ function setTurnstileSessionFlagAndReload(tabId, timestamp) {
       chrome.tabs.reload(tabId, { bypassCache: true });
     }, TURNSTILE_RELOAD_DELAY_MS);
   });
+}
+
+// ========== SESSION SWITCHER ==========
+
+function normalizeSessionHostname(hostname) {
+  if (!hostname || typeof hostname !== "string") {
+    return "";
+  }
+
+  return hostname.trim().toLowerCase().replace(/^www\./, "");
+}
+
+function resolveSessionHostname(request, sender) {
+  const explicitHostname = normalizeSessionHostname(request && (request.hostname || request.domain));
+  if (explicitHostname) {
+    return explicitHostname;
+  }
+
+  return normalizeSessionHostname(resolveTabHostname(sender));
+}
+
+function sanitizeSessionName(name) {
+  const trimmed = typeof name === "string" ? name.trim() : "";
+  if (trimmed) {
+    return trimmed.slice(0, 64);
+  }
+
+  const now = new Date();
+  return "Session " + now.toLocaleString();
+}
+
+function createSessionId() {
+  return "session-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+}
+
+async function readSessionState() {
+  const stored = await storage.read([SESSION_STORAGE_KEY, ACTIVE_SESSIONS_STORAGE_KEY]);
+  const sessions = Array.isArray(stored[SESSION_STORAGE_KEY]) ? stored[SESSION_STORAGE_KEY] : [];
+  const activeSessions = stored[ACTIVE_SESSIONS_STORAGE_KEY] && typeof stored[ACTIVE_SESSIONS_STORAGE_KEY] === "object"
+    ? stored[ACTIVE_SESSIONS_STORAGE_KEY]
+    : {};
+
+  return { sessions, activeSessions };
+}
+
+async function writeSessionState(sessions, activeSessions) {
+  await storage.write({
+    [SESSION_STORAGE_KEY]: sessions,
+    [ACTIVE_SESSIONS_STORAGE_KEY]: activeSessions
+  });
+}
+
+function cookiesGetAllCookieStores() {
+  return new Promise((resolve, reject) => {
+    chrome.cookies.getAllCookieStores((stores) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(stores || []);
+    });
+  });
+}
+
+function cookiesGetAll(details) {
+  return new Promise((resolve, reject) => {
+    chrome.cookies.getAll(details, (cookies) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(cookies || []);
+    });
+  });
+}
+
+function cookiesRemove(details) {
+  return new Promise((resolve, reject) => {
+    chrome.cookies.remove(details, (removed) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(removed);
+    });
+  });
+}
+
+function cookiesSet(details) {
+  return new Promise((resolve, reject) => {
+    chrome.cookies.set(details, (cookie) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(cookie);
+    });
+  });
+}
+
+function buildCookieUrl(cookie, fallbackHostname) {
+  const protocol = cookie.secure ? "https" : "http";
+  let host = cookie.domain || fallbackHostname;
+
+  if (typeof host !== "string") {
+    throw new Error("Invalid cookie host");
+  }
+
+  host = host.replace(/^\./, "").trim();
+  if (!host) {
+    throw new Error("Invalid cookie host");
+  }
+
+  const path = cookie.path || "/";
+  return protocol + "://" + host + path;
+}
+
+function maybeCopyCookiePartitionKey(targetDetails, cookie) {
+  if (!cookie || !cookie.partitionKey) {
+    return;
+  }
+
+  // Preserve partitioned cookie identity when the browser exposes it.
+  // Without this, restored auth cookies may become non-partitioned and invalid.
+  targetDetails.partitionKey = cookie.partitionKey;
+}
+
+function cookieMatchesHostname(cookie, hostname) {
+  if (!cookie || !cookie.domain || !hostname) {
+    return false;
+  }
+
+  const normalizedHostname = hostname.split(":")[0].toLowerCase();
+  const cookieDomain = cookie.domain.replace(/^\./, "").toLowerCase();
+
+  return (
+    cookieDomain === normalizedHostname ||
+    cookieDomain === "www." + normalizedHostname ||
+    normalizedHostname.endsWith("." + cookieDomain) ||
+    cookieDomain.endsWith("." + normalizedHostname)
+  );
+}
+
+async function getCookiesForHostname(hostname) {
+  if (!chrome.cookies || !chrome.cookies.getAllCookieStores) {
+    return [];
+  }
+
+  const stores = await cookiesGetAllCookieStores();
+  const allCookies = [];
+
+  for (const store of stores) {
+    const storeCookies = await cookiesGetAll({ storeId: store.id });
+    const matchingCookies = storeCookies.filter((cookie) => cookieMatchesHostname(cookie, hostname));
+    allCookies.push(...matchingCookies);
+  }
+
+  return allCookies;
+}
+
+async function clearCookiesForHostname(hostname) {
+  const cookies = await getCookiesForHostname(hostname);
+  const removeOperations = cookies.map(async (cookie) => {
+    try {
+      const removeDetails = {
+        url: buildCookieUrl(cookie, hostname),
+        name: cookie.name,
+        storeId: cookie.storeId
+      };
+
+      maybeCopyCookiePartitionKey(removeDetails, cookie);
+      await cookiesRemove(removeDetails);
+    } catch (error) {
+      debugWarn("[Session] Failed to remove cookie:", cookie.name, error);
+    }
+  });
+
+  await Promise.all(removeOperations);
+}
+
+async function restoreCookies(cookies, fallbackHostname) {
+  if (!Array.isArray(cookies) || cookies.length === 0) {
+    return;
+  }
+
+  const restoreOperations = cookies.map(async (cookie) => {
+    try {
+      const details = {
+        url: buildCookieUrl(cookie, fallbackHostname),
+        name: cookie.name,
+        value: cookie.value,
+        path: cookie.path,
+        secure: cookie.secure,
+        httpOnly: cookie.httpOnly,
+        storeId: cookie.storeId
+      };
+
+      if (cookie.domain && cookie.domain.startsWith(".")) {
+        details.domain = cookie.domain;
+      }
+
+      if (!cookie.session && typeof cookie.expirationDate === "number") {
+        details.expirationDate = cookie.expirationDate;
+      }
+
+      if (cookie.sameSite && cookie.sameSite !== "unspecified") {
+        details.sameSite = cookie.sameSite;
+      }
+
+      if (typeof cookie.sameParty === "boolean") {
+        details.sameParty = cookie.sameParty;
+      }
+
+      maybeCopyCookiePartitionKey(details, cookie);
+
+      await cookiesSet(details);
+    } catch (error) {
+      debugWarn("[Session] Failed to restore cookie:", cookie && cookie.name, error);
+    }
+  });
+
+  await Promise.all(restoreOperations);
+}
+
+function executeScriptInTab(tabId, code, runAt = "document_idle") {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.executeScript(tabId, { code, runAt }, (results) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(results);
+    });
+  });
+}
+
+async function readTabStorageSnapshot(tabId) {
+  const script = `
+    (() => {
+      const snapshot = { localStorage: {}, sessionStorage: {} };
+
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key !== null) {
+            snapshot.localStorage[key] = localStorage.getItem(key);
+          }
+        }
+      } catch (error) {}
+
+      try {
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const key = sessionStorage.key(i);
+          if (key !== null) {
+            snapshot.sessionStorage[key] = sessionStorage.getItem(key);
+          }
+        }
+      } catch (error) {}
+
+      return snapshot;
+    })();
+  `;
+
+  try {
+    const results = await executeScriptInTab(tabId, script);
+    return (results && results[0]) || { localStorage: {}, sessionStorage: {} };
+  } catch (error) {
+    debugWarn("[Session] Failed to read storage snapshot:", error);
+    return { localStorage: {}, sessionStorage: {} };
+  }
+}
+
+async function clearTabStorage(tabId) {
+  const script = `
+    (() => {
+      try { localStorage.clear(); } catch (error) {}
+      try { sessionStorage.clear(); } catch (error) {}
+      return true;
+    })();
+  `;
+
+  await executeScriptInTab(tabId, script);
+}
+
+async function restoreTabStorage(tabId, storageSnapshot) {
+  const payload = JSON.stringify({
+    localStorage: storageSnapshot && storageSnapshot.localStorage ? storageSnapshot.localStorage : {},
+    sessionStorage: storageSnapshot && storageSnapshot.sessionStorage ? storageSnapshot.sessionStorage : {}
+  });
+
+  const script = `
+    ((snapshot) => {
+      try {
+        localStorage.clear();
+        Object.keys(snapshot.localStorage || {}).forEach((key) => {
+          const value = snapshot.localStorage[key];
+          localStorage.setItem(key, value === null || value === undefined ? "" : String(value));
+        });
+      } catch (error) {}
+
+      try {
+        sessionStorage.clear();
+        Object.keys(snapshot.sessionStorage || {}).forEach((key) => {
+          const value = snapshot.sessionStorage[key];
+          sessionStorage.setItem(key, value === null || value === undefined ? "" : String(value));
+        });
+      } catch (error) {}
+
+      return true;
+    })(${payload});
+  `;
+
+  await executeScriptInTab(tabId, script);
+}
+
+function reloadTab(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.reload(tabId, { bypassCache: true }, () => {
+      resolve();
+    });
+  });
+}
+
+function sortSessionsForHostname(sessions, hostname) {
+  return sessions
+    .filter((session) => session.domain === hostname)
+    .sort((a, b) => (b.lastUsed || b.createdAt || 0) - (a.lastUsed || a.createdAt || 0));
+}
+
+function cleanupSessionLimits(sessions, activeSessions, hostname) {
+  const domainSessions = sortSessionsForHostname(sessions, hostname);
+  if (domainSessions.length <= MAX_SAVED_SESSIONS_PER_DOMAIN) {
+    return sessions;
+  }
+
+  const keepIds = new Set(domainSessions.slice(0, MAX_SAVED_SESSIONS_PER_DOMAIN).map((session) => session.id));
+  const nextSessions = sessions.filter((session) => session.domain !== hostname || keepIds.has(session.id));
+
+  if (activeSessions[hostname] && !keepIds.has(activeSessions[hostname])) {
+    delete activeSessions[hostname];
+  }
+
+  return nextSessions;
 }
 
 // ========== INITIALIZATION ==========
@@ -912,6 +1258,170 @@ function handleGetTriggeredFeaturesMessage(request) {
   return { features: tabData && tabData.features ? Array.from(tabData.features) : [] };
 }
 
+function resolveSessionTabId(request, sender) {
+  if (request && typeof request.tabId === "number") {
+    return request.tabId;
+  }
+
+  if (sender && sender.tab && typeof sender.tab.id === "number") {
+    return sender.tab.id;
+  }
+
+  return null;
+}
+
+async function handleGetSessionsMessage(request, sender) {
+  const hostname = resolveSessionHostname(request, sender);
+  if (!hostname) {
+    return { success: false, error: "Missing hostname", sessions: [], activeSessionId: null };
+  }
+
+  const { sessions, activeSessions } = await readSessionState();
+  return {
+    success: true,
+    sessions: sortSessionsForHostname(sessions, hostname),
+    activeSessionId: activeSessions[hostname] || null
+  };
+}
+
+async function handleSaveSessionMessage(request, sender) {
+  const hostname = resolveSessionHostname(request, sender);
+  const tabId = resolveSessionTabId(request, sender);
+
+  if (!hostname) {
+    return { success: false, error: "Missing hostname" };
+  }
+
+  if (typeof tabId !== "number") {
+    return { success: false, error: "Missing tab id" };
+  }
+
+  const [cookies, storageSnapshot] = await Promise.all([
+    getCookiesForHostname(hostname),
+    readTabStorageSnapshot(tabId)
+  ]);
+
+  const { sessions, activeSessions } = await readSessionState();
+  const now = Date.now();
+
+  const session = {
+    id: createSessionId(),
+    name: sanitizeSessionName(request && request.name),
+    domain: hostname,
+    createdAt: now,
+    lastUsed: now,
+    cookies,
+    localStorage: storageSnapshot.localStorage || {},
+    sessionStorage: storageSnapshot.sessionStorage || {}
+  };
+
+  const nextSessions = cleanupSessionLimits([...sessions, session], activeSessions, hostname);
+  activeSessions[hostname] = session.id;
+  await writeSessionState(nextSessions, activeSessions);
+
+  return { success: true, session };
+}
+
+async function handleSwitchSessionMessage(request, sender) {
+  const tabId = resolveSessionTabId(request, sender);
+  const sessionId = request && request.sessionId;
+
+  if (typeof tabId !== "number") {
+    return { success: false, error: "Missing tab id" };
+  }
+
+  if (!sessionId) {
+    return { success: false, error: "Missing session id" };
+  }
+
+  const { sessions, activeSessions } = await readSessionState();
+  const session = sessions.find((entry) => entry.id === sessionId);
+  if (!session) {
+    return { success: false, error: "Session not found" };
+  }
+
+  await Promise.all([
+    clearCookiesForHostname(session.domain),
+    clearTabStorage(tabId)
+  ]);
+
+  await Promise.all([
+    restoreCookies(session.cookies, session.domain),
+    restoreTabStorage(tabId, {
+      localStorage: session.localStorage || {},
+      sessionStorage: session.sessionStorage || {}
+    })
+  ]);
+
+  session.lastUsed = Date.now();
+  activeSessions[session.domain] = session.id;
+
+  await writeSessionState(sessions, activeSessions);
+  await reloadTab(tabId);
+
+  return { success: true };
+}
+
+async function handleDeleteSessionMessage(request) {
+  const sessionId = request && request.sessionId;
+  if (!sessionId) {
+    return { success: false, error: "Missing session id" };
+  }
+
+  const { sessions, activeSessions } = await readSessionState();
+  const targetSession = sessions.find((entry) => entry.id === sessionId);
+
+  const nextSessions = sessions.filter((entry) => entry.id !== sessionId);
+  if (targetSession && activeSessions[targetSession.domain] === sessionId) {
+    delete activeSessions[targetSession.domain];
+  }
+
+  await writeSessionState(nextSessions, activeSessions);
+  return { success: true };
+}
+
+async function handleRenameSessionMessage(request) {
+  const sessionId = request && request.sessionId;
+  if (!sessionId) {
+    return { success: false, error: "Missing session id" };
+  }
+
+  const { sessions, activeSessions } = await readSessionState();
+  const session = sessions.find((entry) => entry.id === sessionId);
+  if (!session) {
+    return { success: false, error: "Session not found" };
+  }
+
+  session.name = sanitizeSessionName(request && request.name);
+  await writeSessionState(sessions, activeSessions);
+  return { success: true, session };
+}
+
+async function handleClearCurrentSessionMessage(request, sender) {
+  const hostname = resolveSessionHostname(request, sender);
+  const tabId = resolveSessionTabId(request, sender);
+
+  if (!hostname) {
+    return { success: false, error: "Missing hostname" };
+  }
+
+  if (typeof tabId !== "number") {
+    return { success: false, error: "Missing tab id" };
+  }
+
+  await Promise.all([
+    clearCookiesForHostname(hostname),
+    clearTabStorage(tabId)
+  ]);
+
+  const { sessions, activeSessions } = await readSessionState();
+  delete activeSessions[hostname];
+  await writeSessionState(sessions, activeSessions);
+  await reloadTab(tabId);
+
+  return { success: true };
+}
+
 const messageHandlers = {
   "turnstile-detected": handleTurnstileDetectedMessage,
   "check-turnstile-status": handleCheckTurnstileStatusMessage,
@@ -922,7 +1432,13 @@ const messageHandlers = {
   "add-to-whitelist": handleAddToWhitelistMessage,
   "remove-from-whitelist": handleRemoveFromWhitelistMessage,
   "reset-config": handleResetConfigMessage,
-  "get-triggered-features": handleGetTriggeredFeaturesMessage
+  "get-triggered-features": handleGetTriggeredFeaturesMessage,
+  "get-sessions": handleGetSessionsMessage,
+  "save-session": handleSaveSessionMessage,
+  "switch-session": handleSwitchSessionMessage,
+  "delete-session": handleDeleteSessionMessage,
+  "rename-session": handleRenameSessionMessage,
+  "clear-current-session": handleClearCurrentSessionMessage
 };
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {

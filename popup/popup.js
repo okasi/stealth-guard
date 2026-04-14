@@ -2,7 +2,11 @@
 
 let currentConfig = null;
 let currentTab = null;
+let currentSessionHostname = "";
+let currentSessions = [];
+let activeSessionId = null;
 let pendingReloadTimeout = null;
+let listenersInitialized = false;
 const POPUP_RELOAD_DEBOUNCE_MS = 250;
 
 // ========== INITIALIZATION ==========
@@ -43,13 +47,19 @@ function loadConfig() {
 
             currentConfig = retryResponse.config;
             updateUI();
-            setupEventListeners();
+            if (!listenersInitialized) {
+              setupEventListeners();
+              listenersInitialized = true;
+            }
           });
         }, 100);
       } else {
         currentConfig = response.config;
         updateUI();
-        setupEventListeners();
+        if (!listenersInitialized) {
+          setupEventListeners();
+          listenersInitialized = true;
+        }
       }
     });
   } catch (e) {
@@ -70,8 +80,11 @@ function loadCurrentTab() {
       }
       if (tabs && tabs.length > 0) {
         currentTab = tabs[0];
+        currentSessionHostname = getTabHostname(currentTab);
         updateCurrentSite();
         updateTriggeredFeatures();
+        updateAllowlistHighlighting();
+        refreshSessionList();
       }
     });
   } catch (e) {
@@ -308,6 +321,143 @@ function updateCurrentSite() {
     urlElement.textContent = "Invalid URL";
     buttonElement.disabled = true;
   }
+}
+
+function getTabHostname(tab) {
+  if (!tab || !tab.url) {
+    return "";
+  }
+
+  try {
+    const url = new URL(tab.url);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return "";
+    }
+    return url.hostname.toLowerCase().replace(/^www\./, "");
+  } catch (error) {
+    return "";
+  }
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function formatSessionTime(timestamp) {
+  if (!timestamp) {
+    return "Never";
+  }
+
+  try {
+    return new Date(timestamp).toLocaleString();
+  } catch (error) {
+    return "Unknown";
+  }
+}
+
+function setSessionStatus(message, type = "") {
+  const statusElement = document.getElementById("session-status");
+  if (!statusElement) {
+    return;
+  }
+
+  statusElement.textContent = message || "";
+  statusElement.classList.remove("error", "success");
+
+  if (type === "error" || type === "success") {
+    statusElement.classList.add(type);
+  }
+}
+
+function updateSessionDomainLabel() {
+  const domainElement = document.getElementById("session-domain");
+  if (!domainElement) {
+    return;
+  }
+
+  domainElement.textContent = currentSessionHostname || "No active site";
+}
+
+function renderSessionList() {
+  const listElement = document.getElementById("session-list");
+  if (!listElement) {
+    return;
+  }
+
+  if (!currentSessionHostname) {
+    listElement.innerHTML = '<div class="session-list-empty">Open an HTTP(S) site to manage sessions.</div>';
+    return;
+  }
+
+  if (!currentSessions || currentSessions.length === 0) {
+    listElement.innerHTML = '<div class="session-list-empty">No saved sessions for this site.</div>';
+    return;
+  }
+
+  listElement.innerHTML = currentSessions.map((session) => {
+    const isActive = session.id === activeSessionId;
+    const switchLabel = isActive ? "Re-Switch" : "Switch";
+    return `
+      <div class="session-entry ${isActive ? "active" : ""}">
+        <div class="session-entry-header">
+          <div class="session-entry-name">${escapeHtml(session.name || "Unnamed Session")}</div>
+        </div>
+        <div class="session-entry-meta">Last used: ${escapeHtml(formatSessionTime(session.lastUsed))}</div>
+        <div class="session-entry-actions">
+          <button class="session-action-btn switch" data-action="switch" data-session-id="${escapeHtml(session.id)}">
+            <span class="btn-icon-inline" aria-hidden="true">🔄</span>
+            <span>${switchLabel}</span>
+          </button>
+          <button class="session-action-btn" data-action="rename" data-session-id="${escapeHtml(session.id)}">
+            <span class="btn-icon-inline" aria-hidden="true">✏️</span>
+            <span>Rename</span>
+          </button>
+          <button class="session-action-btn" data-action="delete" data-session-id="${escapeHtml(session.id)}">
+            <span class="btn-icon-inline" aria-hidden="true">🗑️</span>
+            <span>Delete</span>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function refreshSessionList() {
+  currentSessionHostname = getTabHostname(currentTab);
+  updateSessionDomainLabel();
+
+  if (!currentSessionHostname) {
+    currentSessions = [];
+    activeSessionId = null;
+    renderSessionList();
+    return;
+  }
+
+  chrome.runtime.sendMessage({
+    type: "get-sessions",
+    hostname: currentSessionHostname
+  }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.error("Failed to load sessions:", chrome.runtime.lastError);
+      setSessionStatus("Failed to load sessions.", "error");
+      return;
+    }
+
+    if (!response || response.success === false) {
+      const message = response && response.error ? response.error : "Failed to load sessions.";
+      setSessionStatus(message, "error");
+      return;
+    }
+
+    currentSessions = Array.isArray(response.sessions) ? response.sessions : [];
+    activeSessionId = response.activeSessionId || null;
+    renderSessionList();
+  });
 }
 
 // ========== HELPER: CHECK IF DOMAIN IN WHITELIST/ALLOWLIST ==========
@@ -614,6 +764,183 @@ function setupEventListeners() {
   if (testWebrtcButton) {
     testWebrtcButton.addEventListener('click', () => {
       chrome.tabs.create({ url: "https://dnscheck.tools/" });
+    });
+  }
+
+  const saveSessionButton = document.getElementById("save-session");
+  if (saveSessionButton) {
+    saveSessionButton.addEventListener("click", () => {
+      if (!currentTab || typeof currentTab.id !== "number" || !currentSessionHostname) {
+        setSessionStatus("Open an HTTP(S) tab first.", "error");
+        return;
+      }
+
+      const nameInput = document.getElementById("session-name-input");
+      const sessionName = nameInput ? nameInput.value : "";
+      setSessionStatus("Saving session...");
+
+      chrome.runtime.sendMessage({
+        type: "save-session",
+        hostname: currentSessionHostname,
+        tabId: currentTab.id,
+        name: sessionName
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error("Failed to save session:", chrome.runtime.lastError);
+          setSessionStatus("Failed to save session.", "error");
+          return;
+        }
+
+        if (!response || response.success === false) {
+          setSessionStatus((response && response.error) || "Failed to save session.", "error");
+          return;
+        }
+
+        if (nameInput) {
+          nameInput.value = "";
+        }
+
+        setSessionStatus("Session saved.", "success");
+        refreshSessionList();
+      });
+    });
+  }
+
+  const clearSessionButton = document.getElementById("clear-current-session");
+  if (clearSessionButton) {
+    clearSessionButton.addEventListener("click", () => {
+      if (!currentTab || typeof currentTab.id !== "number" || !currentSessionHostname) {
+        setSessionStatus("Open an HTTP(S) tab first.", "error");
+        return;
+      }
+
+      if (!confirm("Clear cookies and storage for this site in the current tab?")) {
+        return;
+      }
+
+      setSessionStatus("Clearing current session...");
+      chrome.runtime.sendMessage({
+        type: "clear-current-session",
+        hostname: currentSessionHostname,
+        tabId: currentTab.id
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error("Failed to clear current session:", chrome.runtime.lastError);
+          setSessionStatus("Failed to clear current session.", "error");
+          return;
+        }
+
+        if (!response || response.success === false) {
+          setSessionStatus((response && response.error) || "Failed to clear current session.", "error");
+          return;
+        }
+
+        setSessionStatus("Current session cleared.", "success");
+        refreshSessionList();
+      });
+    });
+  }
+
+  const sessionListElement = document.getElementById("session-list");
+  if (sessionListElement) {
+    sessionListElement.addEventListener("click", (event) => {
+      if (!(event.target instanceof Element)) {
+        return;
+      }
+
+      const button = event.target.closest("button[data-action]");
+      if (!button) {
+        return;
+      }
+
+      const action = button.getAttribute("data-action");
+      const sessionId = button.getAttribute("data-session-id");
+      if (!action || !sessionId) {
+        return;
+      }
+
+      if (action === "switch") {
+        if (!currentTab || typeof currentTab.id !== "number") {
+          setSessionStatus("No active tab found.", "error");
+          return;
+        }
+
+        setSessionStatus("Switching session...");
+        chrome.runtime.sendMessage({
+          type: "switch-session",
+          sessionId,
+          tabId: currentTab.id
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error("Failed to switch session:", chrome.runtime.lastError);
+            setSessionStatus("Failed to switch session.", "error");
+            return;
+          }
+
+          if (!response || response.success === false) {
+            setSessionStatus((response && response.error) || "Failed to switch session.", "error");
+            return;
+          }
+
+          setSessionStatus("Session switched.", "success");
+          refreshSessionList();
+        });
+        return;
+      }
+
+      if (action === "delete") {
+        if (!confirm("Delete this saved session?")) {
+          return;
+        }
+
+        chrome.runtime.sendMessage({
+          type: "delete-session",
+          sessionId
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error("Failed to delete session:", chrome.runtime.lastError);
+            setSessionStatus("Failed to delete session.", "error");
+            return;
+          }
+
+          if (!response || response.success === false) {
+            setSessionStatus((response && response.error) || "Failed to delete session.", "error");
+            return;
+          }
+
+          setSessionStatus("Session deleted.", "success");
+          refreshSessionList();
+        });
+        return;
+      }
+
+      if (action === "rename") {
+        const targetSession = currentSessions.find((session) => session.id === sessionId);
+        const renamed = prompt("Session name", targetSession && targetSession.name ? targetSession.name : "");
+        if (renamed === null) {
+          return;
+        }
+
+        chrome.runtime.sendMessage({
+          type: "rename-session",
+          sessionId,
+          name: renamed
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error("Failed to rename session:", chrome.runtime.lastError);
+            setSessionStatus("Failed to rename session.", "error");
+            return;
+          }
+
+          if (!response || response.success === false) {
+            setSessionStatus((response && response.error) || "Failed to rename session.", "error");
+            return;
+          }
+
+          setSessionStatus("Session renamed.", "success");
+          refreshSessionList();
+        });
+      }
     });
   }
 

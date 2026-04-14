@@ -17,13 +17,13 @@ This document is the canonical architecture summary for this repository as of th
 | Path | Responsibility |
 | --- | --- |
 | `manifest.json` | Extension entry points, permissions, script order, content script registration. |
-| `background.js` | Startup orchestration, runtime message hub, UA header spoofing, WebRTC policy control, proxy lifecycle, Turnstile bypass tracking, context menus, notifications. |
+| `background.js` | Startup orchestration, runtime message hub, UA header spoofing, WebRTC policy control, proxy lifecycle, Turnstile bypass tracking, per-site session save/switch handlers (cookies + tab storage), context menus, notifications. |
 | `content-scripts/injector.js` | Session-cached config bootstrap, global/feature allowlist gating, Turnstile detection + bridge, MAIN-world injection, fingerprint alert forwarding. |
 | `lib/config.js` | Config defaults/schema, deep merge with persisted data, default whitelist merging. Storage key: `stealth-guard-config`. |
 | `lib/storage.js` | Promise wrapper over `chrome.storage.local` (`read/write/remove/clear`). |
 | `lib/domainFilter.js` | Hostname extraction + wildcard allowlist matching (`example.com`, `*.example.com`, `webmail.*`, generic `*pattern*`) with parse/regex caches. |
 | `lib/proxy.js` | Proxy profile/routing helpers, bypass normalization, PAC generation, proxy mode application (`system`, `fixed_servers`, `pac_script`). |
-| `popup/popup.js` | Quick toggles, per-tab triggered-feature highlighting, current-site allowlist actions, debounced current-tab reload after config updates. |
+| `popup/popup.js` | Quick toggles, per-tab triggered-feature highlighting, current-site allowlist actions, per-site session switcher controls, debounced current-tab reload after config updates. |
 | `options/options.js` | Full settings UI, autosave/save/reset/import/export, proxy profile CRUD, duplicate-save suppression for unchanged configs. |
 
 ## Initialization Sequence
@@ -50,6 +50,8 @@ This document is the canonical architecture summary for this repository as of th
 
 - Persistent source of truth:
   - `chrome.storage.local["stealth-guard-config"]`
+  - `chrome.storage.local["stealth-guard-sessions"]`
+  - `chrome.storage.local["stealth-guard-active-sessions"]`
 - Background in-memory state:
   - `currentConfig`, `currentDomainFilter`, `configLoaded`, `initializationPromise`
   - Turnstile bypass map: `turnstileTimestamps` (hostname -> timestamp, 3-minute TTL)
@@ -77,6 +79,12 @@ This document is the canonical architecture summary for this repository as of th
 | Popup/Options -> Background | `add-to-whitelist` | `{ domain }` | `{ success, whitelist }` |
 | Popup/Options -> Background | `remove-from-whitelist` | `{ domain }` | `{ success, whitelist }` |
 | Popup -> Background | `get-triggered-features` | `{ tabId }` | `{ features: string[] }` |
+| Popup -> Background | `get-sessions` | `{ hostname }` | `{ success, sessions, activeSessionId }` |
+| Popup -> Background | `save-session` | `{ hostname, tabId, name }` | `{ success, session }` |
+| Popup -> Background | `switch-session` | `{ sessionId, tabId }` | `{ success }` |
+| Popup -> Background | `rename-session` | `{ sessionId, name }` | `{ success, session? }` |
+| Popup -> Background | `delete-session` | `{ sessionId }` | `{ success }` |
+| Popup -> Background | `clear-current-session` | `{ hostname, tabId }` | `{ success }` |
 | Injector -> Background | `turnstile-detected` | `{ hostname }` | `{ success, ignored? }` |
 | Injector -> Background | `check-turnstile-status` | `{ hostname }` | `{ skipUA, remainingSeconds? }` |
 | Injector -> Background | `fingerprint-detected` | `{ feature, hostname, url, timestamp }` | `{ success: true }` |
@@ -138,6 +146,11 @@ Implementation note:
    - Background applies base policy from config, then adjusts per-URL based on WebRTC allowlist.
    - Repeated identical policy sets are deduped.
 
+6. Session switch path:
+   - Popup requests/saves sessions keyed by normalized current hostname.
+   - Background snapshots cookies + current-tab `localStorage`/`sessionStorage` and persists locally.
+   - On switch/clear, background clears current site state, restores selected snapshot (for switch), and reloads tab.
+
 ## Current Behavior Notes (Non-Stale)
 
 - UA HTTP header spoofing uses `webRequest` blocking listener; DNR cleanup exists only for legacy rule removal.
@@ -147,4 +160,4 @@ Implementation note:
   - `fixed_servers` when only one active profile is needed and no global allowlist requires PAC.
   - `pac_script` when routes/global allowlist logic is required.
 - Options UI does not currently expose domain-route editing even though `lib/proxy.js` supports domain routes.
-
+- Saved session retention is capped per domain (`MAX_SAVED_SESSIONS_PER_DOMAIN = 20`) to avoid unbounded growth.
