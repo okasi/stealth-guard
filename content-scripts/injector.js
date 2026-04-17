@@ -4,7 +4,7 @@
 (function () {
   'use strict';
 
-  const CONFIG_VERSION = "1.0.2";  // Increment this to force cache refresh
+  const CONFIG_VERSION = "1.0.3";  // Increment this to force cache refresh
   const CONFIG_CACHE_KEY = "__STEALTH_GUARD_CONFIG_CACHE__";
   const CONFIG_CACHE_REFRESH_TS_KEY = "__STEALTH_GUARD_CONFIG_CACHE_REFRESH_TS__";
   const CONFIG_CACHE_REFRESH_TTL_MS = 3000;
@@ -12,6 +12,7 @@
   const TURNSTILE_BYPASS_TTL_MS = 3 * 60 * 1000;
   const TURNSTILE_OBSERVER_TIMEOUT_MS = 12000;
   const TURNSTILE_TRIGGER_CHECK_EVENT = "stealth-guard-trigger-check";
+  const DEFAULT_CLIENTRECTS_WHITELIST = "*.figma.com, *.miro.com, *.canva.com";
   const FINGERPRINT_ALERT_MAP = {
     "stealth-guard-canvas-alert": "canvas",
     "stealth-guard-webgl-alert": "webgl",
@@ -46,6 +47,32 @@
     // Always log errors
     console.error(...args);
   };
+
+  function mergeWhitelists(defaultWhitelist, userWhitelist) {
+    const defaultEntries = (defaultWhitelist || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const userEntries = (userWhitelist || "").split(",").map((s) => s.trim()).filter(Boolean);
+    const userEntriesLower = new Set(userEntries.map((entry) => entry.toLowerCase()));
+    const merged = [...userEntries];
+
+    for (const entry of defaultEntries) {
+      if (!userEntriesLower.has(entry.toLowerCase())) {
+        merged.push(entry);
+      }
+    }
+
+    return merged.join(", ");
+  }
+
+  function normalizeClientRectsConfig(clientRectsConfig) {
+    const normalized = (clientRectsConfig && typeof clientRectsConfig === "object")
+      ? { ...clientRectsConfig }
+      : {};
+    if (typeof normalized.enabled === "undefined") {
+      normalized.enabled = true;
+    }
+    normalized.whitelist = mergeWhitelists(DEFAULT_CLIENTRECTS_WHITELIST, normalized.whitelist);
+    return normalized;
+  }
 
   // ========== HELPER: DOMAIN ALLOWLIST CHECKER ==========
 
@@ -83,7 +110,7 @@
       canvas: { enabled: true, whitelist: "", noiseLevel: "medium" },
       webgl: { enabled: true, whitelist: "*.figma.com", preset: "auto" },
       font: { enabled: true, whitelist: "docs.google.com, figma.com" },
-      clientrects: { enabled: true, whitelist: "" },
+      clientrects: { enabled: true, whitelist: DEFAULT_CLIENTRECTS_WHITELIST },
       webgpu: { enabled: true, whitelist: "" },
       audiocontext: { enabled: true, whitelist: "" },
       timezone: { enabled: true, whitelist: "app.slack.com, webmail.*", offset: 60, name: "Europe/Paris" },
@@ -129,6 +156,7 @@
     config.useragent.preset = navigator.platform.includes("Mac") ? "macos" : "windows";
     debugLog("[Stealth Guard] Migrated User-Agent config to preset structure");
   }
+  config.clientrects = normalizeClientRectsConfig(config.clientrects);
 
   // Refresh cache in background (for next page load), throttled to avoid per-frame storage churn.
   let shouldRefreshCache = true;
@@ -184,6 +212,7 @@
       if (freshConfig.useragent && !freshConfig.useragent.preset) {
         freshConfig.useragent.preset = navigator.platform.includes("Mac") ? "macos" : "windows";
       }
+      freshConfig.clientrects = normalizeClientRectsConfig(freshConfig.clientrects);
 
       try {
         sessionStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(freshConfig));
