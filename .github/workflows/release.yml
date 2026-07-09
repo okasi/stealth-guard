@@ -1,6 +1,9 @@
 name: Build and Release
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 jobs:
@@ -25,11 +28,15 @@ jobs:
       - name: Run quality gate
         run: npm run check
 
-      - name: Read version from manifest
+      - name: Resolve release tag
         id: version
         run: |
-          VERSION=$(jq -r '.version' manifest.json)
-          echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            VERSION=$(jq -r '.version' manifest.json)
+            echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Package extension
         run: |
