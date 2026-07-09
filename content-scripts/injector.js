@@ -10,7 +10,7 @@
   const CONFIG_UPDATE_TOKEN = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
   const DEFAULT_CANVAS_WHITELIST = "*.notion.so, *.lovable.dev";
   const DEFAULT_CLIENTRECTS_WHITELIST = "*.figma.com, *.miro.com, *.canva.com";
-  const DEFAULT_WEBGL_WHITELIST = "*.figma.com, *.miro.com";
+  const DEFAULT_WEBGL_WHITELIST = "*.figma.com, *.miro.com, *.adguard-mail.com";
   const DEFAULT_FONT_WHITELIST = "docs.google.com, *.figma.com, *.discord.com, *.notion.so";
   const DEFAULT_TIMEZONE_WHITELIST = "app.slack.com, webmail.*";
   const DEFAULT_WEBRTC_WHITELIST = "meet.google.com, zoom.us, teams.microsoft.com, discord.com, web.whatsapp.com, messenger.com, web.telegram.org, figma.com";
