@@ -528,7 +528,7 @@ function updateAllowlistHighlighting() {
         isFeatureAllowlisted = isDomainInWhitelist(hostname, config.whitelist);
       }
 
-      if (isFeatureAllowlisted) {
+      if (isFeatureAllowlisted && featureRows[index]) {
         featureRows[index].classList.add('allowlisted-feature');
       }
     });
@@ -650,7 +650,7 @@ function setupEventListeners() {
       const timezoneValue = e.target.value;
       const [timezoneName, timezoneOffset] = timezoneValue.split('|');
       currentConfig.timezone.name = timezoneName;
-      currentConfig.timezone.offset = parseInt(timezoneOffset);
+      currentConfig.timezone.offset = parseInt(timezoneOffset, 10);
       saveConfig();
     });
   }
@@ -949,7 +949,7 @@ function setupEventListeners() {
 // ========== SAVE CONFIG ==========
 
 function scheduleCurrentTabReload() {
-  if (!currentTab || !currentTab.id) {
+  if (!currentTab || typeof currentTab.id !== "number") {
     return;
   }
 
@@ -959,7 +959,11 @@ function scheduleCurrentTabReload() {
 
   pendingReloadTimeout = setTimeout(() => {
     pendingReloadTimeout = null;
-    chrome.tabs.reload(currentTab.id);
+    chrome.tabs.reload(currentTab.id, () => {
+      if (chrome.runtime.lastError) {
+        console.error("Failed to reload current tab:", chrome.runtime.lastError);
+      }
+    });
   }, POPUP_RELOAD_DEBOUNCE_MS);
 }
 
@@ -971,6 +975,11 @@ function saveConfig() {
     }, (response) => {
       if (chrome.runtime.lastError) {
         console.error("Failed to save config:", chrome.runtime.lastError);
+        return;
+      }
+
+      if (!response || response.success === false) {
+        console.error("Failed to save config:", response && response.error ? response.error : response);
         return;
       }
 

@@ -1,0 +1,19 @@
+{
+  "name": "stealth-guard-by-okasi",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MV2-compatible browser fingerprinting protection extension.",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "syntax": "node tools/check-syntax.cjs",
+    "check": "npm run syntax && npm run coverage"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "4.1.10",
+    "vitest": "4.1.10"
+  }
+}

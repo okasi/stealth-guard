@@ -10,7 +10,7 @@ Stealth Guard is a privacy-focused browser extension designed to protect users f
 
 ## Data Collection
 
-**Stealth Guard does not collect or transmit any personal data.**
+**Stealth Guard does not collect telemetry, analytics, browsing history, or personal profile data.** Optional proxy tools can transmit the proxy host/IP to third-party lookup services as described below.
 
 ### What We Don't Collect
 
@@ -20,9 +20,9 @@ Stealth Guard is a privacy-focused browser extension designed to protect users f
 - No analytics or telemetry
 - No remote collection of cookies or tracking data
 
-### Local Storage Only
+### Local Extension Storage
 
-All extension settings and configurations are stored locally in your browser using the Chrome Storage API. This data never leaves your device and includes:
+Extension settings and configurations are stored locally in your browser using the Chrome Storage API. Optional proxy lookup/test actions can send the proxy host/IP to the third-party services listed below; other locally stored settings are not sent to Stealth Guard servers.
 
 - Your protection preferences (enabled/disabled features)
 - Custom allowlists (domains you've whitelisted)
@@ -38,7 +38,8 @@ Stealth Guard may make the following optional network requests:
 When using the proxy feature, the extension may query `ipinfo.io` or `ipapi.co` to display your proxy's apparent location. This is:
 - Only triggered when you explicitly use the proxy feature
 - Used solely to display location information to you
-- Not logged or stored by the extension
+- Stored locally with the proxy profile so the UI can show the saved proxy location
+- Never sent to any Stealth Guard server
 
 ### Proxy Connection Test (Optional)
 
@@ -57,7 +58,9 @@ The extension requests certain browser permissions to function. Here's why each 
 | `cookies` | Save and restore per-site sessions locally |
 | `privacy` | Control WebRTC IP handling |
 | `proxy` | Configure proxy settings |
-| `webRequest` | Modify HTTP headers for User-Agent spoofing |
+| `webRequest` / `webRequestBlocking` | Modify HTTP headers for User-Agent spoofing |
+| `webNavigation` | Reapply browser-global WebRTC policy during navigation |
+| `declarativeNetRequest` | Clean up legacy User-Agent spoofing rules |
 | `tabs` | Access current tab URL for context menu features |
 | `contextMenus` | Provide right-click menu options |
 | `notifications` | Show optional fingerprint detection alerts |
@@ -65,11 +68,11 @@ The extension requests certain browser permissions to function. Here's why each 
 
 ## Third-Party Services
 
-Stealth Guard does not integrate with any third-party analytics, advertising, or tracking services.
+Stealth Guard does not integrate with any third-party analytics, advertising, or tracking services. If you use proxy location or proxy test features, the extension may contact `ipinfo.io`, `ipapi.co`, or `api.ipify.org` to look up the proxy endpoint you entered or verify the active outbound IP.
 
 ## Data Sharing
 
-We do not share any data with third parties because we do not collect any data.
+We do not sell or share telemetry. Optional proxy tools may disclose the proxy host/IP being checked to the lookup services listed above.
 
 ## Children's Privacy
 

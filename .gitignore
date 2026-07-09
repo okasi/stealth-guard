@@ -9,9 +9,13 @@ Thumbs.db
 *.swo
 
 # Packages
+node_modules/
 *.zip
 *.crx
 *.pem
+
+# Coverage
+coverage/
 
 # Logs
 *.log

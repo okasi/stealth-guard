@@ -1,18 +1,20 @@
 // Content Script Injector - Runs in ISOLATED world and injects MAIN world script
 // This is necessary for Manifest V2 since it doesn't support world: "MAIN" directly
 
-(function () {
+(async function () {
   'use strict';
 
-  const CONFIG_VERSION = "1.0.3";  // Increment this to force cache refresh
-  const CONFIG_CACHE_KEY = "__STEALTH_GUARD_CONFIG_CACHE__";
-  const CONFIG_CACHE_REFRESH_TS_KEY = "__STEALTH_GUARD_CONFIG_CACHE_REFRESH_TS__";
-  const CONFIG_CACHE_REFRESH_TTL_MS = 3000;
-  const TURNSTILE_SESSION_KEY = "__STEALTH_GUARD_TURNSTILE_TS__";
-  const TURNSTILE_BYPASS_TTL_MS = 3 * 60 * 1000;
-  const TURNSTILE_OBSERVER_TIMEOUT_MS = 12000;
-  const TURNSTILE_TRIGGER_CHECK_EVENT = "stealth-guard-trigger-check";
+  const CONFIG_VERSION = "1.0.4";  // Increment this when document-start defaults change
+  const CONFIG_STORAGE_KEY = "stealth-guard-config";
+  const CONFIG_UPDATE_EVENT = "stealth-guard-config-update-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const CONFIG_UPDATE_TOKEN = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  const DEFAULT_CANVAS_WHITELIST = "*.notion.so, *.lovable.dev";
   const DEFAULT_CLIENTRECTS_WHITELIST = "*.figma.com, *.miro.com, *.canva.com";
+  const DEFAULT_WEBGL_WHITELIST = "*.figma.com, *.miro.com";
+  const DEFAULT_FONT_WHITELIST = "docs.google.com, *.figma.com, *.discord.com, *.notion.so";
+  const DEFAULT_TIMEZONE_WHITELIST = "app.slack.com, webmail.*";
+  const DEFAULT_WEBRTC_WHITELIST = "meet.google.com, zoom.us, teams.microsoft.com, discord.com, web.whatsapp.com, messenger.com, web.telegram.org, figma.com";
+  const DEFAULT_WEBGPU_WHITELIST = "*.lovable.dev";
   const FINGERPRINT_ALERT_MAP = {
     "stealth-guard-canvas-alert": "canvas",
     "stealth-guard-webgl-alert": "webgl",
@@ -48,21 +50,6 @@
     console.error(...args);
   };
 
-  function mergeWhitelists(defaultWhitelist, userWhitelist) {
-    const defaultEntries = (defaultWhitelist || "").split(",").map((s) => s.trim()).filter(Boolean);
-    const userEntries = (userWhitelist || "").split(",").map((s) => s.trim()).filter(Boolean);
-    const userEntriesLower = new Set(userEntries.map((entry) => entry.toLowerCase()));
-    const merged = [...userEntries];
-
-    for (const entry of defaultEntries) {
-      if (!userEntriesLower.has(entry.toLowerCase())) {
-        merged.push(entry);
-      }
-    }
-
-    return merged.join(", ");
-  }
-
   function normalizeClientRectsConfig(clientRectsConfig) {
     const normalized = (clientRectsConfig && typeof clientRectsConfig === "object")
       ? { ...clientRectsConfig }
@@ -70,7 +57,22 @@
     if (typeof normalized.enabled === "undefined") {
       normalized.enabled = true;
     }
-    normalized.whitelist = mergeWhitelists(DEFAULT_CLIENTRECTS_WHITELIST, normalized.whitelist);
+    if (typeof normalized.whitelist === "undefined" || normalized.whitelist === null) {
+      normalized.whitelist = DEFAULT_CLIENTRECTS_WHITELIST;
+    }
+    return normalized;
+  }
+
+  function normalizeFeatureWhitelistConfig(featureConfig, defaultWhitelist) {
+    const normalized = (featureConfig && typeof featureConfig === "object")
+      ? { ...featureConfig }
+      : {};
+    if (typeof normalized.enabled === "undefined") {
+      normalized.enabled = true;
+    }
+    if (typeof normalized.whitelist === "undefined" || normalized.whitelist === null) {
+      normalized.whitelist = defaultWhitelist;
+    }
     return normalized;
   }
 
@@ -83,47 +85,97 @@
 
   // ========== IMMEDIATE INLINE INJECTION ==========
 
-  // Try to read cached config from sessionStorage (synchronous!)
-  let config;
-  let configFromCache = false;
+  const defaultContentConfig = {
+    _version: CONFIG_VERSION,
+    enabled: true,
+    globalWhitelist: "",
+    canvas: { enabled: true, whitelist: DEFAULT_CANVAS_WHITELIST, noiseLevel: "medium" },
+    webgl: { enabled: true, whitelist: DEFAULT_WEBGL_WHITELIST, preset: "auto" },
+    font: { enabled: true, whitelist: DEFAULT_FONT_WHITELIST },
+    clientrects: { enabled: true, whitelist: DEFAULT_CLIENTRECTS_WHITELIST },
+    webgpu: { enabled: true, whitelist: DEFAULT_WEBGPU_WHITELIST },
+    audiocontext: { enabled: true, whitelist: "" },
+    timezone: { enabled: true, whitelist: DEFAULT_TIMEZONE_WHITELIST, offset: 60, name: "Europe/Paris" },
+    useragent: { enabled: true, whitelist: "", preset: navigator.platform.includes("Mac") ? "macos" : "windows" },
+    webrtc: { enabled: true, whitelist: DEFAULT_WEBRTC_WHITELIST, policy: "disable_non_proxied_udp" },
+    notifications: { enabled: false, showFingerprints: true }
+  };
 
-  try {
-    const cached = sessionStorage.getItem(CONFIG_CACHE_KEY);
-    if (cached) {
-      const parsedCache = JSON.parse(cached);
-      // Check if cache has version and globalWhitelist field (new in 1.0.1)
-      if (parsedCache._version === CONFIG_VERSION && 'globalWhitelist' in parsedCache) {
-        config = parsedCache;
-        configFromCache = true;
-      }
-    }
-  } catch (e) {
-    // Ignore errors
-  }
-
-  // Fallback to defaults if no cache or outdated cache
-  if (!config) {
-    config = {
-      _version: CONFIG_VERSION,
-      enabled: true,
-      globalWhitelist: "",
-      canvas: { enabled: true, whitelist: "", noiseLevel: "medium" },
-      webgl: { enabled: true, whitelist: "*.figma.com", preset: "auto" },
-      font: { enabled: true, whitelist: "docs.google.com, figma.com" },
-      clientrects: { enabled: true, whitelist: DEFAULT_CLIENTRECTS_WHITELIST },
-      webgpu: { enabled: true, whitelist: "" },
-      audiocontext: { enabled: true, whitelist: "" },
-      timezone: { enabled: true, whitelist: "app.slack.com, webmail.*", offset: 60, name: "Europe/Paris" },
-      useragent: { enabled: true, whitelist: "", preset: "macos" },
-      webrtc: { enabled: true, whitelist: "meet.google.com, zoom.us, teams.microsoft.com, discord.com, web.whatsapp.com, messenger.com, web.telegram.org, figma.com", policy: "disable_non_proxied_udp" },
-      notifications: { enabled: false, showFingerprints: true }  // Default to debug OFF
+  function buildContentConfig(sourceConfig) {
+    const source = sourceConfig && typeof sourceConfig === "object" ? sourceConfig : {};
+    const nextConfig = {
+      ...defaultContentConfig,
+      ...source,
+      canvas: normalizeFeatureWhitelistConfig(source.canvas, DEFAULT_CANVAS_WHITELIST),
+      webgl: normalizeFeatureWhitelistConfig(source.webgl, DEFAULT_WEBGL_WHITELIST),
+      font: normalizeFeatureWhitelistConfig(source.font, DEFAULT_FONT_WHITELIST),
+      clientrects: normalizeClientRectsConfig(source.clientrects),
+      webgpu: normalizeFeatureWhitelistConfig(source.webgpu, DEFAULT_WEBGPU_WHITELIST),
+      audiocontext: normalizeFeatureWhitelistConfig(source.audiocontext, ""),
+      timezone: normalizeFeatureWhitelistConfig(source.timezone, DEFAULT_TIMEZONE_WHITELIST),
+      useragent: normalizeFeatureWhitelistConfig(source.useragent, ""),
+      webrtc: normalizeFeatureWhitelistConfig(source.webrtc, DEFAULT_WEBRTC_WHITELIST),
+      notifications: {
+        ...defaultContentConfig.notifications,
+        ...(source.notifications && typeof source.notifications === "object" ? source.notifications : {})
+      },
+      _version: CONFIG_VERSION
     };
+
+    if (!nextConfig.canvas.noiseLevel) {
+      nextConfig.canvas.noiseLevel = "medium";
+    }
+    if (!nextConfig.webgl.preset) {
+      nextConfig.webgl.preset = "auto";
+    }
+    if (!nextConfig.timezone.offset && nextConfig.timezone.offset !== 0) {
+      nextConfig.timezone.offset = 60;
+    }
+    if (!nextConfig.timezone.name) {
+      nextConfig.timezone.name = "Europe/Paris";
+    }
+    if (!nextConfig.useragent.preset) {
+      nextConfig.useragent.preset = navigator.platform.includes("Mac") ? "macos" : "windows";
+    }
+    if (!nextConfig.webrtc.policy) {
+      nextConfig.webrtc.policy = "disable_non_proxied_udp";
+    }
+    return nextConfig;
   }
+
+  function loadStoredContentConfig() {
+    return new Promise((resolve) => {
+      try {
+        if (!chrome || !chrome.storage || !chrome.storage.local) {
+          resolve(buildContentConfig(defaultContentConfig));
+          return;
+        }
+
+        chrome.storage.local.get(CONFIG_STORAGE_KEY, (result) => {
+          if (chrome.runtime && chrome.runtime.lastError) {
+            debugWarn("[Stealth Guard] Failed to load stored config:", chrome.runtime.lastError);
+            resolve(buildContentConfig(defaultContentConfig));
+            return;
+          }
+
+          resolve(buildContentConfig(result && result[CONFIG_STORAGE_KEY]));
+        });
+      } catch (e) {
+        debugWarn("[Stealth Guard] Failed to read stored config:", e);
+        resolve(buildContentConfig(defaultContentConfig));
+      }
+    });
+  }
+
+  // MV2 cannot synchronously read chrome.storage.local at document_start.
+  // Inject immediately with non-forgeable safe defaults, then deliver trusted
+  // extension storage through an authenticated MAIN-world update channel.
+  let config = buildContentConfig(defaultContentConfig);
 
   // Set debug logging state based on config
   // Only enable if explicitly set to true in config
   debugEnabled = !!(config.notifications && config.notifications.enabled);
-  debugLog("[Stealth Guard] Using cached config from sessionStorage");
+  debugLog("[Stealth Guard] Using document-start content config");
   debugLog("[Stealth Guard] Debug logging:", debugEnabled ? "enabled" : "disabled");
 
   // Migrate old config structure if needed
@@ -136,11 +188,6 @@
   if (typeof config.globalWhitelist === 'undefined' || config.globalWhitelist === null) {
     config.globalWhitelist = "";
     debugLog("[Stealth Guard] Added empty globalWhitelist field");
-    // Force cache update
-    try {
-      config._version = CONFIG_VERSION;
-      sessionStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(config));
-    } catch (e) {}
   }
   // Migrate vendor/renderer -> preset
   if (config.webgl && !config.webgl.preset) {
@@ -156,71 +203,23 @@
     config.useragent.preset = navigator.platform.includes("Mac") ? "macos" : "windows";
     debugLog("[Stealth Guard] Migrated User-Agent config to preset structure");
   }
+  config.canvas = normalizeFeatureWhitelistConfig(config.canvas, DEFAULT_CANVAS_WHITELIST);
+  config.webgl = normalizeFeatureWhitelistConfig(config.webgl, DEFAULT_WEBGL_WHITELIST);
+  config.font = normalizeFeatureWhitelistConfig(config.font, DEFAULT_FONT_WHITELIST);
   config.clientrects = normalizeClientRectsConfig(config.clientrects);
-
-  // Refresh cache in background (for next page load), throttled to avoid per-frame storage churn.
-  let shouldRefreshCache = true;
-  try {
-    const lastRefreshTs = parseInt(sessionStorage.getItem(CONFIG_CACHE_REFRESH_TS_KEY) || "0", 10);
-    shouldRefreshCache = Number.isNaN(lastRefreshTs) || (Date.now() - lastRefreshTs >= CONFIG_CACHE_REFRESH_TTL_MS);
-  } catch (e) {
-    shouldRefreshCache = true;
+  config.webgpu = normalizeFeatureWhitelistConfig(config.webgpu, DEFAULT_WEBGPU_WHITELIST);
+  config.audiocontext = normalizeFeatureWhitelistConfig(config.audiocontext, "");
+  config.timezone = normalizeFeatureWhitelistConfig(config.timezone, DEFAULT_TIMEZONE_WHITELIST);
+  config.useragent = normalizeFeatureWhitelistConfig(config.useragent, "");
+  config.webrtc = normalizeFeatureWhitelistConfig(config.webrtc, DEFAULT_WEBRTC_WHITELIST);
+  if (!config.webgl.preset) {
+    config.webgl.preset = "auto";
   }
-
-  if (shouldRefreshCache) {
-    try {
-      sessionStorage.setItem(CONFIG_CACHE_REFRESH_TS_KEY, String(Date.now()));
-    } catch (e) {
-      // Ignore errors
-    }
-
-    chrome.storage.local.get("stealth-guard-config", (result) => {
-      const storedConfig = result["stealth-guard-config"] || {};
-      const freshConfig = {
-        _version: CONFIG_VERSION,
-        enabled: typeof storedConfig.enabled !== 'undefined' ? storedConfig.enabled : config.enabled,
-        globalWhitelist: typeof storedConfig.globalWhitelist !== 'undefined' ? storedConfig.globalWhitelist : (config.globalWhitelist || ""),
-        canvas: storedConfig.canvas || config.canvas,
-        webgl: storedConfig.webgl || config.webgl,
-        font: storedConfig.font || config.font,
-        clientrects: storedConfig.clientrects || config.clientrects,
-        webgpu: storedConfig.webgpu || config.webgpu,
-        audiocontext: storedConfig.audiocontext || config.audiocontext,
-        timezone: storedConfig.timezone || config.timezone,
-        useragent: storedConfig.useragent || config.useragent,
-        webrtc: storedConfig.webrtc || config.webrtc,
-        notifications: storedConfig.notifications || config.notifications
-      };
-
-      // Migrate old structures
-      // Add global enabled field if missing
-      if (typeof freshConfig.enabled === 'undefined') {
-        freshConfig.enabled = true;
-      }
-      // CRITICAL: Ensure globalWhitelist exists
-      if (typeof freshConfig.globalWhitelist === 'undefined' || freshConfig.globalWhitelist === null) {
-        freshConfig.globalWhitelist = "";
-      }
-      // Empty string "" is valid - means no domains are excluded
-      if (freshConfig.webgl && !freshConfig.webgl.preset) {
-        freshConfig.webgl.preset = "auto";
-      }
-      // Migrate old Apple device presets to unified "apple" preset
-      if (freshConfig.webgl && (freshConfig.webgl.preset === "m1_air" || freshConfig.webgl.preset === "intel_mbp" || freshConfig.webgl.preset === "iphone_x")) {
-        freshConfig.webgl.preset = "apple";
-      }
-      if (freshConfig.useragent && !freshConfig.useragent.preset) {
-        freshConfig.useragent.preset = navigator.platform.includes("Mac") ? "macos" : "windows";
-      }
-      freshConfig.clientrects = normalizeClientRectsConfig(freshConfig.clientrects);
-
-      try {
-        sessionStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(freshConfig));
-        debugLog("[Stealth Guard] Config cache updated for next page load");
-      } catch (e) {
-        // Ignore errors
-      }
-    });
+  if (!config.useragent.preset) {
+    config.useragent.preset = navigator.platform.includes("Mac") ? "macos" : "windows";
+  }
+  if (!config.webrtc.policy) {
+    config.webrtc.policy = "disable_non_proxied_udp";
   }
 
   // Skip injection entirely if global protection is disabled
@@ -256,7 +255,9 @@
     'challenges.cloudflare.com'
   ];
   const currentHostname = window.location.hostname;
-  if (CHALLENGE_DOMAINS.some(d => currentHostname === d || currentHostname.endsWith('.' + d))) {
+  const isChallengeDomain = CHALLENGE_DOMAINS.some(d => currentHostname === d || currentHostname.endsWith('.' + d));
+
+  if (isChallengeDomain) {
     debugLog("[Stealth Guard] Skipping protections for challenge domain:", currentHostname);
     return;
   }
@@ -282,174 +283,10 @@
     debugLog("[Stealth Guard] No global whitelist configured, protections will activate");
   }
 
-  // ========== CLOUDFLARE TURNSTILE DETECTION ==========
-  // Simple, reliable detection with 3-minute persistence per domain
-  // Moved to Content Script to ensure access to chrome.runtime
-  function detectTurnstile() {
-    try {
-      // Check URL patterns (fastest, most reliable)
-      if (window.location.href.includes('__cf_chl_rt_tk=') ||
-          window.location.pathname.includes('cdn-cgi/challenge-platform')) {
-        debugLog("[Stealth Guard] Turnstile detected: URL pattern");
-        return true;
-      }
-
-      // Check page title (with three dots variation)
-      const title = document.title;
-      if (title && (title.includes('Just a moment') ||
-                    title.includes('Attention Required') ||
-                    title.includes('Checking your browser'))) {
-        debugLog("[Stealth Guard] Turnstile detected: page title '" + title + "'");
-        return true;
-      }
-
-      // REMOVED: Ray ID check caused false positives on normal sites (e.g. BrowserLeaks)
-      // because many sites display the Ray ID in the footer.
-
-      // Check DOM for Turnstile elements
-      if (document.querySelector('input[name="cf-turnstile-response"]') ||
-          document.querySelector('[id*="cf-chl-widget"]') ||
-          document.querySelector('.cf-turnstile') ||
-          document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
-          document.querySelector('[data-sitekey]')) {
-        debugLog("[Stealth Guard] Turnstile detected: DOM element found");
-        return true;
-      }
-    } catch (e) {
-      // Ignore errors during detection
-    }
-    return false;
-  }
-
-  // Detect Turnstile and notify background script
-  const hasTurnstile = detectTurnstile();
-
-  // Helper to check bypass status
-  const isBypassingTurnstile = () => {
-    try {
-      const ts = sessionStorage.getItem(TURNSTILE_SESSION_KEY);
-      return ts && (Date.now() - parseInt(ts, 10) < TURNSTILE_BYPASS_TTL_MS);
-    } catch(e) { return false; }
-  };
-
-  if (hasTurnstile) {
-    if (isBypassingTurnstile()) {
-      debugLog("[Stealth Guard] Turnstile detected but bypass mode active - skipping notification");
-    } else {
-      debugLog("[Stealth Guard] Cloudflare Turnstile detected - notifying background script");
-
-      // Get the TOP-LEVEL hostname (not iframe hostname)
-      let topHostname = window.location.hostname;
-      try {
-        if (window.top !== window.self) {
-          // We're in an iframe, try to get parent hostname
-          topHostname = window.top.location.hostname;
-        }
-      } catch (e) {
-        // Cross-origin iframe, can't access - use document.referrer as fallback
-        if (document.referrer) {
-          try {
-            const referrerUrl = new URL(document.referrer);
-            topHostname = referrerUrl.hostname;
-            debugLog("[Stealth Guard] Using referrer hostname:", topHostname);
-          } catch (err) {
-            // Fallback failed, use current hostname
-          }
-        }
-      }
-
-      debugLog("[Stealth Guard] Notifying for hostname:", topHostname);
-
-      // Notify background script to temporarily disable UA spoofing for this domain
-      try {
-        chrome.runtime.sendMessage({
-          type: "turnstile-detected",
-          hostname: topHostname
-        });
-      } catch (e) {
-        debugLog("[Stealth Guard] Failed to notify background about Turnstile:", e);
-      }
-    }
-  } else {
-    // If not detected immediately, set up observers for late detection
-    if (document.readyState !== 'complete') {
-      let observer = null;
-      let observerTimeoutId = null;
-
-      const disconnectTurnstileObserver = () => {
-        if (observerTimeoutId) {
-          clearTimeout(observerTimeoutId);
-          observerTimeoutId = null;
-        }
-        if (observer) {
-          observer.disconnect();
-          observer = null;
-        }
-      };
-
-      observer = new MutationObserver(() => {
-        if (detectTurnstile()) {
-          disconnectTurnstileObserver();
-
-          if (isBypassingTurnstile()) {
-            debugLog("[Stealth Guard] Turnstile detected late but bypass mode active - skipping notification");
-            return;
-          }
-
-          debugLog("[Stealth Guard] Cloudflare Turnstile detected late (MutationObserver)");
-
-          let topHostname = window.location.hostname;
-          try {
-            if (window.top !== window.self) topHostname = window.top.location.hostname;
-          } catch(e) {}
-
-          try {
-            chrome.runtime.sendMessage({
-              type: "turnstile-detected",
-              hostname: topHostname
-            });
-          } catch (e) {}
-        }
-      });
-
-      observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true
-      });
-
-      observerTimeoutId = setTimeout(() => {
-        disconnectTurnstileObserver();
-      }, TURNSTILE_OBSERVER_TIMEOUT_MS);
-
-      // Also check on DOMContentLoaded
-      window.addEventListener('DOMContentLoaded', () => {
-        if (detectTurnstile()) {
-          disconnectTurnstileObserver();
-
-          if (isBypassingTurnstile()) {
-            debugLog("[Stealth Guard] Turnstile detected (DOMContentLoaded) but bypass mode active - skipping notification");
-            return;
-          }
-
-          debugLog("[Stealth Guard] Cloudflare Turnstile detected (DOMContentLoaded)");
-
-          let topHostname = window.location.hostname;
-          try {
-            if (window.top !== window.self) topHostname = window.top.location.hostname;
-          } catch(e) {}
-
-          try {
-            chrome.runtime.sendMessage({
-              type: "turnstile-detected",
-              hostname: topHostname
-            });
-          } catch (e) {}
-        } else {
-          disconnectTurnstileObserver();
-        }
-      }, { once: true });
-    }
-  }
+  // Top-level pages do not trigger Turnstile UA bypass from page-controlled
+  // URL/title/DOM signals. Cloudflare-owned challenge frames are left clean
+  // without granting the embedding site a real-UA bypass.
+  const hasTurnstile = false;
 
   // Build inline protection code
   const inlineCode = `
@@ -457,7 +294,26 @@
       'use strict';
 
       const config = ` + JSON.stringify(config) + `;
+      const configUpdateEvent = ` + JSON.stringify(CONFIG_UPDATE_EVENT) + `;
+      const configUpdateToken = ` + JSON.stringify(CONFIG_UPDATE_TOKEN) + `;
       const hasTurnstile = ${hasTurnstile};
+
+      const replaceConfig = function(nextConfig) {
+        if (!nextConfig || typeof nextConfig !== "object") return;
+        Object.keys(config).forEach(function(key) {
+          delete config[key];
+        });
+        Object.assign(config, nextConfig);
+      };
+
+      const receiveConfigUpdate = function(event) {
+        if (!event || !event.detail || event.detail.token !== configUpdateToken) {
+          return;
+        }
+        replaceConfig(event.detail.config);
+      };
+
+      window.addEventListener(configUpdateEvent, receiveConfigUpdate, true);
 
       // Helper function for debug logging
       const debugLog = function(...args) {
@@ -477,35 +333,7 @@
         console.error(...args);
       };
 
-      // Check for Turnstile bypass flag in sessionStorage
-      let turnstileBypassActive = false;
-      let turnstileBypassTimestamp = null;
-      try {
-        const turnstileTs = sessionStorage.getItem('${TURNSTILE_SESSION_KEY}');
-        if (turnstileTs) {
-          turnstileBypassTimestamp = turnstileTs;
-          const ts = parseInt(turnstileTs, 10);
-          const now = Date.now();
-          const age = now - ts;
-          if (age < ${TURNSTILE_BYPASS_TTL_MS}) {
-            turnstileBypassActive = true;
-            debugLog('[Stealth Guard] SessionStorage bypass flag found. Age:', Math.round(age/1000) + 's');
-          } else {
-            debugLog('[Stealth Guard] SessionStorage bypass flag EXPIRED. Age:', Math.round(age/1000) + 's');
-            sessionStorage.removeItem('${TURNSTILE_SESSION_KEY}');
-          }
-        }
-      } catch (e) {
-        debugWarn('[Stealth Guard] Failed to read sessionStorage:', e);
-      }
-
-      // If Turnstile bypass is active, we used to disable ALL protections.
-      // Now we only disable User-Agent spoofing (handled in specific feature check)
-      // and rely on iframe exclusions to keep the challenge frame clean.
-      // This allows Canvas/WebGL protections to remain active on the main page.
-      if (turnstileBypassActive) {
-        debugLog("[Stealth Guard] Turnstile bypass active - User-Agent spoofing will be disabled, but other protections remain active");
-      } else if (hasTurnstile) {
+      if (hasTurnstile) {
          debugLog("[Stealth Guard] Turnstile detected on page load - proceeding with protections (will reload shortly if not bypassed)");
       }
 
@@ -586,31 +414,19 @@
         });
       };
 
-      // Helper to check if the caller is a known challenge script (Stack Trace Analysis)
-      // This allows Cloudflare Turnstile to verify the browser (seeing clean data)
-      // while other scripts on the page see noisy data (protection active).
       const shouldBypassForCaller = function(feature) {
-        try {
-          const err = new Error();
-          if (!err.stack) return false;
+        return false;
+      };
 
-          // Normalize stack trace to lowercase for case-insensitive matching
-          const stack = err.stack.toLowerCase();
-
-          // Check for Cloudflare/Turnstile keywords in the stack trace
-          // STRICT MODE: Only trust scripts from the official Cloudflare challenge domain.
-          // We exclude generic /cdn-cgi/ paths because they are used by sites for analytics/fingerprinting
-          // and whitelisting them would break protection on many sites.
-          const isChallenge = stack.includes('challenges.cloudflare.com');
-
-          if (isChallenge) {
-             debugLog(\`[Stealth Guard] Bypassing \${feature} for trusted caller in stack\`);
-             return true;
-          }
-          return false;
-        } catch(e) {
-          return false;
-        }
+      const isFeatureActive = function(featureName) {
+        const featureConfig = config[featureName];
+        return !!(
+          config.enabled &&
+          featureConfig &&
+          featureConfig.enabled &&
+          !isDomainWhitelisted(config.globalWhitelist || "") &&
+          !isDomainWhitelisted(featureConfig.whitelist || "")
+        );
       };
 
       // Helper to make functions look native (toString stealth)
@@ -635,7 +451,7 @@
       debugLog("[Stealth Guard] Inline protections activating...");
 
     // ========== CANVAS PROTECTION ==========
-    if (config.enabled && config.canvas && config.canvas.enabled && !isDomainWhitelisted(config.canvas.whitelist)) {
+    if (config.canvas) {
       const getImageData = CanvasRenderingContext2D.prototype.getImageData;
 
       // Helper function to add noise efficiently
@@ -677,6 +493,9 @@
       // Direct function replacement (faster than Proxy)
       const originalToBlob = HTMLCanvasElement.prototype.toBlob;
       HTMLCanvasElement.prototype.toBlob = function() {
+        if (!isFeatureActive('canvas')) {
+          return originalToBlob.apply(this, arguments);
+        }
         const context = this.getContext("2d");
         if (context && this.width && this.height) {
           // Get a copy of the canvas data
@@ -702,6 +521,9 @@
 
       const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
       HTMLCanvasElement.prototype.toDataURL = function() {
+        if (!isFeatureActive('canvas')) {
+          return originalToDataURL.apply(this, arguments);
+        }
         const context = this.getContext("2d");
         if (context && this.width && this.height) {
           // Get a copy of the canvas data
@@ -727,6 +549,9 @@
 
       CanvasRenderingContext2D.prototype.getImageData = function() {
         const imageData = getImageData.apply(this, arguments);
+        if (!isFeatureActive('canvas')) {
+          return imageData;
+        }
         addCanvasNoise(imageData);
         window.top.postMessage("stealth-guard-canvas-alert", '*');
         return imageData;
@@ -738,7 +563,7 @@
 
     // ========== WEBGL PROTECTION ==========
     // Inspired by WebGL Fingerprint Defender - comprehensive parameter spoofing
-    if (config.enabled && config.webgl && config.webgl.enabled && !isDomainWhitelisted(config.webgl.whitelist)) {
+    if (config.webgl) {
       // Random helper functions (from WebGL Fingerprint Defender)
       const randomConfig = {
         random: {
@@ -806,22 +631,21 @@
         }
       };
 
-      // Determine which preset to use
-      let preset = config.webgl.preset || "auto";
-      if (preset === "auto") {
-        // Auto-select based on user-agent
-        const uaPreset = config.useragent?.preset || "macos";
-        const presetMap = {
-          macos: "apple",
-          macos_chrome: "apple",
-          windows: "surface_pro_7",
-          iphone: "apple",
-          android: "pixel_4"
-        };
-        preset = presetMap[uaPreset] || "apple";
-      }
-
-      const deviceInfo = WEBGL_PRESETS[preset] || WEBGL_PRESETS.apple;
+      const getWebGLDeviceInfo = function() {
+        let preset = config.webgl && config.webgl.preset ? config.webgl.preset : "auto";
+        if (preset === "auto") {
+          const uaPreset = config.useragent && config.useragent.preset ? config.useragent.preset : "macos";
+          const presetMap = {
+            macos: "apple",
+            macos_chrome: "apple",
+            windows: "surface_pro_7",
+            iphone: "apple",
+            android: "pixel_4"
+          };
+          preset = presetMap[uaPreset] || "apple";
+        }
+        return WEBGL_PRESETS[preset] || WEBGL_PRESETS.apple;
+      };
 
       // Helper function to spoof WebGL parameters
       const spoofParameter = function(target) {
@@ -829,12 +653,16 @@
 
         proto.getParameter = new Proxy(proto.getParameter, {
           apply(target, self, args) {
-            // Bypass for Turnstile/Cloudflare scripts
+            if (!isFeatureActive('webgl')) {
+              return Reflect.apply(target, self, args);
+            }
+            // Reserved caller bypass hook; currently disabled.
             if (shouldBypassForCaller('webgl')) {
               return Reflect.apply(target, self, args);
             }
 
             window.top.postMessage("stealth-guard-webgl-alert", '*');
+            const deviceInfo = getWebGLDeviceInfo();
 
             // Comprehensive parameter spoofing with consistent device-specific values
             if (args[0] === 3415) return 0;  // GL_ALPHA_BITS
@@ -875,15 +703,21 @@
 
         proto.bufferData = new Proxy(proto.bufferData, {
           apply(target, self, args) {
-            // Bypass for Turnstile/Cloudflare scripts
+            if (!isFeatureActive('webgl')) {
+              return Reflect.apply(target, self, args);
+            }
+            // Reserved caller bypass hook; currently disabled.
             if (shouldBypassForCaller('webgl')) {
               return Reflect.apply(target, self, args);
             }
 
-            let index = Math.floor(randomConfig.random.value() * args[1].length);
-            let noise = args[1][index] !== undefined ? 0.1 * randomConfig.random.value() * args[1][index] : 0;
-            args[1][index] = args[1][index] + noise;
-            window.top.postMessage("stealth-guard-webgl-alert", '*');
+            const buffer = args[1];
+            if (buffer && typeof buffer.length === 'number' && buffer.length > 0) {
+              let index = Math.floor(randomConfig.random.value() * buffer.length);
+              let noise = buffer[index] !== undefined ? 0.1 * randomConfig.random.value() * buffer[index] : 0;
+              buffer[index] = buffer[index] + noise;
+              window.top.postMessage("stealth-guard-webgl-alert", '*');
+            }
             return Reflect.apply(target, self, args);
           }
         });
@@ -894,7 +728,7 @@
         if (typeof WebGLRenderingContext !== 'undefined') {
           spoofParameter(WebGLRenderingContext);
           spoofBuffer(WebGLRenderingContext);
-          debugLog("[Stealth Guard] WebGL 1.0 protection activated:", deviceInfo.description);
+          debugLog("[Stealth Guard] WebGL 1.0 protection activated");
         }
       } catch (e) {
         debugWarn("[Stealth Guard] Failed to protect WebGLRenderingContext:", e);
@@ -904,7 +738,7 @@
         if (typeof WebGL2RenderingContext !== 'undefined') {
           spoofParameter(WebGL2RenderingContext);
           spoofBuffer(WebGL2RenderingContext);
-          debugLog("[Stealth Guard] WebGL 2.0 protection activated:", deviceInfo.description);
+          debugLog("[Stealth Guard] WebGL 2.0 protection activated");
         }
       } catch (e) {
         debugWarn("[Stealth Guard] Failed to protect WebGL2RenderingContext:", e);
@@ -941,7 +775,7 @@
     }
 
     // ========== FONT PROTECTION ==========
-    if (config.enabled && config.font && config.font.enabled && !isDomainWhitelisted(config.font.whitelist)) {
+    if (config.font) {
       // Random noise functions - from Font Fingerprint Defender
       const rand = {
         noise: function() {
@@ -966,7 +800,10 @@
         Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
           "get": new Proxy(Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth").get, {
             apply(target, self, args) {
-              // Bypass for Turnstile/Cloudflare scripts
+              if (!isFeatureActive('font')) {
+                return Reflect.apply(target, self, args);
+              }
+              // Reserved caller bypass hook; currently disabled.
               if (shouldBypassForCaller('font')) {
                 return Reflect.apply(target, self, args);
               }
@@ -990,7 +827,10 @@
         Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
           "get": new Proxy(Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight").get, {
             apply(target, self, args) {
-              // Bypass for Turnstile/Cloudflare scripts
+              if (!isFeatureActive('font')) {
+                return Reflect.apply(target, self, args);
+              }
+              // Reserved caller bypass hook; currently disabled.
               if (shouldBypassForCaller('font')) {
                 return Reflect.apply(target, self, args);
               }
@@ -1009,6 +849,7 @@
                 return result;
               } catch (e) {
                 // Fallback to original implementation
+                return Reflect.apply(target, self, args);
               }
             }
           })
@@ -1024,7 +865,10 @@
       try {
         const originalMeasureText = CanvasRenderingContext2D.prototype.measureText;
         CanvasRenderingContext2D.prototype.measureText = function() {
-          // Bypass for Turnstile/Cloudflare scripts
+          if (!isFeatureActive('font')) {
+            return originalMeasureText.apply(this, arguments);
+          }
+          // Reserved caller bypass hook; currently disabled.
           if (shouldBypassForCaller('font')) {
             return originalMeasureText.apply(this, arguments);
           }
@@ -1095,20 +939,7 @@
     }
 
     // ========== TIMEZONE PROTECTION ==========
-    if (config.enabled && config.timezone && config.timezone.enabled) {
-      // Check per-feature whitelist first
-      if (isDomainWhitelisted(config.timezone.whitelist)) {
-        debugLog("[Stealth Guard] Timezone protection bypassed - domain is whitelisted");
-      } else {
-        const parsedConfiguredOffset = Number(config.timezone.offset);
-        // Stored config offset is UTC-relative minutes (UTC+1 => 60).
-        // Date#getTimezoneOffset uses inverse sign (UTC+1 => -60).
-        const fallbackTimezoneOffset = Number.isFinite(parsedConfiguredOffset) ? -parsedConfiguredOffset : 300;
-        const options = {
-          fallbackOffset: fallbackTimezoneOffset,
-          name: config.timezone.name || "America/New_York"
-        };
-
+    if (config.timezone) {
         try {
           let timezoneAlertSent = false;
           const getTimezoneOffset = Date.prototype.getTimezoneOffset;
@@ -1127,7 +958,19 @@
             return sign * (hours * 60 + minutes);
           };
 
+          const getTimezoneOptions = function() {
+            const timezoneConfig = config.timezone || {};
+            const parsedConfiguredOffset = Number(timezoneConfig.offset);
+            // Stored config offset is UTC-relative minutes (UTC+1 => 60).
+            // Date#getTimezoneOffset uses inverse sign (UTC+1 => -60).
+            return {
+              fallbackOffset: Number.isFinite(parsedConfiguredOffset) ? -parsedConfiguredOffset : 300,
+              name: timezoneConfig.name || "America/New_York"
+            };
+          };
+
           const getSpoofedTimezoneOffset = function(dateObj) {
+            const options = getTimezoneOptions();
             if (!options.name) return options.fallbackOffset;
             const timeValue = dateObj && typeof dateObj.getTime === "function" ? dateObj.getTime() : Date.now();
             if (!Number.isFinite(timeValue)) return options.fallbackOffset;
@@ -1165,6 +1008,17 @@
             return offset;
           };
 
+          const withSpoofedTimezoneOptions = function(args) {
+            const options = getTimezoneOptions();
+            const nextArgs = Array.prototype.slice.call(args);
+            const existingOptions = nextArgs[1];
+            nextArgs[1] = existingOptions && typeof existingOptions === "object"
+              ? Object.assign({}, existingOptions)
+              : {};
+            nextArgs[1].timeZone = options.name;
+            return nextArgs;
+          };
+
         const processedNames = [
           "_date", "_offset", "getTime", "setTime", "getTimezoneOffset",
           "toJSON", "valueOf", "constructor", "toString", "toGMTString", "toISOString",
@@ -1199,6 +1053,9 @@
 
         Date.prototype.getTimezoneOffset = new Proxy(Date.prototype.getTimezoneOffset, {
           apply(target, self, args) {
+            if (!isFeatureActive('timezone')) {
+              return Reflect.apply(target, self, args);
+            }
             if (!timezoneAlertSent) {
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
@@ -1209,6 +1066,9 @@
 
         Date.prototype.toString = new Proxy(Date.prototype.toString, {
           apply(target, self, args) {
+            if (!isFeatureActive('timezone')) {
+              return Reflect.apply(target, self, args);
+            }
             if (!timezoneAlertSent) {
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
@@ -1219,42 +1079,48 @@
 
         Date.prototype.toLocaleString = new Proxy(Date.prototype.toLocaleString, {
           apply(target, self, args) {
+            if (!isFeatureActive('timezone')) {
+              return Reflect.apply(target, self, args);
+            }
             if (!timezoneAlertSent) {
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
             }
-            args[1] = args[1] !== undefined ? args[1] : {};
-            args[1].timeZone = options.name;
-            return isNaN(self) ? Reflect.apply(target, self, args) : Reflect.apply(target, self, args);
+            return Reflect.apply(target, self, withSpoofedTimezoneOptions(args));
           }
         });
 
         Date.prototype.toLocaleDateString = new Proxy(Date.prototype.toLocaleDateString, {
           apply(target, self, args) {
+            if (!isFeatureActive('timezone')) {
+              return Reflect.apply(target, self, args);
+            }
             if (!timezoneAlertSent) {
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
             }
-            args[1] = args[1] !== undefined ? args[1] : {};
-            args[1].timeZone = options.name;
-            return isNaN(self) ? Reflect.apply(target, self, args) : Reflect.apply(target, self, args);
+            return Reflect.apply(target, self, withSpoofedTimezoneOptions(args));
           }
         });
 
         Date.prototype.toLocaleTimeString = new Proxy(Date.prototype.toLocaleTimeString, {
           apply(target, self, args) {
+            if (!isFeatureActive('timezone')) {
+              return Reflect.apply(target, self, args);
+            }
             if (!timezoneAlertSent) {
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
             }
-            args[1] = args[1] !== undefined ? args[1] : {};
-            args[1].timeZone = options.name;
-            return isNaN(self) ? Reflect.apply(target, self, args) : Reflect.apply(target, self, args);
+            return Reflect.apply(target, self, withSpoofedTimezoneOptions(args));
           }
         });
 
         Date.prototype.toTimeString = new Proxy(Date.prototype.toTimeString, {
           apply(target, self, args) {
+            if (!isFeatureActive('timezone')) {
+              return Reflect.apply(target, self, args);
+            }
             if (!timezoneAlertSent) {
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
@@ -1262,6 +1128,7 @@
             const result = Reflect.apply(target, self._date, args);
             const replace_1 = convertToGMT(self._offset);
             const replace_2 = convertToGMT(getSpoofedTimezoneOffset(self));
+            const options = getTimezoneOptions();
             const replace_3 = "(" + options.name.replace(/\\//g, " ") + " Standard Time)";
             return isNaN(self) ? Reflect.apply(target, self, args) : result.replace(replace_1, replace_2).replace(/\\(.*\\)/, replace_3);
           }
@@ -1271,6 +1138,9 @@
           if (["setHours", "setMinutes", "setMonth", "setDate", "setYear", "setFullYear"].indexOf(name) !== -1) {
             Date.prototype[name] = new Proxy(Date.prototype[name], {
               apply(target, self, args) {
+                if (!isFeatureActive('timezone')) {
+                  return Reflect.apply(target, self, args);
+                }
                 if (isNaN(self)) {
                   return Reflect.apply(target, self, args);
                 } else {
@@ -1286,6 +1156,9 @@
           } else {
             Date.prototype[name] = new Proxy(Date.prototype[name], {
               apply(target, self, args) {
+                if (!isFeatureActive('timezone')) {
+                  return Reflect.apply(target, self, args);
+                }
                 return isNaN(self) ? Reflect.apply(target, self, args) : Reflect.apply(target, self._date, args);
               }
             });
@@ -1294,11 +1167,15 @@
 
         Intl.DateTimeFormat.prototype.resolvedOptions = new Proxy(Intl.DateTimeFormat.prototype.resolvedOptions, {
           apply(target, self, args) {
+            if (!isFeatureActive('timezone')) {
+              return Reflect.apply(target, self, args);
+            }
             if (!timezoneAlertSent) {
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
             }
             const result = Reflect.apply(target, self, args);
+            const options = getTimezoneOptions();
             result.timeZone = options.name;
             return result;
           }
@@ -1306,34 +1183,35 @@
 
         Intl.DateTimeFormat = new Proxy(Intl.DateTimeFormat, {
           apply(target, self, args) {
+            if (!isFeatureActive('timezone')) {
+              return Reflect.apply(target, self, args);
+            }
             if (!timezoneAlertSent) {
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
             }
-            args[1] = args[1] !== undefined ? args[1] : {};
-            args[1].timeZone = options.name;
-            return Reflect.apply(target, self, args);
+            return Reflect.apply(target, self, withSpoofedTimezoneOptions(args));
           },
           construct(target, args, newTarget) {
+            if (!isFeatureActive('timezone')) {
+              return Reflect.construct(target, args, newTarget);
+            }
             if (!timezoneAlertSent) {
               try { window.top.postMessage("stealth-guard-timezone-alert", '*'); } catch(e) {}
               timezoneAlertSent = true;
             }
-            args[1] = args[1] !== undefined ? args[1] : {};
-            args[1].timeZone = options.name;
-            return Reflect.construct(target, args, newTarget);
+            return Reflect.construct(target, withSpoofedTimezoneOptions(args), newTarget);
           }
         });
 
-          debugLog("[Stealth Guard] Timezone protection activated:", options.name);
+          debugLog("[Stealth Guard] Timezone protection activated");
         } catch(e) {
           debugError("[Stealth Guard] Timezone protection failed:", e);
         }
-      }
     }
 
     // ========== CLIENTRECTS FINGERPRINT PROTECTION ==========
-    if (config.enabled && config.clientrects && config.clientrects.enabled && !isDomainWhitelisted(config.clientrects.whitelist)) {
+    if (config.clientrects) {
       const noiseConfig = {
         "DOMRect": 0.00000001,
         "DOMRectReadOnly": 0.000001
@@ -1353,6 +1231,9 @@
           "get": new Proxy(Object.getOwnPropertyDescriptor(DOMRect.prototype, domRectMetric).get, {
             apply(target, self, args) {
               const result = Reflect.apply(target, self, args);
+              if (!isFeatureActive('clientrects')) {
+                return result;
+              }
               const noise = result * (1 + (Math.random() < 0.5 ? -1 : +1) * noiseConfig.DOMRect);
 
               if (!clientrectsAlertSent) {
@@ -1376,6 +1257,9 @@
           "get": new Proxy(Object.getOwnPropertyDescriptor(DOMRectReadOnly.prototype, domRectReadOnlyMetric).get, {
             apply(target, self, args) {
               const result = Reflect.apply(target, self, args);
+              if (!isFeatureActive('clientrects')) {
+                return result;
+              }
               const noise = result * (1 + (Math.random() < 0.5 ? -1 : +1) * noiseConfig.DOMRectReadOnly);
 
               if (!clientrectsAlertSent) {
@@ -1431,7 +1315,7 @@
     }
 
     // ========== WEBGPU FINGERPRINT PROTECTION ==========
-    if (config.enabled && config.webgpu && config.webgpu.enabled && !isDomainWhitelisted(config.webgpu.whitelist)) {
+    if (config.webgpu) {
       const noiseConfig = {
         color: 0.01,      // 1% noise on color values
         percent: 0.1,     // Modify 10% of buffer elements
@@ -1453,6 +1337,9 @@
             "get": new Proxy(_GPUAdapter, {
               apply(target, self, args) {
                 const result = Reflect.apply(target, self, args);
+                if (!isFeatureActive('webgpu')) {
+                  return result;
+                }
 
                 const _maxBufferSize = self._limits.maxBufferSize;
                 const _maxUniformBufferBindingSize = self._limits.maxUniformBufferBindingSize;
@@ -1504,6 +1391,9 @@
             "get": new Proxy(_GPUDevice, {
               apply(target, self, args) {
                 const result = Reflect.apply(target, self, args);
+                if (!isFeatureActive('webgpu')) {
+                  return result;
+                }
 
                 const _maxBufferSize = self._limits.maxBufferSize;
                 const _maxUniformBufferBindingSize = self._limits.maxUniformBufferBindingSize;
@@ -1547,6 +1437,9 @@
         if (typeof GPUCommandEncoder !== 'undefined') {
           GPUCommandEncoder.prototype.beginRenderPass = new Proxy(GPUCommandEncoder.prototype.beginRenderPass, {
             apply(target, self, args) {
+              if (!isFeatureActive('webgpu')) {
+                return Reflect.apply(target, self, args);
+              }
               if (args && args[0] && args[0].colorAttachments && args[0].colorAttachments[0]) {
                 if (args[0].colorAttachments[0].clearValue) {
                   try {
@@ -1582,11 +1475,37 @@
         if (typeof GPUQueue !== 'undefined') {
           GPUQueue.prototype.writeBuffer = new Proxy(GPUQueue.prototype.writeBuffer, {
             apply(target, self, args) {
+              if (!isFeatureActive('webgpu')) {
+                return Reflect.apply(target, self, args);
+              }
               if (args && args[2]) {
-                const flag = (args[2] instanceof ArrayBuffer) || (args[2] instanceof Float32Array);
-                if (flag) {
+                const rawBuffer = args[2];
+                const dataOffset = Number.isFinite(Number(args[3])) ? Math.max(0, Math.floor(Number(args[3]))) : 0;
+                const explicitSize = Number.isFinite(Number(args[4])) ? Math.max(0, Math.floor(Number(args[4]))) : null;
+                let metrics = null;
+
+                if (rawBuffer instanceof ArrayBuffer) {
+                  const start = Math.min(dataOffset, rawBuffer.byteLength);
+                  const byteLength = explicitSize === null
+                    ? Math.max(0, rawBuffer.byteLength - start)
+                    : Math.min(explicitSize, Math.max(0, rawBuffer.byteLength - start));
+                  metrics = new Uint8Array(rawBuffer, start, byteLength);
+                } else if (ArrayBuffer.isView(rawBuffer)) {
+                  if (typeof rawBuffer.subarray === 'function') {
+                    const start = Math.min(dataOffset, rawBuffer.length);
+                    const end = explicitSize === null ? rawBuffer.length : Math.min(rawBuffer.length, start + explicitSize);
+                    metrics = rawBuffer.subarray(start, end);
+                  } else {
+                    const start = Math.min(dataOffset, rawBuffer.byteLength);
+                    const byteLength = explicitSize === null
+                      ? Math.max(0, rawBuffer.byteLength - start)
+                      : Math.min(explicitSize, Math.max(0, rawBuffer.byteLength - start));
+                    metrics = new Uint8Array(rawBuffer.buffer, rawBuffer.byteOffset + start, byteLength);
+                  }
+                }
+
+                if (metrics && typeof metrics.length === 'number' && metrics.length > 0) {
                   try {
-                    const metrics = args[2];
                     const array = Array(metrics.length).fill(0).map((n, i) => n + i);
                     const count = Math.ceil(metrics.length * noiseConfig.percent);
                     const shuffled = array.sort(() => 0.5 - Math.random());
@@ -1597,8 +1516,6 @@
                       const value = metrics[index];
                       metrics[index] = value + (Math.random() < 0.5 ? -noiseConfig.buffer * value : +noiseConfig.buffer * value);
                     }
-
-                    args[2] = metrics;
 
                     if (!webgpuAlertSent) {
                       window.top.postMessage("stealth-guard-webgpu-alert", '*');
@@ -1669,7 +1586,7 @@
     }
 
     // ========== AUDIOCONTEXT FINGERPRINT PROTECTION ==========
-    if (config.enabled && config.audiocontext && config.audiocontext.enabled && !isDomainWhitelisted(config.audiocontext.whitelist)) {
+    if (config.audiocontext) {
       let audiocontextAlertSent = false;
 
       const audioContext = {
@@ -1678,6 +1595,9 @@
           AudioBufferPrototype.prototype.getChannelData = new Proxy(AudioBufferPrototype.prototype.getChannelData, {
             apply(target, self, args) {
               const results = Reflect.apply(target, self, args);
+              if (!isFeatureActive('audiocontext')) {
+                return results;
+              }
 
               if (audioContext.BUFFER !== results) {
                 audioContext.BUFFER = results;
@@ -1704,12 +1624,18 @@
             {
               apply(target, self, args) {
                 const results = Reflect.apply(target, self, args);
+                if (!isFeatureActive('audiocontext')) {
+                  return results;
+                }
 
                 results.__proto__.getFloatFrequencyData = new Proxy(
                   results.__proto__.getFloatFrequencyData,
                   {
                     apply(target, self, args) {
                       const results = Reflect.apply(target, self, args);
+                      if (!isFeatureActive('audiocontext')) {
+                        return results;
+                      }
 
                       if (!audiocontextAlertSent) {
                         window.top.postMessage("stealth-guard-audiocontext-alert", '*');
@@ -1717,9 +1643,10 @@
                       }
 
                       // Add noise to frequency data
-                      for (let i = 0; i < arguments[0].length; i += 100) {
+                      const frequencyData = args[0];
+                      for (let i = 0; frequencyData && i < frequencyData.length; i += 100) {
                         const index = Math.floor(Math.random() * i);
-                        arguments[0][index] = arguments[0][index] + Math.random() * 0.1;
+                        frequencyData[index] = frequencyData[index] + Math.random() * 0.1;
                       }
 
                       return results;
@@ -1806,28 +1733,29 @@
     }
 
     // ========== USER-AGENT PROTECTION ==========
-    // Critical: Log the decision for debugging Turnstile bypass
-    const uaEnabled = config.enabled && config.useragent && config.useragent.enabled;
+    // Critical: Log the decision for debugging challenge-frame compatibility
+    const uaEnabled = !!config.useragent;
 
     // CRITICAL FIX: Skip UA protection for frames with empty hostname
     // These are about:blank, blob:, data: URLs or sandboxed iframes
-    // They cannot access sessionStorage and are often used by Cloudflare Turnstile
+    // They are often used by Cloudflare Turnstile
     // Spoofing UA in these frames breaks Turnstile verification
     const currentHostname = window.location.hostname;
     const isEmptyHostnameFrame = !currentHostname || currentHostname === '';
 
-    const shouldActivateUA = uaEnabled && !hasTurnstile && !turnstileBypassActive && !isEmptyHostnameFrame;
+    const userAgentAllowlisted = isDomainWhitelisted(config.useragent && config.useragent.whitelist);
+    const shouldActivateUA = uaEnabled && !hasTurnstile && !isEmptyHostnameFrame && !userAgentAllowlisted;
 
     debugLog('[Stealth Guard] UA Protection Decision:', {
       uaEnabled: uaEnabled,
       hasTurnstile: hasTurnstile,
-      turnstileBypassActive: turnstileBypassActive,
       isEmptyHostnameFrame: isEmptyHostnameFrame,
+      userAgentAllowlisted: userAgentAllowlisted,
       willActivate: shouldActivateUA,
       hostname: currentHostname
     });
 
-    if (shouldActivateUA) {
+    if (uaEnabled && !hasTurnstile && !isEmptyHostnameFrame) {
       // User-Agent presets (5 core presets)
       const USER_AGENT_PRESETS = {
         macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
@@ -1837,63 +1765,59 @@
         android: "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
       };
 
-      // Determine which preset to use
-      const preset = config.useragent.preset || "macos";
-      const userAgent = USER_AGENT_PRESETS[preset] || USER_AGENT_PRESETS.macos;
+      const getUserAgentProfile = function() {
+        const preset = config.useragent && config.useragent.preset ? config.useragent.preset : "macos";
+        const userAgent = USER_AGENT_PRESETS[preset] || USER_AGENT_PRESETS.macos;
+        let platform = /Mac|iPod|iPhone|iPad/.test(userAgent) ? "MacIntel" : /Win/.test(userAgent) ? "Win32" : "Linux x86_64";
+        let oscpu = "";
 
-      // Platform detection (inspired by UA Switcher Pro's createUAObject function)
-      let platform = /Mac|iPod|iPhone|iPad/.test(userAgent) ? "MacIntel" : /Win/.test(userAgent) ? "Win32" : "Linux x86_64";
-      let oscpu = "";
-      let platformVersion = "";
+        if (/iPhone/.test(userAgent)) {
+          platform = "iPhone";
+          const match = userAgent.match(/CPU iPhone OS ([\\d_]+)/);
+          oscpu = match ? "iPhone OS " + match[1].replace(/_/g, ".") : "iPhone OS 17.4.1";
+        } else if (/iPad/.test(userAgent)) {
+          platform = "iPad";
+          const match = userAgent.match(/CPU OS ([\\d_]+)/);
+          oscpu = match ? "iPad OS " + match[1].replace(/_/g, ".") : "iPad OS 17.4.1";
+        } else if (/Android/.test(userAgent)) {
+          platform = "Linux armv8l";
+          const match = userAgent.match(/Android ([\\d.]+)/);
+          oscpu = match ? "Linux; Android " + match[1] : "Linux; Android 14";
+        } else if (/Mac OS X/.test(userAgent)) {
+          platform = "MacIntel";
+          const match = userAgent.match(/Mac OS X (\\d+_\\d+_\\d+)/);
+          oscpu = match ? "Intel Mac OS X " + match[1].replace(/_/g, ".") : "Intel Mac OS X 10.15.7";
+        } else if (/Linux/.test(userAgent) && !/Android/.test(userAgent)) {
+          platform = "Linux x86_64";
+          oscpu = "Linux x86_64";
+        } else if (/Win/.test(userAgent)) {
+          platform = "Win32";
+          const match = userAgent.match(/Windows NT ([\\d.]+)/);
+          oscpu = match ? "Windows NT " + match[1] + "; Win64; x64" : "Windows NT 10.0; Win64; x64";
+        }
 
-      // Enhanced platform-specific detection
-      if (/iPhone/.test(userAgent)) {
-        platform = "iPhone";
-        const match = userAgent.match(/CPU iPhone OS ([\\d_]+)/);
-        oscpu = match ? "iPhone OS " + match[1].replace(/_/g, ".") : "iPhone OS 17.4.1";
-        platformVersion = "17.0.0";
-      } else if (/iPad/.test(userAgent)) {
-        platform = "iPad";
-        const match = userAgent.match(/CPU OS ([\\d_]+)/);
-        oscpu = match ? "iPad OS " + match[1].replace(/_/g, ".") : "iPad OS 17.4.1";
-        platformVersion = "17.0.0";
-      } else if (/Android/.test(userAgent)) {
-        platform = "Linux armv8l";
-        const match = userAgent.match(/Android ([\\d.]+)/);
-        oscpu = match ? "Linux; Android " + match[1] : "Linux; Android 14";
-        platformVersion = "14.0.0";
-      } else if (/Mac OS X/.test(userAgent)) {
-        platform = "MacIntel";
-        const match = userAgent.match(/Mac OS X (\\d+_\\d+_\\d+)/);
-        oscpu = match ? "Intel Mac OS X " + match[1].replace(/_/g, ".") : "Intel Mac OS X 10.15.7";
-        platformVersion = "15.0.0";
-      } else if (/Linux/.test(userAgent) && !/Android/.test(userAgent)) {
-        platform = "Linux x86_64";
-        oscpu = "Linux x86_64";
-        platformVersion = "";
-      } else if (/Win/.test(userAgent)) {
-        platform = "Win32";
-        const match = userAgent.match(/Windows NT ([\\d.]+)/);
-        oscpu = match ? "Windows NT " + match[1] + "; Win64; x64" : "Windows NT 10.0; Win64; x64";
-        platformVersion = "10.0.0";
-      }
+        return { userAgent, platform, oscpu };
+      };
+
+      const shouldSpoofUserAgent = function() {
+        return isFeatureActive('useragent') && !hasTurnstile && !isEmptyHostnameFrame;
+      };
 
       // Store original descriptors
       const originalUA = Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent");
       const originalPlatform = Object.getOwnPropertyDescriptor(Navigator.prototype, "platform");
       const originalAppVersion = Object.getOwnPropertyDescriptor(Navigator.prototype, "appVersion");
       const originalVendor = Object.getOwnPropertyDescriptor(Navigator.prototype, "vendor");
-
-      // Dynamic spoofing control
-      let shouldSpoof = true;
+      const originalOscpu = Object.getOwnPropertyDescriptor(Navigator.prototype, "oscpu");
 
       // Override userAgent
       try {
         Object.defineProperty(Navigator.prototype, "userAgent", {
           get: function () {
-            if (!shouldSpoof) return originalUA ? originalUA.get.call(this) : userAgent; // Fallback or original
+            const profile = getUserAgentProfile();
+            if (!shouldSpoofUserAgent()) return originalUA ? originalUA.get.call(this) : profile.userAgent;
             window.top.postMessage("stealth-guard-useragent-alert", '*');
-            return userAgent;
+            return profile.userAgent;
           },
           configurable: true,
           enumerable: true
@@ -1906,8 +1830,9 @@
       try {
         Object.defineProperty(Navigator.prototype, "platform", {
           get: function () {
-            if (!shouldSpoof) return originalPlatform ? originalPlatform.get.call(this) : platform;
-            return platform;
+            const profile = getUserAgentProfile();
+            if (!shouldSpoofUserAgent()) return originalPlatform ? originalPlatform.get.call(this) : profile.platform;
+            return profile.platform;
           },
           configurable: true,
           enumerable: true
@@ -1920,9 +1845,10 @@
       try {
         Object.defineProperty(Navigator.prototype, "appVersion", {
           get: function () {
-            if (!shouldSpoof) return originalAppVersion ? originalAppVersion.get.call(this) : "";
-            const versionStart = userAgent.indexOf('/');
-            return versionStart !== -1 ? userAgent.substring(versionStart + 1) : "5.0";
+            const profile = getUserAgentProfile();
+            if (!shouldSpoofUserAgent()) return originalAppVersion ? originalAppVersion.get.call(this) : "";
+            const versionStart = profile.userAgent.indexOf('/');
+            return versionStart !== -1 ? profile.userAgent.substring(versionStart + 1) : "5.0";
           },
           configurable: true,
           enumerable: true
@@ -1935,12 +1861,13 @@
       try {
         Object.defineProperty(Navigator.prototype, "vendor", {
           get: function () {
-            if (!shouldSpoof) return originalVendor ? originalVendor.get.call(this) : "";
-            if (userAgent.includes("Chrome") && !userAgent.includes("Edg")) {
+            const profile = getUserAgentProfile();
+            if (!shouldSpoofUserAgent()) return originalVendor ? originalVendor.get.call(this) : "";
+            if (profile.userAgent.includes("Chrome") && !profile.userAgent.includes("Edg")) {
               return "Google Inc.";
-            } else if (userAgent.includes("Safari") && !userAgent.includes("Chrome")) {
+            } else if (profile.userAgent.includes("Safari") && !profile.userAgent.includes("Chrome")) {
               return "Apple Computer, Inc.";
-            } else if (userAgent.includes("Firefox")) {
+            } else if (profile.userAgent.includes("Firefox")) {
               return "";
             }
             return "";
@@ -1957,7 +1884,7 @@
         try {
           Object.defineProperty(Navigator.prototype, "userAgentData", {
             get: function () {
-              if (!shouldSpoof) return undefined; // Ideally restore original, but undefined is safer than spoofed for now
+              if (!shouldSpoofUserAgent()) return undefined; // Ideally restore original, but undefined is safer than spoofed for now
               return undefined;
             },
             configurable: true,
@@ -1973,7 +1900,9 @@
         try {
           Object.defineProperty(Navigator.prototype, "oscpu", {
             get: function () {
-              return oscpu;
+              const profile = getUserAgentProfile();
+              if (!shouldSpoofUserAgent()) return originalOscpu && originalOscpu.get ? originalOscpu.get.call(this) : "";
+              return profile.oscpu;
             },
             configurable: true,
             enumerable: true
@@ -1983,27 +1912,13 @@
         }
       }
 
-      // Async check to see if we should disable spoofing for Turnstile
-      // This helps frames that didn't get the sessionStorage flag (cross-origin/sandboxed)
-      try {
-        // Use a unique event name to communicate with the content script (ISOLATED world)
-        const checkEvent = "stealth-guard-check-turnstile-" + Math.random().toString(36).substring(7);
-        window.addEventListener(checkEvent, (e) => {
-          if (e.detail && e.detail.skipUA) {
-            shouldSpoof = false;
-            debugLog("[Stealth Guard] Disabling UA spoofing due to Turnstile signal from background");
-          }
-        }, { once: true });
-        window.dispatchEvent(new CustomEvent("${TURNSTILE_TRIGGER_CHECK_EVENT}", { detail: { eventName: checkEvent } }));
-      } catch(e) {}
-
-      debugLog("[Stealth Guard] User-Agent protection activated:", userAgent);
+      debugLog("[Stealth Guard] User-Agent protection activated");
     } else if (uaEnabled && isEmptyHostnameFrame) {
       // Don't log for every empty frame - too noisy
-    } else if (uaEnabled && turnstileBypassActive) {
-      debugLog("[Stealth Guard] User-Agent spoofing DISABLED - Turnstile bypass active, using real browser UA");
     } else if (uaEnabled && hasTurnstile) {
       debugLog("[Stealth Guard] User-Agent spoofing DISABLED - Turnstile detected, using real browser UA");
+    } else if (uaEnabled && userAgentAllowlisted) {
+      debugLog("[Stealth Guard] User-Agent spoofing DISABLED - domain is allowlisted");
     }
 
     // ========== WEBRTC DETECTION ==========
@@ -2014,7 +1929,7 @@
       webrtcEnabled: config.webrtc ? config.webrtc.enabled : 'N/A'
     });
 
-    if (config.enabled && config.webrtc && config.webrtc.enabled) {
+    if (config.webrtc) {
       try {
         const OriginalRTCPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
 
@@ -2023,6 +1938,9 @@
         if (OriginalRTCPeerConnection) {
           const ProxiedRTCPeerConnection = new Proxy(OriginalRTCPeerConnection, {
             construct(target, args) {
+              if (!isFeatureActive('webrtc')) {
+                return new target(...args);
+              }
               // Send alert when RTCPeerConnection is created
               debugLog("[Stealth Guard] RTCPeerConnection created! Sending alert...");
               window.top.postMessage("stealth-guard-webrtc-alert", '*');
@@ -2061,6 +1979,21 @@
 
   debugLog("[Stealth Guard] Protection injection complete");
 
+  function applyTrustedContentConfig(nextConfig) {
+    config = buildContentConfig(nextConfig);
+    debugEnabled = !!(config.notifications && config.notifications.enabled);
+    window.dispatchEvent(new CustomEvent(CONFIG_UPDATE_EVENT, {
+      detail: {
+        token: CONFIG_UPDATE_TOKEN,
+        config
+      }
+    }));
+  }
+
+  loadStoredContentConfig().then((storedConfig) => {
+    applyTrustedContentConfig(storedConfig);
+  });
+
   // ========== LISTEN FOR FINGERPRINT ALERTS ==========
 
   const mkey = "stealth-guard-sandboxed-frame";
@@ -2092,18 +2025,12 @@
     document.documentElement.removeAttribute(mkey);
   }
 
-  // Listen for config updates from background
+  // Listen for config updates from background. Keep the full config private to
+  // the isolated content-script world; do not write it to page-origin storage.
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.type === "config-updated") {
-      // Update sessionStorage cache with new config
       try {
-        // Add version to config before caching
-        const configWithVersion = {
-          ...request.config,
-          _version: CONFIG_VERSION
-        };
-        sessionStorage.setItem(CONFIG_CACHE_KEY, JSON.stringify(configWithVersion));
-        debugEnabled = request.config.notifications && request.config.notifications.enabled;
+        applyTrustedContentConfig(request.config);
         debugLog("[Stealth Guard] Config updated, debug logging now:", debugEnabled ? "enabled" : "disabled");
       } catch (e) {
         // Ignore errors
@@ -2140,27 +2067,5 @@
       }
     }
   }, false);
-
-  // Listen for Turnstile check requests from MAIN world (for iframes without sessionStorage access)
-  window.addEventListener(TURNSTILE_TRIGGER_CHECK_EVENT, function(e) {
-    if (!e.detail || !e.detail.eventName) return;
-
-    try {
-      chrome.runtime.sendMessage({
-        type: "check-turnstile-status",
-        hostname: window.location.hostname
-      }, (response) => {
-        if (chrome.runtime.lastError) return;
-
-        // Dispatch result back to MAIN world
-        if (response) {
-          const detail = { skipUA: response.skipUA };
-          window.dispatchEvent(new CustomEvent(e.detail.eventName, { detail: detail }));
-        }
-      });
-    } catch (err) {
-      // Ignore errors
-    }
-  });
 
 })();

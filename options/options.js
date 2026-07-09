@@ -4,6 +4,8 @@ let currentConfig = null;
 let saveTimeout = null;
 let lastSavedConfigSerialized = null;
 let saveInFlightSerialized = null;
+let editingProxyProfileName = null;
+let editingProxyWasActive = false;
 const DEBOUNCE_DELAY = 1000; // 1 second debounce
 
 // ========== AUTO-SAVE ==========
@@ -16,8 +18,9 @@ function autoSave() {
 
   // Debounce the save
   saveTimeout = setTimeout(() => {
-    collectValues();
-    saveConfig(false); // Don't refresh tabs on auto-save
+    if (collectValues()) {
+      saveConfig(false); // Don't refresh tabs on auto-save
+    }
   }, DEBOUNCE_DELAY);
 }
 
@@ -90,6 +93,13 @@ function saveConfig(refreshTabs = false) {
         return;
       }
 
+      if (!response || response.success === false) {
+        const message = response && response.error ? response.error : "Failed to save settings";
+        console.error("Failed to save config:", message);
+        showToast(message, "error");
+        return;
+      }
+
       lastSavedConfigSerialized = serializedConfig;
 
       if (refreshTabs) {
@@ -132,8 +142,9 @@ document.addEventListener('visibilitychange', () => {
       clearTimeout(saveTimeout);
       saveTimeout = null;
     }
-    collectValues();
-    saveConfig(false);
+    if (collectValues({ showErrors: false })) {
+      saveConfig(false);
+    }
   }
 });
 
@@ -144,7 +155,9 @@ window.addEventListener('beforeunload', () => {
       clearTimeout(saveTimeout);
       saveTimeout = null;
     }
-    collectValues();
+    if (!collectValues({ showErrors: false })) {
+      return;
+    }
     const serializedConfig = serializeConfigSnapshot(currentConfig);
     if (!serializedConfig) {
       return;
@@ -316,6 +329,41 @@ function updateUserAgentString() {
 
 // ========== PROXY MANAGEMENT ==========
 
+function isValidProxyHost(host) {
+  return Boolean(host) && !/[\u0000-\u001f\u007f\s"'\\;/:?#]/.test(host);
+}
+
+function isValidProxyPattern(pattern) {
+  const normalized = String(pattern || '').trim().toLowerCase();
+  if (!normalized || /[\u0000-\u001f\u007f\s"'\\;/:?#]/.test(normalized)) {
+    return false;
+  }
+
+  const wildcardCount = (normalized.match(/\*/g) || []).length;
+  const wildcardShapeAllowed =
+    wildcardCount === 0 ||
+    (wildcardCount === 1 && normalized.startsWith('*.') && normalized.length > 2) ||
+    (wildcardCount === 1 && normalized.endsWith('.*') && normalized.length > 2) ||
+    (wildcardCount === 1 && normalized.startsWith('*') && normalized.length > 1) ||
+    (wildcardCount === 2 && normalized.startsWith('*') && normalized.endsWith('*') && normalized.length > 2);
+
+  if (!wildcardShapeAllowed) {
+    return false;
+  }
+
+  const candidate = normalized.replace(/\*/g, '').replace(/^\./, '').replace(/\.$/, '');
+  return Boolean(candidate) && !candidate.includes('..');
+}
+
+function resetProxyEditor() {
+  editingProxyProfileName = null;
+  editingProxyWasActive = false;
+  const addButton = document.getElementById('add-proxy-profile');
+  if (addButton) {
+    addButton.textContent = 'Add Profile';
+  }
+}
+
 function populateProxyProfiles() {
   const profiles = currentConfig.proxy?.profiles || [];
   const activeProfile = currentConfig.proxy?.activeProfile || null;
@@ -347,13 +395,24 @@ function populateProxyProfiles() {
     profileCard.style.cssText = 'background: #f5f5f5; padding: 10px; margin-bottom: 8px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;';
 
     const profileInfo = document.createElement('div');
-    profileInfo.innerHTML = `
-      <strong>${profile.name}</strong>
-      <div style="font-size: 0.9em; color: #666;">
-        ${profile.scheme.toUpperCase()} ${profile.host}:${profile.port}
-        ${profile.location ? `<br><span style="font-size: 0.85em;">📍 ${profile.location.city}, ${profile.location.country}</span>` : ''}
-      </div>
-    `;
+    const profileName = document.createElement('strong');
+    profileName.textContent = profile.name || 'Unnamed proxy';
+
+    const profileDetails = document.createElement('div');
+    profileDetails.style.cssText = 'font-size: 0.9em; color: #666;';
+    profileDetails.textContent = `${String(profile.scheme || '').toUpperCase()} ${profile.host || ''}:${profile.port || ''}`;
+
+    if (profile.location) {
+      const lineBreak = document.createElement('br');
+      const location = document.createElement('span');
+      location.style.cssText = 'font-size: 0.85em;';
+      location.textContent = `Location: ${profile.location.city || 'Unknown'}, ${profile.location.country || 'Unknown'}`;
+      profileDetails.appendChild(lineBreak);
+      profileDetails.appendChild(location);
+    }
+
+    profileInfo.appendChild(profileName);
+    profileInfo.appendChild(profileDetails);
 
     const buttonsDiv = document.createElement('div');
     buttonsDiv.style.cssText = 'display: flex; gap: 6px;';
@@ -385,10 +444,15 @@ function removeProxyProfile(profileName) {
   }
 
   currentConfig.proxy.profiles = currentConfig.proxy.profiles.filter(p => p.name !== profileName);
+  currentConfig.proxy.domainRoutes = (currentConfig.proxy.domainRoutes || []).filter(route => route.profile !== profileName);
 
   // If active profile was removed, disable it
   if (currentConfig.proxy.activeProfile === profileName) {
     currentConfig.proxy.activeProfile = null;
+  }
+
+  if (editingProxyProfileName === profileName) {
+    resetProxyEditor();
   }
 
   populateProxyProfiles();
@@ -407,17 +471,12 @@ function editProxyProfile(profileName) {
   document.getElementById('new-proxy-name').value = profile.name;
   document.getElementById('new-proxy-remote-dns').checked = profile.remoteDNS || false;
 
-  // Remove the old profile
-  currentConfig.proxy.profiles = currentConfig.proxy.profiles.filter(p => p.name !== profileName);
-
-  // If this was the active profile, clear it temporarily
-  if (currentConfig.proxy.activeProfile === profileName) {
-    currentConfig.proxy._editingActiveProfile = profileName;
-    currentConfig.proxy.activeProfile = null;
-  }
+  editingProxyProfileName = profileName;
+  editingProxyWasActive = currentConfig.proxy.activeProfile === profileName;
+  document.getElementById('add-proxy-profile').textContent = 'Save Profile';
 
   populateProxyProfiles();
-  showToast(`Editing "${profileName}" - modify and click "Add Profile" to save`, 'success');
+  showToast(`Editing "${profileName}" - modify and click "Save Profile" to save`, 'success');
 
   // Scroll to the add profile form
   const addSection = document.querySelector('#proxy-section details');
@@ -429,13 +488,18 @@ function editProxyProfile(profileName) {
 
 async function addProxyProfileHandler() {
   const host = document.getElementById('new-proxy-host').value.trim();
-  const port = parseInt(document.getElementById('new-proxy-port').value);
+  const port = parseInt(document.getElementById('new-proxy-port').value, 10);
   const scheme = document.getElementById('new-proxy-scheme').value;
   const name = document.getElementById('new-proxy-name').value.trim();
   const remoteDNS = document.getElementById('new-proxy-remote-dns').checked;
 
   if (!host || !port) {
     showToast('Host and port are required', 'error');
+    return;
+  }
+
+  if (!isValidProxyHost(host)) {
+    showToast('Proxy host contains invalid characters', 'error');
     return;
   }
 
@@ -452,8 +516,8 @@ async function addProxyProfileHandler() {
 
   if (!profileName) {
     try {
-      const token = 'd202c49ff9c4b6';
-      const response = await fetch(`https://ipinfo.io/${host}?token=${token}`);
+      const encodedHost = encodeURIComponent(host);
+      const response = await fetch(`https://ipinfo.io/${encodedHost}/json`);
 
       if (response.ok) {
         const data = await response.json();
@@ -474,7 +538,7 @@ async function addProxyProfileHandler() {
         profileName = `${location.city}, ${countryCode}${orgPart}`;
       } else {
         // Fallback to ipapi.co
-        const response2 = await fetch(`https://ipapi.co/${host}/json/`);
+        const response2 = await fetch(`https://ipapi.co/${encodedHost}/json/`);
         if (response2.ok) {
           const data = await response2.json();
           const orgName = data.org || '';
@@ -502,7 +566,7 @@ async function addProxyProfileHandler() {
   }
 
   // Check for duplicate names
-  const profiles = currentConfig.proxy?.profiles || [];
+  const profiles = (currentConfig.proxy?.profiles || []).filter((profile) => profile.name !== editingProxyProfileName);
   let finalName = profileName;
   let counter = 1;
   while (profiles.some(p => p.name === finalName)) {
@@ -523,12 +587,24 @@ async function addProxyProfileHandler() {
   if (!currentConfig.proxy) {
     currentConfig.proxy = { enabled: false, activeProfile: null, profiles: [], domainRoutes: [], bypassList: [] };
   }
+  currentConfig.proxy.profiles = profiles;
   currentConfig.proxy.profiles.push(profile);
+
+  if (editingProxyProfileName) {
+    currentConfig.proxy.domainRoutes = (currentConfig.proxy.domainRoutes || []).map((route) => {
+      return route.profile === editingProxyProfileName ? { ...route, profile: finalName } : route;
+    });
+  }
+
+  if (editingProxyWasActive) {
+    currentConfig.proxy.activeProfile = finalName;
+  }
 
   // Clear form
   document.getElementById('new-proxy-host').value = '';
   document.getElementById('new-proxy-port').value = '';
   document.getElementById('new-proxy-name').value = '';
+  resetProxyEditor();
 
   // Collapse the accordion
   const addSection = document.querySelector('#proxy-section details');
@@ -543,7 +619,12 @@ async function addProxyProfileHandler() {
 
 // ========== COLLECT VALUES ==========
 
-function collectValues() {
+function collectValues(options = {}) {
+  const showErrors = options.showErrors !== false;
+  if (!currentConfig) {
+    return false;
+  }
+
   // Global settings
   currentConfig.globalWhitelist = document.getElementById('global-whitelist').value;
   currentConfig.notifications.enabled = document.getElementById('notifications-enabled').checked;
@@ -590,7 +671,7 @@ function collectValues() {
   const timezoneValue = document.getElementById('timezone-select').value;
   const [timezoneName, timezoneOffset] = timezoneValue.split('|');
   currentConfig.timezone.name = timezoneName;
-  currentConfig.timezone.offset = parseInt(timezoneOffset);
+  currentConfig.timezone.offset = parseInt(timezoneOffset, 10);
 
   // User-Agent
   currentConfig.useragent.enabled = document.getElementById('useragent-enabled').checked;
@@ -611,10 +692,21 @@ function collectValues() {
 
   // Parse bypass list
   const bypassListValue = document.getElementById('proxy-bypass-list').value;
-  currentConfig.proxy.bypassList = bypassListValue
+  const bypassList = bypassListValue
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
+
+  const invalidBypassPattern = bypassList.find(pattern => !isValidProxyPattern(pattern));
+  if (invalidBypassPattern) {
+    if (showErrors) {
+      showToast(`Invalid proxy bypass pattern: ${invalidBypassPattern}`, 'error');
+    }
+    return false;
+  }
+
+  currentConfig.proxy.bypassList = bypassList;
+  return true;
 }
 
 // ========== EVENT LISTENERS ==========
@@ -636,8 +728,9 @@ function setupEventListeners() {
       clearTimeout(saveTimeout);
       saveTimeout = null;
     }
-    collectValues();
-    saveConfig(true); // Refresh all tabs
+    if (collectValues()) {
+      saveConfig(true); // Refresh all tabs
+    }
   });
 
   // Reset button
@@ -652,6 +745,12 @@ function setupEventListeners() {
         if (chrome.runtime.lastError) {
           console.error("Failed to reset config:", chrome.runtime.lastError);
           showToast("Failed to reset settings", "error");
+          return;
+        }
+
+        if (!response || response.success === false) {
+          console.error("Failed to reset config:", response && response.error);
+          showToast(response && response.error ? response.error : "Failed to reset settings", "error");
           return;
         }
 
@@ -706,7 +805,9 @@ function exportConfig() {
     return;
   }
 
-  collectValues();
+  if (!collectValues()) {
+    return;
+  }
 
   const exportData = {
     version: '1.0',

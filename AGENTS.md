@@ -17,9 +17,9 @@ This document is the canonical architecture summary for this repository as of th
 | Path | Responsibility |
 | --- | --- |
 | `manifest.json` | Extension entry points, permissions, script order, content script registration. |
-| `background.js` | Startup orchestration, runtime message hub, UA header spoofing, WebRTC policy control, proxy lifecycle, Turnstile bypass tracking, per-site session save/switch handlers (cookies + tab storage), context menus, notifications. |
-| `content-scripts/injector.js` | Session-cached config bootstrap, global/feature allowlist gating, Turnstile detection + bridge, MAIN-world injection, fingerprint alert forwarding. |
-| `lib/config.js` | Config defaults/schema, deep merge with persisted data, default whitelist merging. Storage key: `stealth-guard-config`. |
+| `background.js` | Startup orchestration, runtime message hub, UA header spoofing, WebRTC policy control, proxy lifecycle, per-site session save/switch handlers (cookies + tab storage), context menus, notifications. |
+| `content-scripts/injector.js` | Fail-closed document-start bootstrap, authenticated trusted config updates, challenge-frame exclusions, MAIN-world injection, fingerprint alert forwarding. |
+| `lib/config.js` | Config defaults/schema and deep merge with persisted data. Storage key: `stealth-guard-config`. |
 | `lib/storage.js` | Promise wrapper over `chrome.storage.local` (`read/write/remove/clear`). |
 | `lib/domainFilter.js` | Hostname extraction + wildcard allowlist matching (`example.com`, `*.example.com`, `webmail.*`, generic `*pattern*`) with parse/regex caches. |
 | `lib/proxy.js` | Proxy profile/routing helpers, bypass normalization, PAC generation, proxy mode application (`system`, `fixed_servers`, `pac_script`). |
@@ -38,11 +38,12 @@ This document is the canonical architecture summary for this repository as of th
    - Rebuilds context menus.
 3. `chrome.runtime.onInstalled` and `chrome.runtime.onStartup` re-apply UA/WebRTC/proxy (install also opens options page on first install).
 4. For each frame at `document_start`, `injector.js`:
-   - Reads session cache (`__STEALTH_GUARD_CONFIG_CACHE__`) synchronously.
-   - Falls back to embedded defaults + migration shims if cache is missing/stale.
-   - Refreshes from `chrome.storage.local` asynchronously with TTL guard (`__STEALTH_GUARD_CONFIG_CACHE_REFRESH_TS__`, 3s).
-   - Exits early when globally disabled, no features enabled, globally allowlisted, or on challenge domains.
-   - Detects Turnstile (immediate + MutationObserver + DOMContentLoaded path) and notifies background.
+   - Injects MAIN-world protections immediately with embedded safe defaults to avoid a pre-patch fingerprinting window.
+   - Loads trusted config from `chrome.storage.local` and delivers it through an authenticated MAIN-world update channel; installed wrappers consult mutable config at call time.
+   - If extension storage is slow, default protections can apply briefly before stored disables or allowlists take effect.
+   - Does not trust page-origin `sessionStorage`/`localStorage` for config or bypass decisions.
+   - Exits early on challenge domains; global disables and allowlists are enforced by call-time wrapper gates after trusted config is loaded.
+   - Skips protection inside Cloudflare-owned challenge frames without granting the embedding page a UA bypass.
    - Injects MAIN-world protection script and registers message bridges.
 5. Popup/options request config via runtime messages and persist updates through `update-config`.
 
@@ -54,15 +55,13 @@ This document is the canonical architecture summary for this repository as of th
   - `chrome.storage.local["stealth-guard-active-sessions"]`
 - Background in-memory state:
   - `currentConfig`, `currentDomainFilter`, `configLoaded`, `initializationPromise`
-  - Turnstile bypass map: `turnstileTimestamps` (hostname -> timestamp, 3-minute TTL)
   - `triggeredFeaturesPerTab` (tabId -> hostname + `Set` of triggered features)
-  - Proxy transition flags: `proxyDisabledForWhitelist`, `pendingProxyDisableTabId`
-  - WebRTC dedupe state: `lastAppliedWebRTCPolicy`, `pendingWebRTCPolicy`
+  - WebRTC state: `lastAppliedWebRTCPolicy`, `webRTCPolicyQueue`
   - Notification throttle map: `lastNotificationTime`
 - Content-script session state:
-  - `sessionStorage["__STEALTH_GUARD_CONFIG_CACHE__"]` (versioned with `_version`)
-  - `sessionStorage["__STEALTH_GUARD_CONFIG_CACHE_REFRESH_TS__"]`
-  - `sessionStorage["__STEALTH_GUARD_TURNSTILE_TS__"]`
+  - Immediate embedded safe-default config for fail-closed MAIN-world injection.
+  - Trusted config loaded from `chrome.storage.local` and delivered through an authenticated MAIN-world update channel into mutable MAIN-world config.
+  - Runtime `config-updated` messages update isolated and MAIN-world config without writing to page-origin storage.
 - UI transient state:
   - Popup: debounced reload timer for rapid toggles.
   - Options: serialized snapshot dedupe (`lastSavedConfigSerialized`, `saveInFlightSerialized`).
@@ -85,8 +84,6 @@ This document is the canonical architecture summary for this repository as of th
 | Popup -> Background | `rename-session` | `{ sessionId, name }` | `{ success, session? }` |
 | Popup -> Background | `delete-session` | `{ sessionId }` | `{ success }` |
 | Popup -> Background | `clear-current-session` | `{ hostname, tabId }` | `{ success }` |
-| Injector -> Background | `turnstile-detected` | `{ hostname }` | `{ success, ignored? }` |
-| Injector -> Background | `check-turnstile-status` | `{ hostname }` | `{ skipUA, remainingSeconds? }` |
 | Injector -> Background | `fingerprint-detected` | `{ feature, hostname, url, timestamp }` | `{ success: true }` |
 | Legacy (available) | `get-injection-config` | `{ url }` | `{ config }` |
 | Background -> Injector | `config-updated` | `{ config }` | none |
@@ -106,17 +103,12 @@ Implementation note:
   - `stealth-guard-timezone-alert`
   - `stealth-guard-useragent-alert`
   - `stealth-guard-webrtc-alert`
-- Turnstile UA-check handshake:
-  - MAIN dispatches `stealth-guard-trigger-check` with callback event name.
-  - Injector queries background (`check-turnstile-status`) and dispatches callback with `{ skipUA }`.
-
 ### Browser Event Hooks
 
 - WebRequest:
   - `onBeforeSendHeaders` for HTTP User-Agent spoofing.
-  - `onBeforeRequest` main-frame interception for proxy allowlist bypass.
 - WebNavigation:
-  - `onBeforeNavigate` / `onCommitted` for WebRTC policy updates and proxy re-enable checks.
+  - `onBeforeNavigate` / `onCommitted` for WebRTC policy maintenance.
 - Tabs:
   - `onUpdated`, `onActivated`, `onRemoved` for policy maintenance + tab feature tracking cleanup.
 - Runtime lifecycle:
@@ -127,23 +119,24 @@ Implementation note:
 1. Config update path:
    - UI sends `update-config`.
    - Background diffs relevant sections (`enabled`, `globalWhitelist`, `useragent`, `webrtc`, `proxy`), saves config, reapplies only changed subsystems, and broadcasts `config-updated` to HTTP/HTTPS tabs.
-   - Injector updates session config cache when `config-updated` is received.
+   - Injector keeps runtime config private and forwards it through the authenticated MAIN-world update channel when `config-updated` is received.
 
 2. Fingerprint detection path:
    - MAIN-world hook posts alert string.
    - Injector maps alert -> feature and sends `fingerprint-detected`.
    - Background tracks per-tab features and conditionally emits notifications (throttled, allowlist-aware).
 
-3. Turnstile bypass path:
-   - Injector detects challenge and sends `turnstile-detected`.
-   - Background records hostname TTL entry, reapplies UA listener, sets per-tab session bypass flag, reloads tab.
-   - UA header spoofing bypass checks exact + parent-domain chain matches while bypass is active.
+3. Challenge-frame path:
+   - Injector exits early inside Cloudflare-owned challenge frames so those frames see an unmodified browser environment.
+   - The embedding page does not receive a host-level UA bypass.
 
 4. Proxy allowlist bypass path:
-   - If main-frame navigation targets a global-allowlisted domain while proxy is enabled, background temporarily switches proxy to `system`, cancels/replays navigation, then re-enables proxy when leaving allowlisted domains.
+   - `lib/proxy.js` emits PAC rules that return `DIRECT` for global-allowlisted hosts.
+   - Background does not toggle `chrome.proxy.settings` per active tab because that setting is browser-global.
 
 5. WebRTC policy path:
-   - Background applies base policy from config, then adjusts per-URL based on WebRTC allowlist.
+   - Background applies the configured `chrome.privacy.network.webRTCIPHandlingPolicy` globally while WebRTC protection is enabled.
+   - Per-site WebRTC allowlists affect the content-script API patch only; they do not relax the browser-global privacy setting.
    - Repeated identical policy sets are deduped.
 
 6. Session switch path:
@@ -154,7 +147,7 @@ Implementation note:
 ## Current Behavior Notes (Non-Stale)
 
 - UA HTTP header spoofing uses `webRequest` blocking listener; DNR cleanup exists only for legacy rule removal.
-- `get-injection-config` is retained for compatibility; the active injector path is session/storage cache based.
+- `get-injection-config` is retained for compatibility; the active injector path uses fail-closed defaults plus trusted extension storage updates.
 - `lib/domainFilter.js` includes bounded caches for parsed whitelist strings and wildcard regexes; matching semantics remain unchanged.
 - Proxy behavior uses:
   - `fixed_servers` when only one active profile is needed and no global allowlist requires PAC.

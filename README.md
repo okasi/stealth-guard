@@ -30,7 +30,7 @@ Stealth Guard is a privacy-focused browser extension that protects against vario
 - **🗺️ Domain-based Routing Engine** - PAC-based domain routing is supported in core proxy logic (UI route editor is not currently exposed)
 - **✅ Global & Per-Feature Allowlists** - Whitelist sites globally or per protection feature
 - **🎯 Wildcard Domain Patterns** - Support for `*.example.com` and `webmail.*` patterns
-- **☁️ Cloudflare Turnstile Compatibility** - Auto-detects Turnstile challenges and temporarily disables User-Agent spoofing
+- **☁️ Cloudflare Challenge Compatibility** - Leaves Cloudflare-owned challenge frames unmodified without granting the embedding page a UA bypass
 - **🔔 Real-time Notifications** - Optional alerts when fingerprinting attempts are blocked
 - **💾 Export/Import Settings** - Backup and restore your configuration
 - **📦 No Build System Required** - Pure vanilla JavaScript, ready to use
@@ -122,6 +122,24 @@ Visit these sites to verify your fingerprinting protection:
 - <https://amiunique.org/> - Browser uniqueness analysis
 - <https://dnscheck.tools/> - WebRTC and DNS leak testing
 
+## 🧑‍💻 Development Checks
+
+Use Node.js 20.19+ or 22.12+. Install the dev dependencies once:
+
+```bash
+npm install
+```
+
+Run the local quality gate:
+
+```bash
+npm run check
+```
+
+This runs syntax validation for extension source JavaScript files and a Vitest suite with 100% statements, branches, functions, and lines coverage enforced for the deterministic library layer in `lib/`. Browser lifecycle code in `background.js`, `content-scripts/`, `popup/`, and `options/` is syntax-checked here and should still be manually validated in an MV2-compatible browser.
+
+The content script installs wrappers immediately at `document_start` with embedded safe defaults, then applies trusted `chrome.storage.local` config through a private authenticated MAIN-world update channel. This fail-closed design avoids a pre-patch fingerprinting window; if storage is slow, default protections may apply briefly before stored disables or allowlists take effect.
+
 ## 🏗️ Technical Details
 
 ### 📁 Architecture
@@ -130,7 +148,7 @@ Visit these sites to verify your fingerprinting protection:
 background.js              → Runtime orchestrator (webRequest UA spoofing, WebRTC policy, proxy lifecycle, message hub)
     ↓
 content-scripts/
-  injector.js              → Session-cached bootstrap + MAIN-world protection injection
+  injector.js              → Fail-closed MAIN-world injection + trusted dynamic config update
     ↓
 lib/
   config.js                → Config defaults + merge/persistence helpers
@@ -155,16 +173,18 @@ This extension intentionally uses **Manifest V2** for maximum API compatibility.
 | `privacy` | Control WebRTC IP handling policy |
 | `proxy` | Configure SOCKS5/HTTP proxy |
 | `webRequest` / `webRequestBlocking` | Modify User-Agent headers |
+| `webNavigation` | Reapply browser-global WebRTC policy during navigation |
 | `declarativeNetRequest` | Legacy compatibility cleanup for prior UA rule path |
-| `tabs` | Detect active tab for context menu |
+| `tabs` | Identify active tabs, reload updated tabs, and track per-tab protection state |
 | `contextMenus` | Right-click menu integration |
 | `notifications` | Fingerprint detection alerts |
+| `<all_urls>` | Apply protections, header spoofing, proxy rules, and session tools across websites |
 
 ## 🔒 Privacy
 
 Stealth Guard:
-- **Does not collect any user data**
-- **Does not phone home** (except for optional proxy location checks via ipinfo.io)
+- **Does not collect telemetry, analytics, or browsing history**
+- **Makes no background service calls** except optional proxy location checks via `ipinfo.io`/`ipapi.co` and proxy test checks via `api.ipify.org`
 - **Stores all settings locally** in browser storage
 - **Is fully open source** - audit the code yourself
 
