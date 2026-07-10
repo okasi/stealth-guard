@@ -43,7 +43,7 @@ jobs:
           zip -r stealth-guard.zip manifest.json background.js content-scripts icons lib options popup README.md LICENSE PRIVACY.md CHANGELOG.md
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Release ${{ steps.version.outputs.tag }}
