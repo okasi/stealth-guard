@@ -18,19 +18,27 @@
       <div class="header-controls">
         <div class="global-toggle">
           <label class="switch">
-            <input type="checkbox" id="global-enabled">
+            <input type="checkbox" id="global-enabled" aria-label="Enable Stealth Guard">
             <span class="slider"></span>
           </label>
           <span>Enabled</span>
         </div>
         <div class="global-toggle">
           <label class="switch">
-            <input type="checkbox" id="notifications-enabled">
+            <input type="checkbox" id="notifications-enabled" aria-label="Enable fingerprint notifications and debug logging">
             <span class="slider"></span>
           </label>
           <span>Debug</span>
         </div>
       </div>
+    </div>
+
+    <div class="current-site" aria-label="Current site controls">
+      <div class="current-site-copy">
+        <span class="current-site-label">Current site</span>
+        <strong id="current-url">Loading…</strong>
+      </div>
+      <button id="toggle-current-site" class="btn-site" disabled>Add to Allowlist</button>
     </div>
 
     <!-- Features -->
@@ -42,7 +50,7 @@
           <span id="proxy-status">No proxy</span>
         </div>
         <label class="switch">
-          <input type="checkbox" id="proxy-enabled">
+          <input type="checkbox" id="proxy-enabled" aria-label="Enable proxy protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -50,7 +58,7 @@
       <div class="feature-row">
         <div class="feature-icon">🌐</div>
         <div class="feature-name">User-Agent</div>
-        <select id="useragent-quick-select" class="timezone-select">
+        <select id="useragent-quick-select" class="timezone-select" aria-label="User-Agent preset">
           <option value="macos">macOS Safari</option>
           <option value="macos_chrome">macOS Chrome</option>
           <option value="windows">Windows Edge</option>
@@ -58,7 +66,7 @@
           <option value="android">Android Chrome</option>
         </select>
         <label class="switch">
-          <input type="checkbox" id="useragent-enabled">
+          <input type="checkbox" id="useragent-enabled" aria-label="Enable User-Agent protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -66,7 +74,7 @@
       <div class="feature-row">
         <div class="feature-icon">🕐</div>
         <div class="feature-name">Timezone</div>
-        <select id="timezone-quick-select" class="timezone-select">
+        <select id="timezone-quick-select" class="timezone-select" aria-label="Timezone preset">
           <option value="America/Los_Angeles|-480">PST/Pacific (-8)</option>
           <option value="America/Denver|-420">MST/Mountain (-7)</option>
           <option value="America/Chicago|-360">CST/Central (-6)</option>
@@ -81,7 +89,7 @@
           <option value="Asia/Tokyo|540">JST/Tokyo (+9)</option>
         </select>
         <label class="switch">
-          <input type="checkbox" id="timezone-enabled">
+          <input type="checkbox" id="timezone-enabled" aria-label="Enable timezone protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -90,7 +98,7 @@
         <div class="feature-icon">📡</div>
         <div class="feature-name">WebRTC</div>
         <label class="switch">
-          <input type="checkbox" id="webrtc-enabled">
+          <input type="checkbox" id="webrtc-enabled" aria-label="Enable WebRTC protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -99,7 +107,7 @@
         <div class="feature-icon">🎨</div>
         <div class="feature-name">Canvas</div>
         <label class="switch">
-          <input type="checkbox" id="canvas-enabled">
+          <input type="checkbox" id="canvas-enabled" aria-label="Enable canvas protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -108,7 +116,7 @@
         <div class="feature-icon">📐</div>
         <div class="feature-name">ClientRects</div>
         <label class="switch">
-          <input type="checkbox" id="clientrects-enabled">
+          <input type="checkbox" id="clientrects-enabled" aria-label="Enable ClientRects protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -117,7 +125,7 @@
         <div class="feature-icon">🔤</div>
         <div class="feature-name">Font</div>
         <label class="switch">
-          <input type="checkbox" id="font-enabled">
+          <input type="checkbox" id="font-enabled" aria-label="Enable font protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -126,7 +134,7 @@
         <div class="feature-icon">🔊</div>
         <div class="feature-name">AudioContext</div>
         <label class="switch">
-          <input type="checkbox" id="audiocontext-enabled">
+          <input type="checkbox" id="audiocontext-enabled" aria-label="Enable AudioContext protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -134,14 +142,14 @@
       <div class="feature-row">
         <div class="feature-icon">🕹️</div>
         <div class="feature-name">WebGL</div>
-        <select id="webgl-quick-select" class="timezone-select">
+        <select id="webgl-quick-select" class="timezone-select" aria-label="WebGL device preset">
           <option value="auto">Auto (based on User-Agent)</option>
           <option value="apple">Apple</option>
           <option value="pixel_4">Pixel 4</option>
           <option value="surface_pro_7">Surface Pro 7</option>
         </select>
         <label class="switch">
-          <input type="checkbox" id="webgl-enabled">
+          <input type="checkbox" id="webgl-enabled" aria-label="Enable WebGL protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -150,7 +158,7 @@
         <div class="feature-icon">🎮</div>
         <div class="feature-name">WebGPU</div>
         <label class="switch">
-          <input type="checkbox" id="webgpu-enabled">
+          <input type="checkbox" id="webgpu-enabled" aria-label="Enable WebGPU protection">
           <span class="slider"></span>
         </label>
       </div>
@@ -184,7 +192,7 @@
         <span id="session-domain">No active site</span>
       </div>
       <div class="session-switcher-actions">
-        <input type="text" id="session-name-input" placeholder="Session name (optional)">
+        <input type="text" id="session-name-input" maxlength="64" aria-label="Session name" placeholder="Session name (optional)">
         <button id="save-session" class="btn-session-primary">
           <span class="btn-icon-inline" aria-hidden="true">💾</span>
           <span>Save Current Session</span>
@@ -194,7 +202,7 @@
           <span>New Empty Session</span>
         </button>
       </div>
-      <div id="session-status" class="session-status"></div>
+      <div id="session-status" class="session-status" role="status" aria-live="polite"></div>
       <div id="session-list" class="session-list"></div>
     </div>
   </div>

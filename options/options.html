@@ -36,17 +36,17 @@
 
         <div class="field">
           <label>Export / Import Settings</label>
-          <div style="display: flex; gap: 10px; margin-top: 5px;">
+          <div class="settings-transfer">
             <button id="export-config" class="btn-secondary">📤 Export</button>
             <button id="import-config" class="btn-secondary">📥 Import</button>
-            <input type="file" id="import-file" accept=".json" style="display: none;">
+            <input type="file" id="import-file" accept=".json,application/json" class="visually-hidden">
           </div>
         </div>
       </section>
 
       <!-- Proxy Settings -->
       <section class="card" id="proxy-section">
-        <h2><span>🌍 SOCKS5 Proxy Support</span><a href="https://browserleaks.com/ip" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>🌍 SOCKS5 Proxy Support</span><a href="https://browserleaks.com/ip" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Route traffic through SOCKS4/5 or HTTP/HTTPS proxy servers.</p>
         <div class="field checkbox">
           <label>
@@ -67,26 +67,26 @@
         <!-- Proxy Profiles -->
         <div class="field">
           <label>Proxy Profiles</label>
-          <div id="proxy-profiles-list" style="margin-bottom: 10px;">
+          <div id="proxy-profiles-list" class="proxy-profiles-list">
             <!-- Profiles will be dynamically added here -->
           </div>
-          <details style="margin-top: 10px;">
-            <summary style="cursor: pointer; color: #1a73e8; font-weight: 500;">Add New Proxy Profile</summary>
-            <div style="margin-top: 10px; padding: 15px; background: #f5f5f5; border-radius: 4px;">
-              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+          <details class="proxy-editor">
+            <summary>Add New Proxy Profile</summary>
+            <div class="proxy-editor-panel">
+              <div class="proxy-editor-grid">
                 <div>
-                  <label for="new-proxy-host" style="display: block; margin-bottom: 5px; font-size: 0.9em;">Host/IP</label>
-                  <input type="text" id="new-proxy-host" placeholder="192.168.1.1" style="width: 100%; padding: 8px;">
+                  <label for="new-proxy-host" class="proxy-field-label">Host/IP</label>
+                  <input type="text" id="new-proxy-host" placeholder="192.168.1.1" class="compact-control">
                 </div>
                 <div>
-                  <label for="new-proxy-port" style="display: block; margin-bottom: 5px; font-size: 0.9em;">Port</label>
-                  <input type="number" id="new-proxy-port" placeholder="1080" style="width: 100%; padding: 8px;">
+                  <label for="new-proxy-port" class="proxy-field-label">Port</label>
+                  <input type="number" id="new-proxy-port" min="1" max="65535" placeholder="1080" class="compact-control">
                 </div>
               </div>
-              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+              <div class="proxy-editor-grid">
                 <div>
-                  <label for="new-proxy-scheme" style="display: block; margin-bottom: 5px; font-size: 0.9em;">Scheme</label>
-                  <select id="new-proxy-scheme" style="width: 100%; padding: 8px;">
+                  <label for="new-proxy-scheme" class="proxy-field-label">Scheme</label>
+                  <select id="new-proxy-scheme" class="compact-control">
                     <option value="socks5">SOCKS v5</option>
                     <option value="socks4">SOCKS v4</option>
                     <option value="http">HTTP</option>
@@ -94,17 +94,17 @@
                   </select>
                 </div>
                 <div>
-                  <label for="new-proxy-name" style="display: block; margin-bottom: 5px; font-size: 0.9em;">Name (optional)</label>
-                  <input type="text" id="new-proxy-name" placeholder="Auto-detected from IP" style="width: 100%; padding: 8px;">
+                  <label for="new-proxy-name" class="proxy-field-label">Name (optional)</label>
+                  <input type="text" id="new-proxy-name" maxlength="128" placeholder="Auto-detected from IP" class="compact-control">
                 </div>
               </div>
-              <div style="margin-bottom: 10px;">
-                <label style="display: flex; align-items: center; cursor: pointer;">
+              <div class="proxy-dns-row">
+                <label class="checkbox-inline">
                   <input type="checkbox" id="new-proxy-remote-dns" checked>
-                  <span style="margin-left: 5px;">Use Remote DNS (recommended for SOCKS5)</span>
+                  <span>Use Remote DNS (recommended for SOCKS5)</span>
                 </label>
               </div>
-              <button id="add-proxy-profile" class="btn-primary" style="width: 100%;">Add Profile</button>
+              <button id="add-proxy-profile" class="btn-primary btn-block">Add Profile</button>
             </div>
           </details>
         </div>
@@ -119,7 +119,7 @@
 
       <!-- User-Agent Settings -->
       <section class="card" id="useragent-section">
-        <h2><span>🌐 User-Agent Spoofing</span><a href="https://browserleaks.com/javascript" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>🌐 User-Agent Spoofing</span><a href="https://browserleaks.com/javascript" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Spoof navigator.userAgent, navigator.platform, and HTTP User-Agent headers.</p>
         <div class="field checkbox">
           <label>
@@ -143,14 +143,14 @@
         </div>
         <div class="field">
           <label for="useragent-string">User-Agent String</label>
-          <textarea id="useragent-string" rows="3" readonly style="background-color: #f5f5f5; cursor: default;"></textarea>
+          <textarea id="useragent-string" rows="3" readonly class="readonly-output"></textarea>
           <small>This is the user-agent string that will be used for the selected preset.</small>
         </div>
       </section>
 
       <!-- Timezone Settings -->
       <section class="card" id="timezone-section">
-        <h2><span>🕐 Timezone Spoofing</span><a href="https://webbrowsertools.com/timezone/" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>🕐 Timezone Spoofing</span><a href="https://webbrowsertools.com/timezone/" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Override Date.getTimezoneOffset() and Intl.DateTimeFormat to spoof timezone.</p>
         <div class="field checkbox">
           <label>
@@ -183,7 +183,7 @@
 
       <!-- WebRTC Settings -->
       <section class="card" id="webrtc-section">
-        <h2><span>📡 WebRTC Leak Protection</span><a href="https://browserleaks.com/webrtc" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>📡 WebRTC Leak Protection</span><a href="https://browserleaks.com/webrtc" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Control WebRTC ICE candidate policy via chrome.privacy API.</p>
         <div class="field checkbox">
           <label>
@@ -207,7 +207,7 @@
 
       <!-- Canvas Settings -->
       <section class="card" id="canvas-section">
-        <h2><span>🎨 Canvas Fingerprint Protection</span><a href="https://browserleaks.com/canvas" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>🎨 Canvas Fingerprint Protection</span><a href="https://browserleaks.com/canvas" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Inject noise into toDataURL(), toBlob(), and getImageData() outputs.</p>
         <div class="field checkbox">
           <label>
@@ -223,7 +223,7 @@
 
       <!-- ClientRects Settings -->
       <section class="card" id="clientrects-section">
-        <h2><span>📐 ClientRects Fingerprint Protection</span><a href="https://browserleaks.com/rects" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>📐 ClientRects Fingerprint Protection</span><a href="https://browserleaks.com/rects" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Add noise to DOMRect and getBoundingClientRect() measurements.</p>
         <div class="field checkbox">
           <label>
@@ -239,7 +239,7 @@
 
       <!-- Font Settings -->
       <section class="card" id="font-section">
-        <h2><span>🔤 Font Fingerprint Protection</span><a href="https://browserleaks.com/fonts" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>🔤 Font Fingerprint Protection</span><a href="https://browserleaks.com/fonts" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Randomize offsetWidth/offsetHeight to disrupt font detection scripts.</p>
         <div class="field checkbox">
           <label>
@@ -255,7 +255,7 @@
 
       <!-- AudioContext Settings -->
       <section class="card" id="audiocontext-section">
-        <h2><span>🔊 AudioContext Fingerprint Protection</span><a href="https://webbrowsertools.com/audiocontext-fingerprint/" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>🔊 AudioContext Fingerprint Protection</span><a href="https://webbrowsertools.com/audiocontext-fingerprint/" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Inject noise into AudioBuffer and AnalyserNode frequency data.</p>
         <div class="field checkbox">
           <label>
@@ -271,7 +271,7 @@
 
       <!-- WebGL Settings -->
       <section class="card" id="webgl-section">
-        <h2><span>🕹️ WebGL Fingerprint Protection</span><a href="https://browserleaks.com/webgl" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>🕹️ WebGL Fingerprint Protection</span><a href="https://browserleaks.com/webgl" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Spoof getParameter() for VENDOR, RENDERER, and GPU capabilities.</p>
         <div class="field checkbox">
           <label>
@@ -296,7 +296,7 @@
 
       <!-- WebGPU Settings -->
       <section class="card" id="webgpu-section">
-        <h2><span>🎮 WebGPU Fingerprint Protection</span><a href="https://browserleaks.com/webgpu" target="_blank" class="test-link">Test</a></h2>
+        <h2><span>🎮 WebGPU Fingerprint Protection</span><a href="https://browserleaks.com/webgpu" target="_blank" rel="noopener noreferrer" class="test-link">Test</a></h2>
         <p class="section-desc">Add noise to GPUAdapter limits and buffer operations.</p>
         <div class="field checkbox">
           <label>
@@ -314,16 +314,16 @@
 
       <!-- Save/Reset Buttons -->
       <div class="actions">
-        <button id="save-settings" class="btn-primary">Save All Changes & Refresh All Tabs</button>
+        <button id="save-settings" class="btn-primary">Save All Changes &amp; Refresh All Tabs</button>
         <button id="reset-settings" class="btn-danger">Reset to Defaults</button>
       </div>
-      <p style="text-align: center; color: #444; font-size: 0.9em; margin-top: 8px;">
+      <p class="actions-hint">
         Changes are auto-saved. Use the button above to refresh all tabs and apply changes immediately.
       </p>
     </div>
   </div>
 
-  <div id="toast" class="toast"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   <script src="options.js"></script>
 </body>

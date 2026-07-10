@@ -9,6 +9,7 @@ export default defineConfig({
         "lib/config.js",
         "lib/domainFilter.js",
         "lib/proxy.js",
+        "lib/session.js",
         "lib/storage.js"
       ],
       thresholds: {

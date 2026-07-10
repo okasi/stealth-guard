@@ -60,6 +60,87 @@ test("deepMerge recursively merges objects and ignores inherited source properti
   expect(merged.inherited).toBeUndefined();
 });
 
+test("deepMerge blocks prototype pollution keys", () => {
+  // Arrange
+  const { deepMerge } = loadConfigModule();
+  const source = JSON.parse('{"__proto__":{"polluted":true},"constructor":{"polluted":true},"safe":true}');
+
+  // Act
+  const merged = deepMerge({}, source);
+
+  // Assert
+  expect(merged).toEqual({ safe: true });
+  expect({}.polluted).toBeUndefined();
+});
+
+test("normalizeConfig restores safe values for malformed configuration", () => {
+  // Arrange
+  const { DEFAULT_CONFIG, normalizeConfig } = loadConfigModule();
+  const malformed = {
+    enabled: "yes",
+    globalWhitelist: 7,
+    notifications: "broken",
+    proxy: { enabled: "yes", activeProfile: "  Main  ", profiles: {}, domainRoutes: null, bypassList: "localhost" },
+    useragent: { enabled: 1, whitelist: [], preset: "unknown" },
+    timezone: { enabled: null, whitelist: false, offset: 9999, name: "  " },
+    webrtc: { policy: "invalid" },
+    canvas: { noiseLevel: "extreme" },
+    clientrects: [],
+    font: null,
+    audiocontext: "invalid",
+    webgl: { preset: "invalid" },
+    webgpu: 5
+  };
+
+  // Act
+  const normalized = normalizeConfig(malformed);
+  const empty = normalizeConfig(null);
+  const invalidNotificationFlag = normalizeConfig({ notifications: { showFingerprints: "yes" } });
+
+  // Assert
+  expect(normalized.enabled).toBe(true);
+  expect(normalized.globalWhitelist).toBe("");
+  expect(normalized.notifications).toEqual(DEFAULT_CONFIG.notifications);
+  expect(normalized.proxy).toMatchObject({ enabled: false, activeProfile: "Main", profiles: [], domainRoutes: [], bypassList: [] });
+  expect(normalized.useragent).toMatchObject({ enabled: true, whitelist: "", preset: DEFAULT_CONFIG.useragent.preset });
+  expect(normalized.timezone).toMatchObject({ enabled: true, whitelist: DEFAULT_CONFIG.timezone.whitelist, offset: 60, name: "Europe/Paris" });
+  expect(normalized.webrtc.policy).toBe(DEFAULT_CONFIG.webrtc.policy);
+  expect(normalized.canvas.noiseLevel).toBe(DEFAULT_CONFIG.canvas.noiseLevel);
+  expect(normalized.webgl.preset).toBe(DEFAULT_CONFIG.webgl.preset);
+  expect(normalized.clientrects).toEqual(DEFAULT_CONFIG.clientrects);
+  expect(normalized.font).toEqual(DEFAULT_CONFIG.font);
+  expect(normalized.audiocontext).toEqual(DEFAULT_CONFIG.audiocontext);
+  expect(normalized.webgpu).toEqual(DEFAULT_CONFIG.webgpu);
+  expect(empty).toEqual(DEFAULT_CONFIG);
+  expect(invalidNotificationFlag.notifications.showFingerprints).toBe(true);
+});
+
+test("normalizeConfig preserves supported values and bounds user-controlled strings", () => {
+  // Arrange
+  const { normalizeConfig } = loadConfigModule();
+  const longValue = "x".repeat(200);
+  const config = {
+    useragent: { preset: "iphone" },
+    webgl: { preset: "apple" },
+    canvas: { noiseLevel: "high" },
+    webrtc: { policy: "default_public_interface_only" },
+    timezone: { offset: "-840", name: `  ${longValue}  ` },
+    proxy: { activeProfile: `  ${longValue}  `, profiles: [], domainRoutes: [], bypassList: [] }
+  };
+
+  // Act
+  const normalized = normalizeConfig(config);
+
+  // Assert
+  expect(normalized.useragent.preset).toBe("iphone");
+  expect(normalized.webgl.preset).toBe("apple");
+  expect(normalized.canvas.noiseLevel).toBe("high");
+  expect(normalized.webrtc.policy).toBe("default_public_interface_only");
+  expect(normalized.timezone.offset).toBe(-840);
+  expect(normalized.timezone.name).toBe(longValue.slice(0, 128));
+  expect(normalized.proxy.activeProfile).toBe(longValue.slice(0, 128));
+});
+
 test("loadConfig deep merges stored config without re-adding removed allowlist defaults", async () => {
   // Arrange
   const { DEFAULT_CONFIG, STORAGE_KEY, loadConfig } = loadConfigModule();
@@ -114,7 +195,7 @@ test("saveConfig and resetConfig write through the configured storage API", asyn
   await resetConfig();
 
   // Assert
-  expect(globalThis.storage.write).toHaveBeenNthCalledWith(1, { [STORAGE_KEY]: nextConfig });
+  expect(globalThis.storage.write.mock.calls[0][0][STORAGE_KEY]).toMatchObject(nextConfig);
   expect(globalThis.storage.write).toHaveBeenNthCalledWith(2, { [STORAGE_KEY]: DEFAULT_CONFIG });
   expect(globalThis.storage.write.mock.calls[1][0][STORAGE_KEY]).not.toBe(DEFAULT_CONFIG);
 });

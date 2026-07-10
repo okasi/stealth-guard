@@ -169,14 +169,6 @@ function addFeatureIfActive(injectionConfig, filter, config, url, featureName, l
 
 // ========== SESSION SWITCHER ==========
 
-function normalizeSessionHostname(hostname) {
-  if (!hostname || typeof hostname !== "string") {
-    return "";
-  }
-
-  return hostname.trim().toLowerCase().replace(/^www\./, "");
-}
-
 function resolveSessionHostname(request, sender) {
   const explicitHostname = normalizeSessionHostname(request && (request.hostname || request.domain));
   if (explicitHostname) {
@@ -184,16 +176,6 @@ function resolveSessionHostname(request, sender) {
   }
 
   return normalizeSessionHostname(resolveTabHostname(sender));
-}
-
-function sanitizeSessionName(name) {
-  const trimmed = typeof name === "string" ? name.trim() : "";
-  if (trimmed) {
-    return trimmed.slice(0, 64);
-  }
-
-  const now = new Date();
-  return "Session " + now.toLocaleString();
 }
 
 function createSessionId() {
@@ -265,23 +247,6 @@ function cookiesSet(details) {
   });
 }
 
-function buildCookieUrl(cookie, fallbackHostname) {
-  const protocol = cookie.secure ? "https" : "http";
-  let host = cookie.domain || fallbackHostname;
-
-  if (typeof host !== "string") {
-    throw new Error("Invalid cookie host");
-  }
-
-  host = host.replace(/^\./, "").trim();
-  if (!host) {
-    throw new Error("Invalid cookie host");
-  }
-
-  const path = cookie.path || "/";
-  return protocol + "://" + host + path;
-}
-
 function maybeCopyCookiePartitionKey(targetDetails, cookie) {
   if (!cookie || !cookie.partitionKey) {
     return;
@@ -292,31 +257,18 @@ function maybeCopyCookiePartitionKey(targetDetails, cookie) {
   targetDetails.partitionKey = cookie.partitionKey;
 }
 
-function cookieMatchesHostname(cookie, hostname) {
-  if (!cookie || !cookie.domain || !hostname) {
-    return false;
-  }
-
-  const normalizedHostname = hostname.split(":")[0].toLowerCase();
-  const cookieDomain = cookie.domain.replace(/^\./, "").toLowerCase();
-
-  return (
-    cookieDomain === normalizedHostname ||
-    cookieDomain === "www." + normalizedHostname ||
-    normalizedHostname.endsWith("." + cookieDomain) ||
-    cookieDomain.endsWith("." + normalizedHostname)
-  );
-}
-
-async function getCookiesForHostname(hostname) {
+async function getCookiesForHostname(hostname, tabId) {
   if (!chrome.cookies || !chrome.cookies.getAllCookieStores) {
     return [];
   }
 
   const stores = await cookiesGetAllCookieStores();
+  const tabStores = stores.filter((store) => {
+    return Array.isArray(store.tabIds) && store.tabIds.includes(tabId);
+  });
   const allCookies = [];
 
-  for (const store of stores) {
+  for (const store of tabStores) {
     const storeCookies = await cookiesGetAll({ storeId: store.id });
     const matchingCookies = storeCookies.filter((cookie) => cookieMatchesHostname(cookie, hostname));
     allCookies.push(...matchingCookies);
@@ -325,8 +277,8 @@ async function getCookiesForHostname(hostname) {
   return allCookies;
 }
 
-async function clearCookiesForHostname(hostname) {
-  const cookies = await getCookiesForHostname(hostname);
+async function clearCookiesForHostname(hostname, tabId) {
+  const cookies = await getCookiesForHostname(hostname, tabId);
   const removeOperations = cookies.map(async (cookie) => {
     try {
       const removeDetails = {
@@ -399,6 +351,45 @@ function executeScriptInTab(tabId, code, runAt = "document_idle") {
       resolve(results);
     });
   });
+}
+
+function getTabById(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(tab || null);
+    });
+  });
+}
+
+async function resolveVerifiedSessionTarget(request, sender) {
+  const tabId = resolveSessionTabId(request, sender);
+  if (typeof tabId !== "number") {
+    return { error: "Missing tab id" };
+  }
+
+  const tab = await getTabById(tabId);
+  let tabUrl = null;
+  try {
+    tabUrl = tab && tab.url ? new URL(tab.url) : null;
+  } catch (error) {
+    tabUrl = null;
+  }
+  const isHttpSite = tabUrl && (tabUrl.protocol === "http:" || tabUrl.protocol === "https:");
+  const hostname = normalizeSessionHostname(isHttpSite ? tabUrl.hostname : "");
+  if (!hostname) {
+    return { error: "The target tab is not an HTTP(S) site" };
+  }
+
+  const requestedHostname = normalizeSessionHostname(request && (request.hostname || request.domain));
+  if (requestedHostname && requestedHostname !== hostname) {
+    return { error: "The target tab changed sites; reopen the popup and try again" };
+  }
+
+  return { tabId, hostname };
 }
 
 async function readTabStorageSnapshot(tabId) {
@@ -696,6 +687,10 @@ async function applyUserAgentSpoofing() {
 async function applyWebRTCPolicyValue(policy) {
   const previousOperation = webRTCPolicyQueue.catch(() => {});
   const operation = previousOperation.then(async () => {
+    if (lastAppliedWebRTCPolicy === policy) {
+      return;
+    }
+
     await chrome.privacy.network.webRTCIPHandlingPolicy.set({ value: policy });
     let effectiveSetting = await getWebRTCPolicySetting();
     if (effectiveSetting.value !== policy) {
@@ -994,8 +989,12 @@ function enqueueConfigMutation(operation) {
 
 async function handleUpdateConfigMessage(request) {
   return enqueueConfigMutation(async () => {
+    if (!request || !request.config || typeof request.config !== "object" || Array.isArray(request.config)) {
+      throw new Error("Invalid configuration payload");
+    }
+
     const previousConfig = cloneConfig(await getConfig());
-    const nextConfig = cloneConfig(request.config);
+    const nextConfig = normalizeConfig(request.config);
     const configChanged = serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
 
     if (!configChanged) {
@@ -1015,12 +1014,13 @@ async function updateGlobalWhitelist(request, mutator) {
     const filter = new DomainFilter(nextConfig);
 
     nextConfig.globalWhitelist = mutator(filter, request.domain, nextConfig.globalWhitelist);
+    const changed = serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
 
-    if (serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig)) {
+    if (changed) {
       await saveConfigWithRollback(previousConfig, nextConfig);
     }
 
-    return { success: true, whitelist: nextConfig.globalWhitelist };
+    return { success: true, whitelist: nextConfig.globalWhitelist, changed };
   });
 }
 
@@ -1055,12 +1055,12 @@ function handleGetTriggeredFeaturesMessage(request) {
 }
 
 function resolveSessionTabId(request, sender) {
-  if (request && typeof request.tabId === "number") {
-    return request.tabId;
-  }
-
   if (sender && sender.tab && typeof sender.tab.id === "number") {
     return sender.tab.id;
+  }
+
+  if (request && typeof request.tabId === "number") {
+    return request.tabId;
   }
 
   return null;
@@ -1081,19 +1081,14 @@ async function handleGetSessionsMessage(request, sender) {
 }
 
 async function handleSaveSessionMessage(request, sender) {
-  const hostname = resolveSessionHostname(request, sender);
-  const tabId = resolveSessionTabId(request, sender);
-
-  if (!hostname) {
-    return { success: false, error: "Missing hostname" };
+  const target = await resolveVerifiedSessionTarget(request, sender);
+  if (target.error) {
+    return { success: false, error: target.error };
   }
-
-  if (typeof tabId !== "number") {
-    return { success: false, error: "Missing tab id" };
-  }
+  const { hostname, tabId } = target;
 
   const [cookies, storageSnapshot] = await Promise.all([
-    getCookiesForHostname(hostname),
+    getCookiesForHostname(hostname, tabId),
     readTabStorageSnapshot(tabId)
   ]);
 
@@ -1119,12 +1114,7 @@ async function handleSaveSessionMessage(request, sender) {
 }
 
 async function handleSwitchSessionMessage(request, sender) {
-  const tabId = resolveSessionTabId(request, sender);
   const sessionId = request && request.sessionId;
-
-  if (typeof tabId !== "number") {
-    return { success: false, error: "Missing tab id" };
-  }
 
   if (!sessionId) {
     return { success: false, error: "Missing session id" };
@@ -1136,8 +1126,17 @@ async function handleSwitchSessionMessage(request, sender) {
     return { success: false, error: "Session not found" };
   }
 
+  const target = await resolveVerifiedSessionTarget(request, sender);
+  if (target.error) {
+    return { success: false, error: target.error };
+  }
+  if (target.hostname !== session.domain) {
+    return { success: false, error: "This session belongs to a different site" };
+  }
+  const { tabId } = target;
+
   await Promise.all([
-    clearCookiesForHostname(session.domain),
+    clearCookiesForHostname(session.domain, tabId),
     clearTabStorage(tabId)
   ]);
 
@@ -1194,19 +1193,14 @@ async function handleRenameSessionMessage(request) {
 }
 
 async function handleClearCurrentSessionMessage(request, sender) {
-  const hostname = resolveSessionHostname(request, sender);
-  const tabId = resolveSessionTabId(request, sender);
-
-  if (!hostname) {
-    return { success: false, error: "Missing hostname" };
+  const target = await resolveVerifiedSessionTarget(request, sender);
+  if (target.error) {
+    return { success: false, error: target.error };
   }
-
-  if (typeof tabId !== "number") {
-    return { success: false, error: "Missing tab id" };
-  }
+  const { hostname, tabId } = target;
 
   await Promise.all([
-    clearCookiesForHostname(hostname),
+    clearCookiesForHostname(hostname, tabId),
     clearTabStorage(tabId)
   ]);
 
@@ -1384,7 +1378,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const hostname = url.hostname;
 
     if (info.menuItemId === "add-to-global-whitelist") {
-      await updateGlobalWhitelist({ domain: hostname }, (filter, domain, whitelist) => {
+      const result = await updateGlobalWhitelist({ domain: hostname }, (filter, domain, whitelist) => {
         return filter.addDomainToWhitelist(domain, whitelist);
       });
 
@@ -1393,7 +1387,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         type: "basic",
         iconUrl: "icons/64.png",
         title: "Stealth Guard",
-        message: `Added *.${hostname} to allowlist`
+        message: result.changed ? `Added *.${hostname} to allowlist` : `${hostname} is already allowlisted`
       });
 
       // Reload tab to apply changes
@@ -1404,7 +1398,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       });
 
     } else if (info.menuItemId === "remove-from-global-whitelist") {
-      await updateGlobalWhitelist({ domain: hostname }, (filter, domain, whitelist) => {
+      const result = await updateGlobalWhitelist({ domain: hostname }, (filter, domain, whitelist) => {
         return filter.removeDomainFromWhitelist(domain, whitelist);
       });
 
@@ -1413,7 +1407,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
         type: "basic",
         iconUrl: "icons/64.png",
         title: "Stealth Guard",
-        message: `Removed *.${hostname} from allowlist`
+        message: result.changed
+          ? `Removed the allowlist rule covering ${hostname}`
+          : `No allowlist rule covers ${hostname}`
       });
 
       // Reload tab to apply changes

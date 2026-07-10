@@ -120,6 +120,10 @@ test("whitelist string helpers add detect and remove exact and wildcard entries"
   const missingInput = filter.isDomainInWhitelist("", duplicate);
   const emptyAdded = filter.addDomainToWhitelist("solo.test", "");
   const removed = filter.removeDomainFromWhitelist("example.com", duplicate);
+  const parentWildcardRemoved = filter.removeDomainFromWhitelist(
+    "app.example.com",
+    "*.example.com, other.test"
+  );
   const unchangedAdd = filter.addDomainToWhitelist("", duplicate);
   const unchangedRemove = filter.removeDomainFromWhitelist("", duplicate);
 
@@ -130,6 +134,7 @@ test("whitelist string helpers add detect and remove exact and wildcard entries"
   expect(missingInput).toBe(false);
   expect(emptyAdded).toBe("*.solo.test");
   expect(removed).toBe("test.com");
+  expect(parentWildcardRemoved).toBe("other.test");
   expect(unchangedAdd).toBe(duplicate);
   expect(unchangedRemove).toBe(duplicate);
 });

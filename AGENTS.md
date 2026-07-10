@@ -19,17 +19,18 @@ This document is the canonical architecture summary for this repository as of th
 | `manifest.json` | Extension entry points, permissions, script order, content script registration. |
 | `background.js` | Startup orchestration, runtime message hub, UA header spoofing, WebRTC policy control, proxy lifecycle, per-site session save/switch handlers (cookies + tab storage), context menus, notifications. |
 | `content-scripts/injector.js` | Fail-closed document-start bootstrap, authenticated trusted config updates, challenge-frame exclusions, MAIN-world injection, fingerprint alert forwarding. |
-| `lib/config.js` | Config defaults/schema and deep merge with persisted data. Storage key: `stealth-guard-config`. |
+| `lib/config.js` | Config defaults/schema, safe normalization, and deep merge with persisted data. Storage key: `stealth-guard-config`. |
 | `lib/storage.js` | Promise wrapper over `chrome.storage.local` (`read/write/remove/clear`). |
 | `lib/domainFilter.js` | Hostname extraction + wildcard allowlist matching (`example.com`, `*.example.com`, `webmail.*`, generic `*pattern*`) with parse/regex caches. |
 | `lib/proxy.js` | Proxy profile/routing helpers, bypass normalization, PAC generation, proxy mode application (`system`, `fixed_servers`, `pac_script`). |
+| `lib/session.js` | Pure session hostname, name, cookie URL, and cookie-scope helpers. |
 | `popup/popup.js` | Quick toggles, per-tab triggered-feature highlighting, current-site allowlist actions, per-site session switcher controls, debounced current-tab reload after config updates. |
 | `options/options.js` | Full settings UI, autosave/save/reset/import/export, proxy profile CRUD, duplicate-save suppression for unchanged configs. |
 
 ## Initialization Sequence
 
 1. Browser loads background scripts in manifest order:
-   `lib/storage.js` -> `lib/config.js` -> `lib/domainFilter.js` -> `lib/proxy.js` -> `background.js`.
+   `lib/storage.js` -> `lib/config.js` -> `lib/domainFilter.js` -> `lib/proxy.js` -> `lib/session.js` -> `background.js`.
 2. `background.js` immediately runs `initializeBackground()`:
    - `loadConfig()` and sets in-memory `currentConfig` + cached `DomainFilter`.
    - Applies UA header spoofing listener (`webRequest.onBeforeSendHeaders`).
@@ -117,7 +118,7 @@ Implementation note:
 ## Core Runtime Flows
 
 1. Config update path:
-   - UI sends `update-config`.
+   - UI sends `update-config`; background validates the payload shape and normalizes it against safe defaults.
    - Background diffs relevant sections (`enabled`, `globalWhitelist`, `useragent`, `webrtc`, `proxy`), saves config, reapplies only changed subsystems, and broadcasts `config-updated` to HTTP/HTTPS tabs.
    - Injector keeps runtime config private and forwards it through the authenticated MAIN-world update channel when `config-updated` is received.
 
@@ -141,7 +142,7 @@ Implementation note:
 
 6. Session switch path:
    - Popup requests/saves sessions keyed by normalized current hostname.
-   - Background snapshots cookies + current-tab `localStorage`/`sessionStorage` and persists locally.
+   - Background verifies the target tab still belongs to that hostname, snapshots only its cookie store plus current-tab `localStorage`/`sessionStorage`, and persists locally.
    - On switch/clear, background clears current site state, restores selected snapshot (for switch), and reloads tab.
 
 ## Current Behavior Notes (Non-Stale)

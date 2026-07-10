@@ -40,10 +40,10 @@ jobs:
 
       - name: Package extension
         run: |
-          zip -r stealth-guard.zip manifest.json background.js content-scripts icons lib options popup README.md LICENSE PRIVACY.md
+          zip -r stealth-guard.zip manifest.json background.js content-scripts icons lib options popup README.md LICENSE PRIVACY.md CHANGELOG.md
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Release ${{ steps.version.outputs.tag }}

@@ -1809,6 +1809,7 @@
       const originalAppVersion = Object.getOwnPropertyDescriptor(Navigator.prototype, "appVersion");
       const originalVendor = Object.getOwnPropertyDescriptor(Navigator.prototype, "vendor");
       const originalOscpu = Object.getOwnPropertyDescriptor(Navigator.prototype, "oscpu");
+      const originalUserAgentData = Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgentData");
 
       // Override userAgent
       try {
@@ -1884,7 +1885,11 @@
         try {
           Object.defineProperty(Navigator.prototype, "userAgentData", {
             get: function () {
-              if (!shouldSpoofUserAgent()) return undefined; // Ideally restore original, but undefined is safer than spoofed for now
+              if (!shouldSpoofUserAgent()) {
+                return originalUserAgentData && originalUserAgentData.get
+                  ? originalUserAgentData.get.call(this)
+                  : undefined;
+              }
               return undefined;
             },
             configurable: true,

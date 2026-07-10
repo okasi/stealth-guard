@@ -3,14 +3,31 @@
   "version": "1.0.10",
   "private": true,
   "description": "MV2-compatible browser fingerprinting protection extension.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/okasi/stealth-guard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/okasi/stealth-guard/issues"
+  },
+  "homepage": "https://github.com/okasi/stealth-guard#readme",
+  "keywords": [
+    "browser-extension",
+    "fingerprinting",
+    "privacy",
+    "security"
+  ],
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
     "test": "vitest run",
+    "test:watch": "vitest",
     "coverage": "vitest run --coverage",
     "syntax": "node tools/check-syntax.cjs",
-    "check": "npm run syntax && npm run coverage"
+    "manifest": "node tools/check-manifest.cjs",
+    "check": "npm run syntax && npm run manifest && npm run coverage"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "4.1.10",

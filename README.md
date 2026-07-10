@@ -1,10 +1,26 @@
 <div align="center">
   <img src="icons/128.png" alt="Stealth Guard Logo" width="128" />
-  <h1>🛡️ Stealth Guard</h1>
-  <p><strong>Advanced browser fingerprinting protection for MV2-compatible browsers (Opera, Brave, Vivaldi, Edge)</strong></p>
+  <h1>Stealth Guard</h1>
+  <p><strong>Local-first browser fingerprinting protection for MV2-compatible Chromium browsers</strong></p>
+
+  [![CI](https://github.com/okasi/stealth-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/okasi/stealth-guard/actions/workflows/ci.yml)
+  [![Release](https://img.shields.io/github/v/release/okasi/stealth-guard)](https://github.com/okasi/stealth-guard/releases)
+  [![License](https://img.shields.io/github/license/okasi/stealth-guard)](LICENSE)
+  ![Core coverage](https://img.shields.io/badge/deterministic_core-100%25_coverage-16a34a)
 </div>
 
-Stealth Guard is a privacy-focused browser extension that protects against various fingerprinting techniques used to track users across the web. It provides comprehensive defense against canvas, WebGL, font, audio, and other fingerprinting methods while maintaining website compatibility.
+Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts, AudioContext, ClientRects, WebGPU, timezone, User-Agent, and WebRTC surfaces. Settings and optional saved site sessions stay in local extension storage; there is no telemetry or analytics.
+
+> [!IMPORTANT]
+> Stealth Guard currently uses Manifest V2. Standard Google Chrome releases have disabled MV2, and most Chromium forks followed upstream. Opera is the primary current target because it still supports existing MV2 extensions. See [Browser compatibility](#-browser-compatibility) before installing.
+
+## Why Stealth Guard?
+
+- **Fail-closed startup:** browser API wrappers install at `document_start` with safe defaults, then receive trusted local configuration.
+- **Compatibility controls:** global and per-feature allowlists make protection practical on complex web apps.
+- **Local-first operation:** no accounts, telemetry, analytics, or Stealth Guard servers.
+- **Auditable source:** plain JavaScript with no production dependencies and no opaque build artifacts.
+- **Quality gates:** manifest validation, syntax checks, dependency auditing, and 100% coverage for deterministic core modules.
 
 ## ✨ Features
 
@@ -40,11 +56,7 @@ Stealth Guard is a privacy-focused browser extension that protects against vario
 ### 🔧 Manual Installation (Developer Mode)
 
 1. Download or clone this repository
-2. Open your browser's extension page:
-   - **Opera**: Navigate to `opera://extensions/`
-   - **Brave**: Navigate to `brave://extensions/`
-   - **Vivaldi**: Navigate to `vivaldi://extensions/`
-   - **Edge**: Navigate to `edge://extensions/`
+2. In Opera, navigate to `opera://extensions/` (or open the equivalent extensions page in another explicitly MV2-enabled Chromium build)
 3. Enable **Developer mode** (toggle in top-right corner)
 4. Click **Load unpacked**
 5. Select the extension folder
@@ -136,7 +148,7 @@ Run the local quality gate:
 npm run check
 ```
 
-This runs syntax validation for extension source JavaScript files and a Vitest suite with 100% statements, branches, functions, and lines coverage enforced for the deterministic library layer in `lib/`. Browser lifecycle code in `background.js`, `content-scripts/`, `popup/`, and `options/` is syntax-checked here and should still be manually validated in an MV2-compatible browser.
+This validates extension source syntax and manifest integrity, then runs Vitest with 100% statements, branches, functions, and lines coverage enforced for deterministic core modules in `lib/`. Browser lifecycle code in `background.js`, `content-scripts/`, `popup/`, and `options/` is syntax-checked and must also be manually validated in an MV2-compatible browser.
 
 The content script installs wrappers immediately at `document_start` with embedded safe defaults, then applies trusted `chrome.storage.local` config through a private authenticated MAIN-world update channel. This fail-closed design avoids a pre-patch fingerprinting window; if storage is slow, default protections may apply briefly before stored disables or allowlists take effect.
 
@@ -154,6 +166,7 @@ lib/
   config.js                → Config defaults + merge/persistence helpers
   domainFilter.js          → Domain extraction + wildcard allowlist matching
   proxy.js                 → Proxy mode/PAC generation and profile helpers
+  session.js               → Session hostname and cookie-scope helpers
   storage.js               → Promise wrapper for chrome.storage.local
 ```
 
@@ -162,7 +175,7 @@ lib/
 This extension intentionally uses **Manifest V2** for maximum API compatibility. Key features like `webRequestBlocking` and synchronous header modification require MV2 and are restricted or impossible in Manifest V3.
 
 > [!WARNING]
-> Because of Manifest V2, **this extension will no longer work on standard versions of Google Chrome** due to the MV2 phase-out. It is designed for browsers that maintain support for Manifest V2 extensions (such as Opera, Brave, Vivaldi, and potentially Enterprise Edge).
+> Because of Manifest V2, **this extension does not work on current standard versions of Google Chrome**. A separate Manifest V3 architecture is required for broad Chrome, Brave, Vivaldi, and Edge support.
 
 ### 🔐 Permissions
 
@@ -192,23 +205,21 @@ Stealth Guard:
 
 | Browser | Support | Notes |
 |---------|---------|-------|
-| Opera | ✅ Full support | Built-in functionality maintains MV2 support |
-| Brave | ✅ Full support | Built-in functionality maintains MV2 support |
-| Vivaldi | ✅ Full support | Built-in functionality maintains MV2 support |
-| Microsoft Edge | ⚠️ Limited | Supported via enterprise policies (until phase-out) |
-| Google Chrome | ❌ Unsupported | Standard Chrome has phased out Manifest V2 |
+| Opera | ✅ Primary target | Opera states that existing MV2 extensions remain supported; its store no longer accepts new MV2 uploads, so use developer-mode installation. |
+| Brave | ❌ Unsupported | Brave limits post-phase-out MV2 support to four specifically maintained extensions; Stealth Guard is not one of them. |
+| Vivaldi | ❌ Unsupported | Vivaldi announced that MV2 extensions would stop working as Chromium removed the platform. |
+| Microsoft Edge | ❌ Unsupported | Current project releases are not validated against an MV2-capable Edge channel. |
+| Google Chrome | ❌ Unsupported | Chrome disabled MV2 everywhere starting with Chrome 138/139. |
 
 *Note: Firefox uses a different extension format and is not currently supported.*
 
+Vendor references: [Chrome MV2 timeline](https://developer.chrome.com/docs/extensions/develop/migrate/mv2-deprecation-timeline), [Opera MV2 status](https://blogs.opera.com/news/2025/09/mv2-extensions-opera/), [Brave MV2 policy](https://brave.com/blog/brave-shields-manifest-v3/), and [Vivaldi MV3 update](https://vivaldi.com/blog/manifest-v3-update-vivaldi-is-future-proofed-with-its-built-in-functionality/).
+
 ## 🤝 Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, privacy, and pull-request expectations. Please report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+Release changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ## 📄 License
 

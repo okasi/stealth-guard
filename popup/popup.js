@@ -241,6 +241,7 @@ function updateUI() {
   }
 
   // Update allowlist highlighting for current site
+  updateCurrentSite();
   updateAllowlistHighlighting();
 }
 
@@ -304,10 +305,10 @@ function updateCurrentSite() {
 
       if (isWhitelisted) {
         buttonElement.textContent = "Remove from Allowlist";
-        buttonElement.style.background = "#f44336";
+        buttonElement.classList.add("danger");
       } else {
         buttonElement.textContent = "Add to Allowlist";
-        buttonElement.style.background = "#667eea";
+        buttonElement.classList.remove("danger");
       }
       buttonElement.disabled = false;
     } else {
@@ -681,9 +682,13 @@ function setupEventListeners() {
           chrome.runtime.sendMessage({
             type: "remove-from-whitelist",
             domain: hostname
-          }, () => {
+          }, (response) => {
             if (chrome.runtime.lastError) {
               console.error("Failed to remove from allowlist:", chrome.runtime.lastError);
+              return;
+            }
+            if (!response || response.success === false) {
+              console.error("Failed to remove from allowlist:", response && response.error);
               return;
             }
             // Reload config and update UI
@@ -697,9 +702,13 @@ function setupEventListeners() {
           chrome.runtime.sendMessage({
             type: "add-to-whitelist",
             domain: hostname
-          }, () => {
+          }, (response) => {
             if (chrome.runtime.lastError) {
               console.error("Failed to add to allowlist:", chrome.runtime.lastError);
+              return;
+            }
+            if (!response || response.success === false) {
+              console.error("Failed to add to allowlist:", response && response.error);
               return;
             }
             // Reload config and update UI

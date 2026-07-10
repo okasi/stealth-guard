@@ -383,29 +383,32 @@ function populateProxyProfiles() {
 
   // Update profiles list
   const profilesList = document.getElementById('proxy-profiles-list');
-  profilesList.innerHTML = '';
+  profilesList.replaceChildren();
 
   if (profiles.length === 0) {
-    profilesList.innerHTML = '<p style="color: #666; font-style: italic; margin: 10px 0;">No proxy profiles configured</p>';
+    const emptyMessage = document.createElement('p');
+    emptyMessage.className = 'empty-state';
+    emptyMessage.textContent = 'No proxy profiles configured';
+    profilesList.appendChild(emptyMessage);
     return;
   }
 
   profiles.forEach(profile => {
     const profileCard = document.createElement('div');
-    profileCard.style.cssText = 'background: #f5f5f5; padding: 10px; margin-bottom: 8px; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;';
+    profileCard.className = 'proxy-profile-card';
 
     const profileInfo = document.createElement('div');
     const profileName = document.createElement('strong');
     profileName.textContent = profile.name || 'Unnamed proxy';
 
     const profileDetails = document.createElement('div');
-    profileDetails.style.cssText = 'font-size: 0.9em; color: #666;';
+    profileDetails.className = 'proxy-profile-details';
     profileDetails.textContent = `${String(profile.scheme || '').toUpperCase()} ${profile.host || ''}:${profile.port || ''}`;
 
     if (profile.location) {
       const lineBreak = document.createElement('br');
       const location = document.createElement('span');
-      location.style.cssText = 'font-size: 0.85em;';
+      location.className = 'proxy-profile-location';
       location.textContent = `Location: ${profile.location.city || 'Unknown'}, ${profile.location.country || 'Unknown'}`;
       profileDetails.appendChild(lineBreak);
       profileDetails.appendChild(location);
@@ -415,18 +418,18 @@ function populateProxyProfiles() {
     profileInfo.appendChild(profileDetails);
 
     const buttonsDiv = document.createElement('div');
-    buttonsDiv.style.cssText = 'display: flex; gap: 6px;';
+    buttonsDiv.className = 'proxy-profile-actions';
 
     const editBtn = document.createElement('button');
     editBtn.textContent = 'Edit';
     editBtn.className = 'btn-secondary';
-    editBtn.style.cssText = 'padding: 5px 10px; font-size: 0.9em;';
+    editBtn.classList.add('btn-compact');
     editBtn.onclick = () => editProxyProfile(profile.name);
 
     const removeBtn = document.createElement('button');
     removeBtn.textContent = 'Remove';
     removeBtn.className = 'btn-danger';
-    removeBtn.style.cssText = 'padding: 5px 10px; font-size: 0.9em;';
+    removeBtn.classList.add('btn-compact');
     removeBtn.onclick = () => removeProxyProfile(profile.name);
 
     buttonsDiv.appendChild(editBtn);
@@ -830,21 +833,38 @@ function exportConfig() {
 }
 
 function importConfig(file) {
+  const MAX_CONFIG_FILE_SIZE = 1024 * 1024;
+  if (!file || file.size > MAX_CONFIG_FILE_SIZE) {
+    showToast('Config files must be smaller than 1 MB', 'error');
+    return;
+  }
+
   const reader = new FileReader();
 
   reader.onload = (e) => {
     try {
       const data = JSON.parse(e.target.result);
 
-      if (!data.config) {
+      if (!data.config || typeof data.config !== 'object' || Array.isArray(data.config)) {
         showToast('Invalid config file: missing config data', 'error');
         return;
       }
 
-      currentConfig = data.config;
-      populateFields();
-      saveConfig(false);
-      showToast('Settings imported successfully', 'success');
+      chrome.runtime.sendMessage({ type: 'update-config', config: data.config }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error('Failed to import config:', chrome.runtime.lastError);
+          showToast('Failed to import settings', 'error');
+          return;
+        }
+
+        if (!response || response.success === false) {
+          showToast(response && response.error ? response.error : 'Failed to import settings', 'error');
+          return;
+        }
+
+        loadConfig();
+        showToast('Settings imported successfully', 'success');
+      });
     } catch (err) {
       console.error('Failed to parse config file:', err);
       showToast('Failed to parse config file', 'error');
