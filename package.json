@@ -25,12 +25,14 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
+    "e2e": "node tools/e2e.mjs",
     "syntax": "node tools/check-syntax.cjs",
     "manifest": "node tools/check-manifest.cjs",
-    "check": "npm run syntax && npm run manifest && npm run coverage"
+    "check": "npm run syntax && npm run manifest && npm run coverage && npm run e2e"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "4.1.10",
+    "playwright-core": "1.61.1",
     "vitest": "4.1.10"
   }
 }

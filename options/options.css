@@ -6,7 +6,7 @@
   --text: #333333;
   --muted: #666666;
   --primary: #4a90e2;
-  --primary-hover: #4a90e2;
+  --primary-hover: #357abd;
   --danger: #f44336;
   --danger-hover: #d32f2f;
   --success: #4caf50;
@@ -21,21 +21,34 @@
 }
 
 html {
-  background: linear-gradient(to bottom, rgb(73, 85, 97) 0%, rgb(187, 193, 200) 100%);
+  background: linear-gradient(
+    to bottom,
+    rgb(73, 85, 97) 0%,
+    rgb(187, 193, 200) 100%
+  );
   background-attachment: fixed;
   min-height: 100%;
   overscroll-behavior: none;
 }
 
 body {
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
   color: var(--text);
   line-height: 1.6;
   min-height: 100vh;
   overscroll-behavior: none;
 }
 
-input, select, textarea, button {
+input,
+select,
+textarea,
+button {
   font: inherit;
 }
 
@@ -86,7 +99,7 @@ header p {
 .card {
   background: white;
   border: 0;
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 24px;
   box-shadow: var(--shadow);
   scroll-margin-top: 24px;
@@ -153,7 +166,9 @@ header p {
   font-family: inherit;
   background: var(--surface);
   color: var(--text);
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
 }
 
 .field input[type="text"]:focus,
@@ -207,7 +222,11 @@ button {
   font-size: 15px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    box-shadow 0.15s,
+    transform 0.15s;
 }
 
 .btn-primary {
@@ -265,6 +284,10 @@ button {
   background: var(--success);
 }
 
+.card.highlight {
+  background: #eaf2ff;
+}
+
 .toast.error {
   background: var(--danger);
 }
@@ -302,8 +325,7 @@ textarea:focus-visible {
 }
 
 .proxy-profiles-list,
-.proxy-editor,
-.proxy-dns-row {
+.proxy-editor {
   margin-bottom: 10px;
 }
 
@@ -322,7 +344,7 @@ textarea:focus-visible {
   padding: 16px;
   background: var(--surface-subtle);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .proxy-editor-grid {
@@ -344,13 +366,6 @@ textarea:focus-visible {
   padding: 9px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-}
-
-.checkbox-inline {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
 }
 
 .btn-block {
@@ -389,7 +404,7 @@ textarea:focus-visible {
   padding: 12px;
   background: var(--surface-subtle);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .proxy-profile-details {

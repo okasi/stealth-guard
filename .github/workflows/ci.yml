@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   quality:
-    name: Syntax, manifest, and coverage
+    name: Full quality gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
 

@@ -11,10 +11,8 @@
     "proxy",
     "tabs",
     "cookies",
-    "webNavigation",
     "webRequest",
     "webRequestBlocking",
-    "declarativeNetRequest",
     "<all_urls>"
   ],
   "homepage_url": "https://github.com/okasi/stealth-guard",
@@ -47,13 +45,13 @@
   "content_scripts": [
     {
       "all_frames": true,
-      "matches": [
-        "<all_urls>"
-      ],
+      "matches": ["<all_urls>"],
       "match_about_blank": true,
       "run_at": "document_start",
       "js": [
         "lib/domainFilter.js",
+        "lib/config.js",
+        "content-scripts/main.js",
         "content-scripts/injector.js"
       ]
     }

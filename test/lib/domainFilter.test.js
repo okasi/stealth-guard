@@ -1,173 +1,160 @@
 import { expect, test } from "vitest";
-import {
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const {
+  createDomainPatternTools,
   DomainFilter,
-  cacheSetWithLimit,
-  getWildcardRegex,
-  parseWhitelistPatterns
-} from "../../lib/domainFilter.js";
+  getDomainPatternParts,
+  matchesDomainPattern,
+  normalizeDomainPattern,
+  normalizeHostname,
+  parseDomainPatterns,
+} = require("../../lib/domainFilter.js");
 
-test("cacheSetWithLimit evicts the oldest entry when the limit is reached", () => {
-  // Arrange
-  const cache = new Map([["a", 1], ["b", 2]]);
-
-  // Act
-  cacheSetWithLimit(cache, "c", 3, 2);
-
-  // Assert
-  expect([...cache.keys()]).toEqual(["b", "c"]);
+test("normalizes hostnames and accepts only supported domain pattern shapes", () => {
+  expect(normalizeHostname(" Example.COM. ")).toBe("example.com");
+  expect(normalizeHostname(null)).toBe("");
+  expect(
+    [
+      "example.com",
+      "*.example.com",
+      "webmail.*",
+      "*example.com",
+      "*localhost*",
+      "10.*",
+    ].map(normalizeDomainPattern),
+  ).toEqual([
+    "example.com",
+    "*.example.com",
+    "webmail.*",
+    "*example.com",
+    "*localhost*",
+    "10.*",
+  ]);
+  expect(
+    [
+      "",
+      "bad host",
+      "https://example.com",
+      "**.example.com",
+      "*",
+      "example..com",
+      null,
+    ].map(normalizeDomainPattern),
+  ).toEqual([null, null, null, null, null, null, null]);
 });
 
-test("parseWhitelistPatterns trims lowercases and reuses cached arrays", () => {
-  // Arrange
-  const whitelist = " Example.com, *.Test.COM ,, webmail.* ";
+test("parses and caches comma-separated patterns", () => {
+  const source = " Example.com, *.Test.COM ,, bad host ";
+  const first = parseDomainPatterns(source);
+  const second = parseDomainPatterns(source);
 
-  // Act
-  const first = parseWhitelistPatterns(whitelist);
-  const second = parseWhitelistPatterns(whitelist);
-
-  // Assert
-  expect(first).toEqual(["example.com", "*.test.com", "webmail.*"]);
+  expect(first).toEqual(["example.com", "*.test.com"]);
   expect(second).toBe(first);
+  expect(parseDomainPatterns(null)).toEqual([]);
 });
 
-test("getWildcardRegex escapes regex characters and reuses cached regexes", () => {
-  // Arrange
-  const pattern = "*.example+test.com";
+test("classifies and matches every supported pattern type", () => {
+  expect(getDomainPatternParts("webmail.*")).toEqual({
+    pattern: "webmail.*",
+    type: "prefix",
+    value: "webmail",
+  });
+  expect(getDomainPatternParts("*.example.com").type).toBe("suffix");
+  expect(getDomainPatternParts("*example.com").type).toBe("suffix");
+  expect(getDomainPatternParts("*local*").type).toBe("wildcard");
+  expect(getDomainPatternParts("example.com").type).toBe("plain");
+  expect(getDomainPatternParts("bad host")).toBeNull();
 
-  // Act
-  const first = getWildcardRegex(pattern);
-  const second = getWildcardRegex(pattern);
-
-  // Assert
-  expect(first.test("sub.example+test.com")).toBe(true);
-  expect(first.test("sub.example-test.com")).toBe(false);
-  expect(second).toBe(first);
+  expect([
+    matchesDomainPattern("example.com", "example.com"),
+    matchesDomainPattern("www.example.com", "example.com"),
+    matchesDomainPattern("sub.example.com", "*.example.com"),
+    matchesDomainPattern("example.com", "*example.com"),
+    matchesDomainPattern("webmail.company.test", "webmail.*"),
+    matchesDomainPattern("foo-local-bar", "*local*"),
+    matchesDomainPattern("foo-local-bar", "*local*"),
+    matchesDomainPattern("other.test", "*.example.com"),
+    matchesDomainPattern("", "example.com"),
+    matchesDomainPattern("example.com", "bad host"),
+  ]).toEqual([true, true, true, true, true, true, true, false, false, false]);
 });
 
-test("matches exact plain wildcard prefix suffix and generic patterns", () => {
-  // Arrange
-  const filter = new DomainFilter({});
+test("isolated pattern tool instances maintain their own caches", () => {
+  const firstTools = createDomainPatternTools();
+  const secondTools = createDomainPatternTools();
+  const first = firstTools.parsePatterns("example.com");
+  const cached = firstTools.parsePatterns("example.com");
+  const separate = secondTools.parsePatterns("example.com");
 
-  // Act
-  const results = [
-    filter.matchesPattern("example.com", "example.com"),
-    filter.matchesPattern("www.example.com", "example.com"),
-    filter.matchesPattern("deep.sub.example.com", "*.example.com"),
-    filter.matchesPattern("example.com", "*example.com"),
-    filter.matchesPattern("api.example.com", "*example.com"),
-    filter.matchesPattern("other.com", "*example.com"),
-    filter.matchesPattern("webmail.company.com", "webmail.*"),
-    filter.matchesPattern("mail.company.com", "webmail.*"),
-    filter.matchesPattern("foo-localhost-bar", "*localhost*"),
-    filter.matchesPattern("foo-localhost-bar", "*missing*"),
-    filter.matchesPattern("not-example.com", "example.com")
-  ];
-
-  // Assert
-  expect(results).toEqual([true, true, true, true, true, false, true, false, true, false, false]);
+  expect(cached).toBe(first);
+  expect(separate).not.toBe(first);
+  for (let index = 0; index < 260; index++) {
+    firstTools.parsePatterns(`site-${index}.test`);
+  }
+  expect(firstTools.matches("www.example.com", "example.com")).toBe(true);
 });
 
-test("isWhitelisted handles empty input trimming and case insensitive patterns", () => {
-  // Arrange
-  const filter = new DomainFilter({});
-
-  // Act
-  const empty = filter.isWhitelisted("example.com", "  ");
-  const emptyHostname = filter.isWhitelisted(" ", "example.com");
-  const trimmed = filter.isWhitelisted(" WWW.Example.COM ", "example.com");
-  const missing = filter.isWhitelisted("other.com", "example.com");
-
-  // Assert
-  expect(empty).toBe(false);
-  expect(emptyHostname).toBe(false);
-  expect(trimmed).toBe(true);
-  expect(missing).toBe(false);
-});
-
-test("shouldActivateFeature respects global state feature state URL validity and allowlists", () => {
-  // Arrange
+test("DomainFilter applies global and per-feature allowlists", () => {
   const config = {
     enabled: true,
-    globalWhitelist: "*.trusted.com",
+    globalWhitelist: "*.trusted.test",
     canvas: { enabled: true, whitelist: "*.canvas.test" },
-    webgl: { enabled: false, whitelist: "" }
+    webgl: { enabled: false, whitelist: "" },
   };
   const filter = new DomainFilter(config);
 
-  // Act
-  const results = [
-    new DomainFilter({ ...config, enabled: false }).shouldActivateFeature("https://site.test", "canvas"),
-    filter.shouldActivateFeature("https://site.test", "missing"),
-    filter.shouldActivateFeature("https://site.test", "webgl"),
-    filter.shouldActivateFeature("not a url", "canvas"),
-    filter.shouldActivateFeature("https://app.trusted.com", "canvas"),
-    filter.shouldActivateFeature("https://app.canvas.test", "canvas"),
-    filter.shouldActivateFeature("https://site.test", "canvas")
-  ];
-
-  // Assert
-  expect(results).toEqual([false, false, false, false, false, false, true]);
-});
-
-test("whitelist string helpers add detect and remove exact and wildcard entries", () => {
-  // Arrange
-  const filter = new DomainFilter({});
-
-  // Act
-  const added = filter.addDomainToWhitelist("example.com", "test.com");
-  const duplicate = filter.addDomainToWhitelist("example.com", added);
-  const hasDomain = filter.isDomainInWhitelist("*.example.com", duplicate);
-  const missingInput = filter.isDomainInWhitelist("", duplicate);
-  const emptyAdded = filter.addDomainToWhitelist("solo.test", "");
-  const removed = filter.removeDomainFromWhitelist("example.com", duplicate);
-  const parentWildcardRemoved = filter.removeDomainFromWhitelist(
-    "app.example.com",
-    "*.example.com, other.test"
+  expect(filter.shouldActivateFeature("https://site.test", "canvas")).toBe(
+    true,
   );
-  const unchangedAdd = filter.addDomainToWhitelist("", duplicate);
-  const unchangedRemove = filter.removeDomainFromWhitelist("", duplicate);
+  expect(
+    filter.shouldActivateFeature("https://app.trusted.test", "canvas"),
+  ).toBe(false);
+  expect(
+    filter.shouldActivateFeature("https://app.canvas.test", "canvas"),
+  ).toBe(false);
+  expect(filter.shouldActivateFeature("not a url", "canvas")).toBe(false);
+  expect(filter.shouldActivateFeature("https://site.test", "webgl")).toBe(
+    false,
+  );
+  expect(filter.shouldActivateFeature("https://site.test", "missing")).toBe(
+    false,
+  );
+  expect(
+    new DomainFilter({ ...config, enabled: false }).shouldActivateFeature(
+      "https://site.test",
+      "canvas",
+    ),
+  ).toBe(false);
 
-  // Assert
+  expect(filter.isAllowlisted(" WWW.TRUSTED.TEST ", "*.trusted.test")).toBe(
+    true,
+  );
+  expect(filter.isAllowlisted("", "*.trusted.test")).toBe(false);
+  expect(filter.isAllowlisted("site.test", null)).toBe(false);
+  expect(filter.matchesPattern("webmail.site.test", "webmail.*")).toBe(true);
+  expect(filter.extractHostname("https://Example.com/path")).toBe(
+    "example.com",
+  );
+  expect(filter.extractHostname("bad url")).toBeNull();
+});
+
+test("allowlist helpers add covered domains once and remove every covering rule", () => {
+  const filter = new DomainFilter();
+  const added = filter.addDomainToAllowlist("Example.com", "test.com");
+
   expect(added).toBe("test.com, *.example.com");
-  expect(duplicate).toBe(added);
-  expect(hasDomain).toBe(true);
-  expect(missingInput).toBe(false);
-  expect(emptyAdded).toBe("*.solo.test");
-  expect(removed).toBe("test.com");
-  expect(parentWildcardRemoved).toBe("other.test");
-  expect(unchangedAdd).toBe(duplicate);
-  expect(unchangedRemove).toBe(duplicate);
-});
-
-test("extractHostname returns hostnames and null for invalid URLs", () => {
-  // Arrange
-  const filter = new DomainFilter({});
-
-  // Act
-  const valid = filter.extractHostname("https://Example.com/path");
-  const invalid = filter.extractHostname("not a url");
-
-  // Assert
-  expect(valid).toBe("example.com");
-  expect(invalid).toBeNull();
-});
-
-test("cache and whitelist helpers handle non-string and empty-cache inputs", () => {
-  // Arrange
-  const cache = new Map();
-  const filter = new DomainFilter({
-    enabled: true,
-    globalWhitelist: "",
-    canvas: { enabled: true }
-  });
-
-  // Act
-  cacheSetWithLimit(cache, "first", 1, 0);
-  const parsed = parseWhitelistPatterns(null);
-  const active = filter.shouldActivateFeature("https://site.test", "canvas");
-
-  // Assert
-  expect(cache.get("first")).toBe(1);
-  expect(parsed).toEqual([]);
-  expect(active).toBe(true);
+  expect(filter.addDomainToAllowlist("www.example.com", added)).toBe(added);
+  expect(filter.addDomainToAllowlist("*bad*", added)).toBe(added);
+  expect(filter.addDomainToAllowlist("", added)).toBe(added);
+  expect(filter.addDomainToAllowlist("solo.test", "")).toBe("*.solo.test");
+  expect(
+    filter.removeDomainFromAllowlist(
+      "app.example.com",
+      "*.example.com, other.test",
+    ),
+  ).toBe("other.test");
+  expect(filter.removeDomainFromAllowlist("", added)).toBe(added);
+  expect(filter.removeDomainFromAllowlist("example.com", null)).toBeNull();
 });

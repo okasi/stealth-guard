@@ -1,47 +1,49 @@
-// Background Script - Orchestrates all protection features
-// Libraries are loaded via manifest.json scripts array
-
-// Global state
 let currentConfig = null;
 let currentDomainFilter = null;
-let lastNotificationTime = {};
-let configLoaded = false;
 let initializationPromise = null;
-let triggeredFeaturesPerTab = {}; // Track triggered features per tab: { tabId: { hostname: string, features: Set } }
+const lastNotificationTime = new Map();
+const triggeredFeaturesPerTab = new Map();
 let lastAppliedWebRTCPolicy = null;
 let webRTCPolicyQueue = Promise.resolve();
 let configMutationQueue = Promise.resolve();
 
-// Timing / behavior constants
-const ACTIVATION_RECHECK_DELAY_MS = 377;
 const NOTIFICATION_THROTTLE_MS = 3770;
 const SESSION_STORAGE_KEY = "stealth-guard-sessions";
 const ACTIVE_SESSIONS_STORAGE_KEY = "stealth-guard-active-sessions";
 const MAX_SAVED_SESSIONS_PER_DOMAIN = 20;
+const REPORTED_FEATURES = new Set([
+  ...PROTECTION_FEATURES.filter((feature) => feature !== "useragent"),
+  "user-agent",
+]);
 
-// Debug logging helpers
-const debugLog = function(...args) {
-  if (currentConfig && currentConfig.notifications && currentConfig.notifications.enabled) {
+const debugLog = function (...args) {
+  if (
+    currentConfig &&
+    currentConfig.notifications &&
+    currentConfig.notifications.enabled
+  ) {
     console.log(...args);
   }
 };
 
-const debugWarn = function(...args) {
-  if (currentConfig && currentConfig.notifications && currentConfig.notifications.enabled) {
+const debugWarn = function (...args) {
+  if (
+    currentConfig &&
+    currentConfig.notifications &&
+    currentConfig.notifications.enabled
+  ) {
     console.warn(...args);
   }
 };
 
-const debugError = function(...args) {
-  // Always log errors regardless of debug setting
+const debugError = function (...args) {
   console.error(...args);
 };
 
-// Utility helpers
 function getHostnameFromUrl(url) {
   try {
-    return new URL(url).hostname;
-  } catch (e) {
+    return normalizeHostname(new URL(url).hostname);
+  } catch (error) {
     return null;
   }
 }
@@ -79,27 +81,44 @@ function isHostnameOnGlobalAllowlist(hostname, config = currentConfig) {
   }
 
   const filter = getDomainFilter(config);
-  return filter ? filter.isWhitelisted(hostname, config.globalWhitelist || "") : false;
+  return filter
+    ? filter.isAllowlisted(hostname, config.globalWhitelist || "")
+    : false;
 }
 
-function isHostnameOnFeatureAllowlist(hostname, whitelist, config = currentConfig) {
+function isHostnameOnFeatureAllowlist(
+  hostname,
+  whitelist,
+  config = currentConfig,
+) {
   if (!hostname || !whitelist || !config) {
     return false;
   }
 
   const filter = getDomainFilter(config);
-  return filter ? filter.isWhitelisted(hostname, whitelist) : false;
+  return filter ? filter.isAllowlisted(hostname, whitelist) : false;
 }
 
 function isCloudflareChallengeHostname(hostname) {
-  return hostname === "challenges.cloudflare.com" || hostname.endsWith(".challenges.cloudflare.com");
+  return (
+    hostname === "challenges.cloudflare.com" ||
+    hostname.endsWith(".challenges.cloudflare.com")
+  );
 }
 
 async function ensureBackgroundInitialized() {
-  if (!configLoaded) {
-    debugLog("[Background] Config not loaded yet, waiting for initialization...");
+  if (currentConfig) {
+    return;
+  }
+
+  try {
     await initializationPromise;
-    debugLog("[Background] Initialization complete");
+  } catch (error) {
+    debugError("[Background] Initial initialization failed:", error);
+  }
+
+  if (!currentConfig) {
+    setCurrentConfig(await loadConfig());
   }
 }
 
@@ -108,18 +127,22 @@ function markTriggeredFeatureForTab(tabId, hostname, feature) {
     return;
   }
 
-  if (!triggeredFeaturesPerTab[tabId] || triggeredFeaturesPerTab[tabId].hostname !== hostname) {
-    triggeredFeaturesPerTab[tabId] = { hostname: hostname, features: new Set() };
+  const current = triggeredFeaturesPerTab.get(tabId);
+  if (!current || current.hostname !== hostname) {
+    triggeredFeaturesPerTab.set(tabId, { hostname, features: new Set() });
   }
 
-  triggeredFeaturesPerTab[tabId].features.add(feature);
+  triggeredFeaturesPerTab.get(tabId).features.add(feature);
 }
 
 function queryTabs(queryInfo) {
   return new Promise((resolve) => {
     chrome.tabs.query(queryInfo, (tabs) => {
       if (chrome.runtime.lastError) {
-        debugWarn("[Background] Failed to query tabs for broadcast:", chrome.runtime.lastError.message);
+        debugWarn(
+          "[Background] Failed to query tabs for broadcast:",
+          chrome.runtime.lastError.message,
+        );
         resolve([]);
         return;
       }
@@ -138,13 +161,34 @@ function sendMessageToTabIgnoringErrors(tabId, message) {
       if (error) {
         const msg = error.message || "";
         const expected =
-          msg.includes("Could not establish connection. Receiving end does not exist.") ||
-          msg.includes("The message port closed before a response was received.");
+          msg.includes(
+            "Could not establish connection. Receiving end does not exist.",
+          ) ||
+          msg.includes(
+            "The message port closed before a response was received.",
+          );
         if (!expected) {
-          debugWarn("[Background] tabs.sendMessage warning for tab", tabId + ":", msg);
+          debugWarn(
+            "[Background] tabs.sendMessage warning for tab",
+            tabId + ":",
+            msg,
+          );
         }
       }
       resolve();
+    });
+  });
+}
+
+function callChromeApi(method, ...args) {
+  return new Promise((resolve, reject) => {
+    method(...args, (result) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message || String(error)));
+        return;
+      }
+      resolve(result);
     });
   });
 }
@@ -153,24 +197,20 @@ async function broadcastConfigUpdated(config) {
   const tabs = await queryTabs({ url: ["http://*/*", "https://*/*"] });
   await Promise.all(
     tabs
-      .filter(tab => typeof tab.id === "number")
-      .map(tab => sendMessageToTabIgnoringErrors(tab.id, { type: "config-updated", config }))
+      .filter((tab) => typeof tab.id === "number")
+      .map((tab) =>
+        sendMessageToTabIgnoringErrors(tab.id, {
+          type: "config-updated",
+          config,
+        }),
+      ),
   );
 }
 
-function addFeatureIfActive(injectionConfig, filter, config, url, featureName, label) {
-  const isActive = filter.shouldActivateFeature(url, featureName);
-  debugLog(`[Background] ${label} active:`, isActive);
-  if (isActive) {
-    injectionConfig[featureName] = config[featureName];
-  }
-  return isActive;
-}
-
-// ========== SESSION SWITCHER ==========
-
 function resolveSessionHostname(request, sender) {
-  const explicitHostname = normalizeSessionHostname(request && (request.hostname || request.domain));
+  const explicitHostname = normalizeSessionHostname(
+    request && (request.hostname || request.domain),
+  );
   if (explicitHostname) {
     return explicitHostname;
   }
@@ -179,15 +219,28 @@ function resolveSessionHostname(request, sender) {
 }
 
 function createSessionId() {
-  return "session-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+  return (
+    "session-" +
+    Date.now().toString(36) +
+    "-" +
+    Math.random().toString(36).slice(2, 8)
+  );
 }
 
 async function readSessionState() {
-  const stored = await storage.read([SESSION_STORAGE_KEY, ACTIVE_SESSIONS_STORAGE_KEY]);
-  const sessions = Array.isArray(stored[SESSION_STORAGE_KEY]) ? stored[SESSION_STORAGE_KEY] : [];
-  const activeSessions = stored[ACTIVE_SESSIONS_STORAGE_KEY] && typeof stored[ACTIVE_SESSIONS_STORAGE_KEY] === "object"
-    ? stored[ACTIVE_SESSIONS_STORAGE_KEY]
-    : {};
+  const stored = await storage.read([
+    SESSION_STORAGE_KEY,
+    ACTIVE_SESSIONS_STORAGE_KEY,
+  ]);
+  const sessions = Array.isArray(stored[SESSION_STORAGE_KEY])
+    ? stored[SESSION_STORAGE_KEY]
+    : [];
+  const activeSessions =
+    stored[ACTIVE_SESSIONS_STORAGE_KEY] &&
+    typeof stored[ACTIVE_SESSIONS_STORAGE_KEY] === "object" &&
+    !Array.isArray(stored[ACTIVE_SESSIONS_STORAGE_KEY])
+      ? stored[ACTIVE_SESSIONS_STORAGE_KEY]
+      : {};
 
   return { sessions, activeSessions };
 }
@@ -195,56 +248,28 @@ async function readSessionState() {
 async function writeSessionState(sessions, activeSessions) {
   await storage.write({
     [SESSION_STORAGE_KEY]: sessions,
-    [ACTIVE_SESSIONS_STORAGE_KEY]: activeSessions
+    [ACTIVE_SESSIONS_STORAGE_KEY]: activeSessions,
   });
 }
 
 function cookiesGetAllCookieStores() {
-  return new Promise((resolve, reject) => {
-    chrome.cookies.getAllCookieStores((stores) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(stores || []);
-    });
-  });
+  return callChromeApi(chrome.cookies.getAllCookieStores).then(
+    (stores) => stores || [],
+  );
 }
 
 function cookiesGetAll(details) {
-  return new Promise((resolve, reject) => {
-    chrome.cookies.getAll(details, (cookies) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(cookies || []);
-    });
-  });
+  return callChromeApi(chrome.cookies.getAll, details).then(
+    (cookies) => cookies || [],
+  );
 }
 
 function cookiesRemove(details) {
-  return new Promise((resolve, reject) => {
-    chrome.cookies.remove(details, (removed) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(removed);
-    });
-  });
+  return callChromeApi(chrome.cookies.remove, details);
 }
 
 function cookiesSet(details) {
-  return new Promise((resolve, reject) => {
-    chrome.cookies.set(details, (cookie) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(cookie);
-    });
-  });
+  return callChromeApi(chrome.cookies.set, details);
 }
 
 function maybeCopyCookiePartitionKey(targetDetails, cookie) {
@@ -270,7 +295,9 @@ async function getCookiesForHostname(hostname, tabId) {
 
   for (const store of tabStores) {
     const storeCookies = await cookiesGetAll({ storeId: store.id });
-    const matchingCookies = storeCookies.filter((cookie) => cookieMatchesHostname(cookie, hostname));
+    const matchingCookies = storeCookies.filter((cookie) =>
+      cookieMatchesHostname(cookie, hostname),
+    );
     allCookies.push(...matchingCookies);
   }
 
@@ -284,7 +311,7 @@ async function clearCookiesForHostname(hostname, tabId) {
       const removeDetails = {
         url: buildCookieUrl(cookie, hostname),
         name: cookie.name,
-        storeId: cookie.storeId
+        storeId: cookie.storeId,
       };
 
       maybeCopyCookiePartitionKey(removeDetails, cookie);
@@ -311,7 +338,7 @@ async function restoreCookies(cookies, fallbackHostname) {
         path: cookie.path,
         secure: cookie.secure,
         httpOnly: cookie.httpOnly,
-        storeId: cookie.storeId
+        storeId: cookie.storeId,
       };
 
       if (cookie.domain && cookie.domain.startsWith(".")) {
@@ -334,7 +361,11 @@ async function restoreCookies(cookies, fallbackHostname) {
 
       await cookiesSet(details);
     } catch (error) {
-      debugWarn("[Session] Failed to restore cookie:", cookie && cookie.name, error);
+      debugWarn(
+        "[Session] Failed to restore cookie:",
+        cookie && cookie.name,
+        error,
+      );
     }
   });
 
@@ -342,27 +373,11 @@ async function restoreCookies(cookies, fallbackHostname) {
 }
 
 function executeScriptInTab(tabId, code, runAt = "document_idle") {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.executeScript(tabId, { code, runAt }, (results) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(results);
-    });
-  });
+  return callChromeApi(chrome.tabs.executeScript, tabId, { code, runAt });
 }
 
 function getTabById(tabId) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.get(tabId, (tab) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(tab || null);
-    });
-  });
+  return callChromeApi(chrome.tabs.get, tabId).then((tab) => tab || null);
 }
 
 async function resolveVerifiedSessionTarget(request, sender) {
@@ -378,15 +393,20 @@ async function resolveVerifiedSessionTarget(request, sender) {
   } catch (error) {
     tabUrl = null;
   }
-  const isHttpSite = tabUrl && (tabUrl.protocol === "http:" || tabUrl.protocol === "https:");
+  const isHttpSite =
+    tabUrl && (tabUrl.protocol === "http:" || tabUrl.protocol === "https:");
   const hostname = normalizeSessionHostname(isHttpSite ? tabUrl.hostname : "");
   if (!hostname) {
     return { error: "The target tab is not an HTTP(S) site" };
   }
 
-  const requestedHostname = normalizeSessionHostname(request && (request.hostname || request.domain));
+  const requestedHostname = normalizeSessionHostname(
+    request && (request.hostname || request.domain),
+  );
   if (requestedHostname && requestedHostname !== hostname) {
-    return { error: "The target tab changed sites; reopen the popup and try again" };
+    return {
+      error: "The target tab changed sites; reopen the popup and try again",
+    };
   }
 
   return { tabId, hostname };
@@ -442,8 +462,14 @@ async function clearTabStorage(tabId) {
 
 async function restoreTabStorage(tabId, storageSnapshot) {
   const payload = JSON.stringify({
-    localStorage: storageSnapshot && storageSnapshot.localStorage ? storageSnapshot.localStorage : {},
-    sessionStorage: storageSnapshot && storageSnapshot.sessionStorage ? storageSnapshot.sessionStorage : {}
+    localStorage:
+      storageSnapshot && storageSnapshot.localStorage
+        ? storageSnapshot.localStorage
+        : {},
+    sessionStorage:
+      storageSnapshot && storageSnapshot.sessionStorage
+        ? storageSnapshot.sessionStorage
+        : {},
   });
 
   const script = `
@@ -475,7 +501,10 @@ function reloadTab(tabId) {
   return new Promise((resolve) => {
     chrome.tabs.reload(tabId, { bypassCache: true }, () => {
       if (chrome.runtime.lastError) {
-        debugWarn("[Background] Failed to reload tab:", chrome.runtime.lastError.message);
+        debugWarn(
+          "[Background] Failed to reload tab:",
+          chrome.runtime.lastError.message,
+        );
       }
       resolve();
     });
@@ -485,7 +514,10 @@ function reloadTab(tabId) {
 function sortSessionsForHostname(sessions, hostname) {
   return sessions
     .filter((session) => session.domain === hostname)
-    .sort((a, b) => (b.lastUsed || b.createdAt || 0) - (a.lastUsed || a.createdAt || 0));
+    .sort(
+      (a, b) =>
+        (b.lastUsed || b.createdAt || 0) - (a.lastUsed || a.createdAt || 0),
+    );
 }
 
 function cleanupSessionLimits(sessions, activeSessions, hostname) {
@@ -494,8 +526,14 @@ function cleanupSessionLimits(sessions, activeSessions, hostname) {
     return sessions;
   }
 
-  const keepIds = new Set(domainSessions.slice(0, MAX_SAVED_SESSIONS_PER_DOMAIN).map((session) => session.id));
-  const nextSessions = sessions.filter((session) => session.domain !== hostname || keepIds.has(session.id));
+  const keepIds = new Set(
+    domainSessions
+      .slice(0, MAX_SAVED_SESSIONS_PER_DOMAIN)
+      .map((session) => session.id),
+  );
+  const nextSessions = sessions.filter(
+    (session) => session.domain !== hostname || keepIds.has(session.id),
+  );
 
   if (activeSessions[hostname] && !keepIds.has(activeSessions[hostname])) {
     delete activeSessions[hostname];
@@ -504,127 +542,65 @@ function cleanupSessionLimits(sessions, activeSessions, hostname) {
   return nextSessions;
 }
 
-// ========== INITIALIZATION ==========
-
-// Initialize config immediately when background script loads
-initializationPromise = (async function initializeBackground() {
-  try {
-    // Initial logs before config is loaded - use console.log since debugLog isn't ready yet
-    setCurrentConfig(await loadConfig());
-
-    configLoaded = true;
-    await applyUserAgentSpoofing();
-    await applyWebRTCPolicy();
-    await applyProxySettings();
-    setupContextMenus();
-    debugLog("Stealth Guard initialized successfully");
-  } catch (e) {
-    debugError("Failed to initialize:", e);
-    debugError("Stack:", e.stack);
-  }
-})();
-
-// Initialize on install
-chrome.runtime.onInstalled.addListener(async (details) => {
-  debugLog("Stealth Guard installed/updated");
-
-  // Ensure config is loaded
-  if (!configLoaded) {
-    setCurrentConfig(await loadConfig());
-    configLoaded = true;
-  }
-
-  // Apply User-Agent spoofing
-  await applyUserAgentSpoofing();
-
-  // Apply WebRTC policy
-  await applyWebRTCPolicy();
-
-  // Apply proxy settings
-  await applyProxySettings();
-
-  // Setup context menus
-  setupContextMenus();
-
-  // Open welcome page on first install
-  if (details.reason === "install") {
-    chrome.tabs.create({ url: "options/options.html" });
-  }
-});
-
-// Initialize on startup
-chrome.runtime.onStartup.addListener(async () => {
-  debugLog("Stealth Guard starting");
-  setCurrentConfig(await loadConfig());
-  configLoaded = true;
-  await applyUserAgentSpoofing();
-  await applyWebRTCPolicy();
-  await applyProxySettings();
-});
-
-// ========== DYNAMIC CONFIG INJECTION ==========
-// Config injection is handled by injector.js content script.
-// The injector installs document-start safe defaults synchronously, then receives
-// runtime config updates through the isolated content-script message channel.
-// "get-injection-config" is retained as a legacy compatibility endpoint.
-
-// ========== USER-AGENT SPOOFING ==========
-// HTTP User-Agent header modification using MV2 blocking webRequest.
-// Inspired by UA Switcher Pro; MV3 needs a declarativeNetRequest-specific path.
-
-const USER_AGENT_PRESETS = {
-  macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
-  macos_chrome: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-  windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
-  iphone: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
-  android: "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
-};
-
-const UA_RULE_ID = 1; // Rule ID for User-Agent modification (Legacy DNR)
-
-// Helper to remove legacy DNR rules
-async function clearDNRRules() {
-  try {
-    await chrome.declarativeNetRequest.updateSessionRules({
-      removeRuleIds: [UA_RULE_ID],
-      addRules: []
-    });
-  } catch (e) {}
+async function applyCurrentConfig(config) {
+  setCurrentConfig(config);
+  await applyUserAgentSpoofing(config);
+  await applyWebRTCPolicy(config);
+  await applyProxySettings(config);
 }
 
-// Global reference to the listener function so we can remove it
+async function initializeBackground() {
+  await applyCurrentConfig(await loadConfig());
+  setupContextMenus();
+  debugLog("Stealth Guard initialized");
+}
+
+initializationPromise = initializeBackground().catch((error) => {
+  debugError("Failed to initialize Stealth Guard:", error);
+  throw error;
+});
+
+chrome.runtime.onInstalled.addListener(async (details) => {
+  try {
+    await ensureBackgroundInitialized();
+    setupContextMenus();
+    if (details.reason === "install") {
+      chrome.tabs.create({ url: "options/options.html" });
+    }
+  } catch (error) {
+    debugError("Failed to finish install handling:", error);
+  }
+});
+
+// HTTP User-Agent header modification using MV2 blocking webRequest.
 let uaListener = null;
 
-// Apply User-Agent spoofing using webRequest (Synchronous & Reliable)
-async function applyUserAgentSpoofing() {
+async function applyUserAgentSpoofing(configOverride) {
   try {
-    const config = await getConfig();
+    const config = configOverride || (await getConfig());
 
-    // Always clear legacy DNR rules first
-    await clearDNRRules();
-
-    // Remove existing listener if any
     if (uaListener) {
       chrome.webRequest.onBeforeSendHeaders.removeListener(uaListener);
       uaListener = null;
     }
 
-    // Check if User-Agent spoofing is enabled
-    if (config.enabled === false || !config.useragent || !config.useragent.enabled) {
+    if (
+      config.enabled === false ||
+      !config.useragent ||
+      !config.useragent.enabled
+    ) {
       debugLog("User-Agent spoofing disabled");
       return;
     }
 
-    // Get the User-Agent string
     const preset = config.useragent.preset || "macos";
-    const userAgent = USER_AGENT_PRESETS[preset];
+    const userAgent = getUserAgentString(preset);
 
     if (!userAgent) {
       throw new Error(`Invalid User-Agent preset: ${preset}`);
     }
 
-    // Create the listener function
-    uaListener = function(details) {
+    uaListener = function (details) {
       let hostname = null;
       try {
         hostname = new URL(details.url).hostname;
@@ -632,57 +608,62 @@ async function applyUserAgentSpoofing() {
         return { requestHeaders: details.requestHeaders };
       }
 
-      // Check specific Cloudflare challenge domain first
       if (isCloudflareChallengeHostname(hostname)) {
-        debugLog("[UA Listener] BYPASS: Cloudflare challenge domain:", hostname);
+        debugLog(
+          "[UA Listener] BYPASS: Cloudflare challenge domain:",
+          hostname,
+        );
         return { requestHeaders: details.requestHeaders };
       }
 
       if (
         isHostnameOnGlobalAllowlist(hostname, config) ||
-        isHostnameOnFeatureAllowlist(hostname, config.useragent.whitelist || "", config)
+        isHostnameOnFeatureAllowlist(
+          hostname,
+          config.useragent.whitelist || "",
+          config,
+        )
       ) {
         debugLog("[UA Listener] BYPASS: allowlisted domain:", hostname);
         return { requestHeaders: details.requestHeaders };
       }
 
-      // Modify the User-Agent header
       let uaHeaderFound = false;
       for (let i = 0; i < details.requestHeaders.length; ++i) {
-        if (details.requestHeaders[i].name.toLowerCase() === 'user-agent') {
+        if (details.requestHeaders[i].name.toLowerCase() === "user-agent") {
           details.requestHeaders[i].value = userAgent;
           uaHeaderFound = true;
           break;
         }
       }
 
-      // If no User-Agent header found (rare), add it
       if (!uaHeaderFound) {
         details.requestHeaders.push({
-          name: 'User-Agent',
-          value: userAgent
+          name: "User-Agent",
+          value: userAgent,
         });
       }
 
       return { requestHeaders: details.requestHeaders };
     };
 
-    // Register the listener
     chrome.webRequest.onBeforeSendHeaders.addListener(
       uaListener,
       { urls: ["<all_urls>"] },
-      ["blocking", "requestHeaders", "extraHeaders"]
+      ["blocking", "requestHeaders", "extraHeaders"],
     );
 
-    debugLog("User-Agent spoofing enabled (webRequest):", preset, "->", userAgent);
-
-  } catch (e) {
-    debugError("Failed to apply User-Agent spoofing:", e);
-    throw e;
+    debugLog(
+      "User-Agent spoofing enabled (webRequest):",
+      preset,
+      "->",
+      userAgent,
+    );
+  } catch (error) {
+    debugError("Failed to apply User-Agent spoofing:", error);
+    throw error;
   }
 }
-
-// ========== WEBRTC POLICY ==========
 
 async function applyWebRTCPolicyValue(policy) {
   const previousOperation = webRTCPolicyQueue.catch(() => {});
@@ -691,16 +672,21 @@ async function applyWebRTCPolicyValue(policy) {
       return;
     }
 
-    await chrome.privacy.network.webRTCIPHandlingPolicy.set({ value: policy });
+    await setWebRTCPolicySetting(policy);
     let effectiveSetting = await getWebRTCPolicySetting();
     if (effectiveSetting.value !== policy) {
-      await chrome.privacy.network.webRTCIPHandlingPolicy.set({ value: policy });
+      await setWebRTCPolicySetting(policy);
       effectiveSetting = await getWebRTCPolicySetting();
     }
     if (effectiveSetting.value !== policy) {
-      throw new Error(`WebRTC policy not applied. Expected "${policy}", got "${effectiveSetting.value}"`);
+      throw new Error(
+        `WebRTC policy not applied. Expected "${policy}", got "${effectiveSetting.value}"`,
+      );
     }
-    if (effectiveSetting.levelOfControl === "not_controllable" || effectiveSetting.levelOfControl === "controlled_by_other_extensions") {
+    if (
+      effectiveSetting.levelOfControl === "not_controllable" ||
+      effectiveSetting.levelOfControl === "controlled_by_other_extensions"
+    ) {
       throw new Error(`WebRTC policy is ${effectiveSetting.levelOfControl}`);
     }
     lastAppliedWebRTCPolicy = policy;
@@ -710,192 +696,88 @@ async function applyWebRTCPolicyValue(policy) {
   return operation;
 }
 
-function getWebRTCPolicySetting() {
+function setWebRTCPolicySetting(policy) {
   return new Promise((resolve, reject) => {
-    chrome.privacy.network.webRTCIPHandlingPolicy.get({}, (details) => {
+    chrome.privacy.network.webRTCIPHandlingPolicy.set({ value: policy }, () => {
       const error = chrome.runtime.lastError;
       if (error) {
         reject(new Error(error.message || String(error)));
         return;
       }
-      resolve(details || {});
+      resolve();
     });
   });
 }
 
-async function applyWebRTCPolicy() {
-  try {
-    const config = await getConfig();
+function getWebRTCPolicySetting() {
+  return callChromeApi(
+    chrome.privacy.network.webRTCIPHandlingPolicy.get,
+    {},
+  ).then((details) => details || {});
+}
 
-    const policy = config.enabled !== false && config.webrtc.enabled ? config.webrtc.policy : "default";
+async function applyWebRTCPolicy(configOverride) {
+  try {
+    const config = configOverride || (await getConfig());
+    const policy =
+      config.enabled !== false && config.webrtc.enabled
+        ? config.webrtc.policy
+        : "default";
     await applyWebRTCPolicyValue(policy);
     debugLog("[WebRTC] Base policy applied:", policy);
-  } catch (e) {
-    console.error("Failed to apply WebRTC policy:", e);
-    throw e;
+  } catch (error) {
+    debugError("Failed to apply WebRTC policy:", error);
+    throw error;
   }
 }
 
-// chrome.privacy.network.webRTCIPHandlingPolicy is browser-global. Keep it at
-// the configured protective value while WebRTC protection is enabled; per-site
-// allowlists are handled only by the content-script API patch.
-function setWebRTCPolicy(url) {
-  getConfig().then(config => {
-    if (config.enabled === false || !config.webrtc.enabled) {
-      // Protection disabled - allow WebRTC everywhere
-      applyWebRTCPolicyValue("default")
-        .then(() => {
-          debugLog("[WebRTC] Protection disabled, allowing WebRTC");
-        })
-        .catch((error) => {
-          debugError("[WebRTC] Failed to set default policy:", error);
-        });
-      return;
-    }
-
-    const policy = config.webrtc.policy;
-    applyWebRTCPolicyValue(policy)
-      .then(() => {
-        debugLog("[WebRTC] Global policy set to:", policy, "while visiting:", url);
-      })
-      .catch((error) => {
-        debugError("[WebRTC] Failed to set policy:", error);
-      });
-  }).catch(e => {
-    debugError("[WebRTC] Failed to set policy:", e);
-  });
-}
-
-// Main listener: navigation events (like WebRTC Leak Killer)
-chrome.webNavigation.onBeforeNavigate.addListener((details) => {
-  if (details.frameId !== 0) return; // Only main frame
-  setWebRTCPolicy(details.url);
-});
-
-// Secondary listener: fires after navigation commits (more reliable timing)
-chrome.webNavigation.onCommitted.addListener((details) => {
-  if (details.frameId !== 0) return; // Only main frame
-  setWebRTCPolicy(details.url);
-});
-
-// Tab update listener: catches URL changes and loading state changes
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  // Clear triggered features only when navigating to a different domain
   if (changeInfo.url) {
-    try {
-      const newHostname = new URL(changeInfo.url).hostname;
-      const tabData = triggeredFeaturesPerTab[tabId];
-      if (tabData && tabData.hostname !== newHostname) {
-        delete triggeredFeaturesPerTab[tabId];
-      }
-    } catch (e) {
-      // Invalid URL, clear the data
-      delete triggeredFeaturesPerTab[tabId];
+    const newHostname = getHostnameFromUrl(changeInfo.url);
+    const tabData = triggeredFeaturesPerTab.get(tabId);
+    if (!newHostname || (tabData && tabData.hostname !== newHostname)) {
+      triggeredFeaturesPerTab.delete(tabId);
     }
-  }
-
-  if (changeInfo.url && tab.active) {
-    setWebRTCPolicy(changeInfo.url);
   }
 });
 
-// Tab removed listener: clean up triggered features
 chrome.tabs.onRemoved.addListener((tabId) => {
-  delete triggeredFeaturesPerTab[tabId];
+  triggeredFeaturesPerTab.delete(tabId);
 });
-
-// Tab activation listener: for switching between existing tabs
-chrome.tabs.onActivated.addListener((activeInfo) => {
-  chrome.tabs.get(activeInfo.tabId, (tab) => {
-    if (chrome.runtime.lastError) {
-      // Tab might be closed or not accessible, ignore
-      return;
-    }
-
-    if (tab && tab.url) {
-      setWebRTCPolicy(tab.url);
-
-      // Delayed check to ensure policy is applied after activation
-      setTimeout(() => {
-        chrome.tabs.get(activeInfo.tabId, (currentTab) => {
-          if (chrome.runtime.lastError) {
-            // Tab might be closed, ignore
-            return;
-          }
-
-          if (currentTab && currentTab.active && currentTab.url) {
-            setWebRTCPolicy(currentTab.url);
-          }
-        });
-      }, ACTIVATION_RECHECK_DELAY_MS);
-    }
-  });
-});
-
-// Global proxy allowlist bypass is handled in lib/proxy.js by PAC rules that
-// return DIRECT for allowlisted hosts. Do not toggle chrome.proxy.settings per
-// active tab here; that setting is browser-global and can leak other tabs.
-
-// ========== MESSAGE HANDLING ==========
-
-async function buildInjectionConfigForRequest(request, sender) {
-  await ensureBackgroundInitialized();
-
-  const config = await getConfig();
-  const requestUrl = request.url;
-  debugLog("[Background] Building injection config for URL:", requestUrl);
-
-  const filter = new DomainFilter(config);
-  const injectionConfig = {};
-
-  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "canvas", "Canvas");
-  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "webgl", "WebGL");
-  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "font", "Font");
-  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "clientrects", "ClientRects");
-  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "webgpu", "WebGPU");
-  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "audiocontext", "AudioContext");
-  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "timezone", "Timezone");
-
-  const userAgentActive = filter.shouldActivateFeature(requestUrl, "useragent");
-  debugLog("[Background] User-Agent active:", userAgentActive);
-  if (userAgentActive) {
-    injectionConfig.useragent = config.useragent;
-  }
-
-  addFeatureIfActive(injectionConfig, filter, config, requestUrl, "webrtc", "WebRTC");
-
-  debugLog("[Background] Sending injection config:", injectionConfig);
-  return injectionConfig;
-}
 
 function handleFingerprintDetectedMessage(request, sender) {
-  debugLog("[Background] Fingerprint detected:", request.feature, "on", request.hostname);
-
-  if (sender.tab && typeof sender.tab.id === "number") {
-    markTriggeredFeatureForTab(sender.tab.id, request.hostname, request.feature);
-    debugLog("[Background] Tracked feature", request.feature, "for tab", sender.tab.id, "on", request.hostname);
+  if (!request || !REPORTED_FEATURES.has(request.feature)) {
+    return { success: false, error: "Invalid fingerprint feature" };
   }
 
-  handleFingerprintDetection(request.feature, request.hostname).catch((error) => {
+  const hostname = resolveTabHostname(sender, request.hostname);
+  if (!hostname) {
+    return { success: false, error: "Missing hostname" };
+  }
+  debugLog(
+    "[Background] Fingerprint detected:",
+    request.feature,
+    "on",
+    hostname,
+  );
+
+  if (sender.tab && typeof sender.tab.id === "number") {
+    markTriggeredFeatureForTab(sender.tab.id, hostname, request.feature);
+  }
+
+  handleFingerprintDetection(request.feature, hostname).catch((error) => {
     debugError("[Background] Failed to process fingerprint detection:", error);
   });
 
   return { success: true };
 }
 
-async function handleGetInjectionConfigMessage(request, sender) {
-  try {
-    const injectionConfig = await buildInjectionConfigForRequest(request, sender);
-    return { config: injectionConfig };
-  } catch (error) {
-    debugError("Error getting injection config:", error);
-    return { config: null, error: error.message };
-  }
-}
-
 async function handleGetConfigMessage() {
   try {
-    debugLog("Getting config, current:", currentConfig ? "loaded" : "not loaded");
+    debugLog(
+      "Getting config, current:",
+      currentConfig ? "loaded" : "not loaded",
+    );
     const config = await getConfig();
     debugLog("Sending config response:", config ? "success" : "null");
     return { config };
@@ -914,17 +796,23 @@ function serializeConfigValue(value) {
 }
 
 function didConfigSectionChange(previousConfig, nextConfig, key) {
-  return serializeConfigValue(previousConfig ? previousConfig[key] : undefined) !==
-    serializeConfigValue(nextConfig ? nextConfig[key] : undefined);
-}
-
-function cloneConfig(config) {
-  return JSON.parse(JSON.stringify(config || {}));
+  return (
+    serializeConfigValue(previousConfig ? previousConfig[key] : undefined) !==
+    serializeConfigValue(nextConfig ? nextConfig[key] : undefined)
+  );
 }
 
 function getConfigChangeFlags(previousConfig, nextConfig) {
-  const globalEnabledChanged = didConfigSectionChange(previousConfig, nextConfig, "enabled");
-  const globalWhitelistChanged = didConfigSectionChange(previousConfig, nextConfig, "globalWhitelist");
+  const globalEnabledChanged = didConfigSectionChange(
+    previousConfig,
+    nextConfig,
+    "enabled",
+  );
+  const globalWhitelistChanged = didConfigSectionChange(
+    previousConfig,
+    nextConfig,
+    "globalWhitelist",
+  );
 
   return {
     userAgentChanged:
@@ -933,26 +821,25 @@ function getConfigChangeFlags(previousConfig, nextConfig) {
       globalEnabledChanged,
     webrtcChanged:
       didConfigSectionChange(previousConfig, nextConfig, "webrtc") ||
-      globalWhitelistChanged ||
       globalEnabledChanged,
     proxyChanged:
       didConfigSectionChange(previousConfig, nextConfig, "proxy") ||
       globalWhitelistChanged ||
-      globalEnabledChanged
+      globalEnabledChanged,
   };
 }
 
 async function applyConfigChanges(changeFlags) {
   if (changeFlags.userAgentChanged) {
-    await applyUserAgentSpoofing();
+    await applyUserAgentSpoofing(currentConfig);
   }
 
   if (changeFlags.webrtcChanged) {
-    await applyWebRTCPolicy();
+    await applyWebRTCPolicy(currentConfig);
   }
 
   if (changeFlags.proxyChanged) {
-    await applyProxySettings();
+    await applyProxySettings(currentConfig);
   }
 }
 
@@ -972,7 +859,10 @@ async function saveConfigWithRollback(previousConfig, nextConfig) {
       await applyConfigChanges(changeFlags);
       await broadcastConfigUpdated(previousConfig);
     } catch (rollbackError) {
-      debugError("[Background] Failed to roll back config after apply failure:", rollbackError);
+      debugError(
+        "[Background] Failed to roll back config after apply failure:",
+        rollbackError,
+      );
     }
 
     throw error;
@@ -989,13 +879,19 @@ function enqueueConfigMutation(operation) {
 
 async function handleUpdateConfigMessage(request) {
   return enqueueConfigMutation(async () => {
-    if (!request || !request.config || typeof request.config !== "object" || Array.isArray(request.config)) {
+    if (
+      !request ||
+      !request.config ||
+      typeof request.config !== "object" ||
+      Array.isArray(request.config)
+    ) {
       throw new Error("Invalid configuration payload");
     }
 
     const previousConfig = cloneConfig(await getConfig());
     const nextConfig = normalizeConfig(request.config);
-    const configChanged = serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
+    const configChanged =
+      serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
 
     if (!configChanged) {
       return { success: true };
@@ -1012,9 +908,18 @@ async function updateGlobalWhitelist(request, mutator) {
     const previousConfig = cloneConfig(await getConfig());
     const nextConfig = cloneConfig(previousConfig);
     const filter = new DomainFilter(nextConfig);
+    const domain = normalizeDomainPattern(request && request.domain);
+    if (!domain || domain.includes("*")) {
+      throw new Error("Invalid domain");
+    }
 
-    nextConfig.globalWhitelist = mutator(filter, request.domain, nextConfig.globalWhitelist);
-    const changed = serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
+    nextConfig.globalWhitelist = mutator(
+      filter,
+      domain,
+      nextConfig.globalWhitelist,
+    );
+    const changed =
+      serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
 
     if (changed) {
       await saveConfigWithRollback(previousConfig, nextConfig);
@@ -1026,13 +931,13 @@ async function updateGlobalWhitelist(request, mutator) {
 
 async function handleAddToWhitelistMessage(request) {
   return updateGlobalWhitelist(request, (filter, domain, whitelist) => {
-    return filter.addDomainToWhitelist(domain, whitelist);
+    return filter.addDomainToAllowlist(domain, whitelist);
   });
 }
 
 async function handleRemoveFromWhitelistMessage(request) {
   return updateGlobalWhitelist(request, (filter, domain, whitelist) => {
-    return filter.removeDomainFromWhitelist(domain, whitelist);
+    return filter.removeDomainFromAllowlist(domain, whitelist);
   });
 }
 
@@ -1041,7 +946,9 @@ async function handleResetConfigMessage() {
     const previousConfig = cloneConfig(await getConfig());
     const nextConfig = cloneConfig(DEFAULT_CONFIG);
 
-    if (serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig)) {
+    if (
+      serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig)
+    ) {
       await saveConfigWithRollback(previousConfig, nextConfig);
     }
 
@@ -1050,8 +957,17 @@ async function handleResetConfigMessage() {
 }
 
 function handleGetTriggeredFeaturesMessage(request) {
-  const tabData = triggeredFeaturesPerTab[request.tabId];
-  return { features: tabData && tabData.features ? Array.from(tabData.features) : [] };
+  const tabData = triggeredFeaturesPerTab.get(request.tabId);
+  return {
+    features: tabData && tabData.features ? Array.from(tabData.features) : [],
+  };
+}
+
+async function handlePrepareProxyProfileMessage(request) {
+  return {
+    success: true,
+    profile: await prepareProxyProfile(request && request.profile),
+  };
 }
 
 function resolveSessionTabId(request, sender) {
@@ -1069,14 +985,19 @@ function resolveSessionTabId(request, sender) {
 async function handleGetSessionsMessage(request, sender) {
   const hostname = resolveSessionHostname(request, sender);
   if (!hostname) {
-    return { success: false, error: "Missing hostname", sessions: [], activeSessionId: null };
+    return {
+      success: false,
+      error: "Missing hostname",
+      sessions: [],
+      activeSessionId: null,
+    };
   }
 
   const { sessions, activeSessions } = await readSessionState();
   return {
     success: true,
     sessions: sortSessionsForHostname(sessions, hostname),
-    activeSessionId: activeSessions[hostname] || null
+    activeSessionId: activeSessions[hostname] || null,
   };
 }
 
@@ -1089,7 +1010,7 @@ async function handleSaveSessionMessage(request, sender) {
 
   const [cookies, storageSnapshot] = await Promise.all([
     getCookiesForHostname(hostname, tabId),
-    readTabStorageSnapshot(tabId)
+    readTabStorageSnapshot(tabId),
   ]);
 
   const { sessions, activeSessions } = await readSessionState();
@@ -1103,10 +1024,14 @@ async function handleSaveSessionMessage(request, sender) {
     lastUsed: now,
     cookies,
     localStorage: storageSnapshot.localStorage || {},
-    sessionStorage: storageSnapshot.sessionStorage || {}
+    sessionStorage: storageSnapshot.sessionStorage || {},
   };
 
-  const nextSessions = cleanupSessionLimits([...sessions, session], activeSessions, hostname);
+  const nextSessions = cleanupSessionLimits(
+    [...sessions, session],
+    activeSessions,
+    hostname,
+  );
   activeSessions[hostname] = session.id;
   await writeSessionState(nextSessions, activeSessions);
 
@@ -1131,21 +1056,24 @@ async function handleSwitchSessionMessage(request, sender) {
     return { success: false, error: target.error };
   }
   if (target.hostname !== session.domain) {
-    return { success: false, error: "This session belongs to a different site" };
+    return {
+      success: false,
+      error: "This session belongs to a different site",
+    };
   }
   const { tabId } = target;
 
   await Promise.all([
     clearCookiesForHostname(session.domain, tabId),
-    clearTabStorage(tabId)
+    clearTabStorage(tabId),
   ]);
 
   await Promise.all([
     restoreCookies(session.cookies, session.domain),
     restoreTabStorage(tabId, {
       localStorage: session.localStorage || {},
-      sessionStorage: session.sessionStorage || {}
-    })
+      sessionStorage: session.sessionStorage || {},
+    }),
   ]);
 
   session.lastUsed = Date.now();
@@ -1201,7 +1129,7 @@ async function handleClearCurrentSessionMessage(request, sender) {
 
   await Promise.all([
     clearCookiesForHostname(hostname, tabId),
-    clearTabStorage(tabId)
+    clearTabStorage(tabId),
   ]);
 
   const { sessions, activeSessions } = await readSessionState();
@@ -1214,24 +1142,29 @@ async function handleClearCurrentSessionMessage(request, sender) {
 
 const messageHandlers = {
   "fingerprint-detected": handleFingerprintDetectedMessage,
-  "get-injection-config": handleGetInjectionConfigMessage,
   "get-config": handleGetConfigMessage,
   "update-config": handleUpdateConfigMessage,
   "add-to-whitelist": handleAddToWhitelistMessage,
   "remove-from-whitelist": handleRemoveFromWhitelistMessage,
   "reset-config": handleResetConfigMessage,
   "get-triggered-features": handleGetTriggeredFeaturesMessage,
+  "prepare-proxy-profile": handlePrepareProxyProfileMessage,
   "get-sessions": handleGetSessionsMessage,
   "save-session": handleSaveSessionMessage,
   "switch-session": handleSwitchSessionMessage,
   "delete-session": handleDeleteSessionMessage,
   "rename-session": handleRenameSessionMessage,
-  "clear-current-session": handleClearCurrentSessionMessage
+  "clear-current-session": handleClearCurrentSessionMessage,
 };
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const messageType = request && request.type;
-  debugLog("Received message:", messageType, "from:", sender.tab ? "tab" : "popup/options");
+  debugLog(
+    "Received message:",
+    messageType,
+    "from:",
+    sender.tab ? "tab" : "popup/options",
+  );
 
   const handler = messageHandlers[messageType];
   if (!handler) {
@@ -1246,7 +1179,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           sendResponse(payload === undefined ? { success: true } : payload);
         })
         .catch((error) => {
-          debugError(`[Background] Handler failed for "${messageType}":`, error);
+          debugError(
+            `[Background] Handler failed for "${messageType}":`,
+            error,
+          );
           sendResponse({ success: false, error: error.message });
         });
       return true;
@@ -1262,7 +1198,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // ========== FINGERPRINT DETECTION HANDLING ==========
 
 async function handleFingerprintDetection(feature, hostname) {
-  debugLog("[Background] handleFingerprintDetection called for:", feature, hostname);
+  debugLog(
+    "[Background] handleFingerprintDetection called for:",
+    feature,
+    hostname,
+  );
   const config = await getConfig();
 
   debugLog("[Background] Notifications enabled:", config.notifications.enabled);
@@ -1278,53 +1218,72 @@ async function handleFingerprintDetection(feature, hostname) {
     return;
   }
 
-  // Check if the specific feature is enabled
-  const featureConfig = config[feature === "user-agent" ? "useragent" : feature];
+  const featureConfig =
+    config[feature === "user-agent" ? "useragent" : feature];
   if (!featureConfig || !featureConfig.enabled) {
-    debugLog("[Background] Feature", feature, "is disabled, skipping notification");
+    debugLog(
+      "[Background] Feature",
+      feature,
+      "is disabled, skipping notification",
+    );
     return;
   }
 
-  // Check if domain is on the whitelist/allowlist for this feature
+  if (isHostnameOnGlobalAllowlist(hostname, config)) {
+    debugLog("[Background] Domain", hostname, "is globally allowlisted");
+    return;
+  }
+
   const featureWhitelist = featureConfig.whitelist || "";
   if (isHostnameOnFeatureAllowlist(hostname, featureWhitelist, config)) {
-    debugLog("[Background] Domain", hostname, "is on whitelist/allowlist for", feature, "- skipping notification");
+    debugLog(
+      "[Background] Domain",
+      hostname,
+      "is allowlisted for",
+      feature,
+      "- skipping notification",
+    );
     return;
   }
 
-  // Throttle notifications (max 1 per throttle window per feature-hostname combo)
   const key = `${feature}-${hostname}`;
   const now = Date.now();
-  const lastTime = lastNotificationTime[key] || 0;
+  const lastTime = lastNotificationTime.get(key) || 0;
 
   debugLog("[Background] Throttle check:", {
     key: key,
     timeSinceLastNotification: now - lastTime,
-    throttleLimit: NOTIFICATION_THROTTLE_MS
+    throttleLimit: NOTIFICATION_THROTTLE_MS,
   });
 
   if (now - lastTime < NOTIFICATION_THROTTLE_MS) {
     debugLog("[Background] Notification throttled (too soon)");
-    return;  // Too soon
+    return;
   }
 
-  lastNotificationTime[key] = now;
+  lastNotificationTime.set(key, now);
 
   // Show notification
   debugLog("[Background] Creating notification for:", feature, "on", hostname);
-  chrome.notifications.create({
-    type: "basic",
-    iconUrl: "icons/64.png",
-    title: "Stealth Guard - Fingerprint Blocked",
-    message: `${feature.toUpperCase()} fingerprinting attempt blocked on ${hostname}`,
-    priority: 1
-  }, (notificationId) => {
-    if (chrome.runtime.lastError) {
-      debugError("[Background] Notification error:", chrome.runtime.lastError);
-    } else {
-      debugLog("[Background] Notification created with ID:", notificationId);
-    }
-  });
+  chrome.notifications.create(
+    {
+      type: "basic",
+      iconUrl: "icons/64.png",
+      title: "Stealth Guard - Fingerprint Blocked",
+      message: `${feature.toUpperCase()} fingerprinting attempt blocked on ${hostname}`,
+      priority: 1,
+    },
+    (notificationId) => {
+      if (chrome.runtime.lastError) {
+        debugError(
+          "[Background] Notification error:",
+          chrome.runtime.lastError,
+        );
+      } else {
+        debugLog("[Background] Notification created with ID:", notificationId);
+      }
+    },
+  );
 }
 // ========== CONTEXT MENUS ==========
 
@@ -1334,39 +1293,46 @@ function setupContextMenus() {
       debugWarn("Error removing context menus:", chrome.runtime.lastError);
     }
 
-    // Add to whitelist/allowlist menu
-    chrome.contextMenus.create({
-      id: "add-to-global-whitelist",
-      title: "Stealth Guard: Add to Allowlist",
-      contexts: ["page"]
-    }, () => {
-      if (chrome.runtime.lastError) {
-        // Ignore duplicate ID errors
-        debugWarn("Context menu create warning:", chrome.runtime.lastError.message);
-      }
-    });
+    createContextMenu(
+      "add-to-global-whitelist",
+      "Stealth Guard: Add to Allowlist",
+    );
+    createContextMenu(
+      "remove-from-global-whitelist",
+      "Stealth Guard: Remove from Allowlist",
+    );
+    createContextMenu("test-protection", "Stealth Guard: Test Protection");
+  });
+}
 
-    // Remove from whitelist/allowlist menu
-    chrome.contextMenus.create({
-      id: "remove-from-global-whitelist",
-      title: "Stealth Guard: Remove from Allowlist",
-      contexts: ["page"]
-    }, () => {
-      if (chrome.runtime.lastError) {
-        debugWarn("Context menu create warning:", chrome.runtime.lastError.message);
-      }
-    });
+function createContextMenu(id, title) {
+  chrome.contextMenus.create({ id, title, contexts: ["page"] }, () => {
+    if (chrome.runtime.lastError) {
+      debugWarn(
+        "Context menu create warning:",
+        chrome.runtime.lastError.message,
+      );
+    }
+  });
+}
 
-    // Test protection menu
-    chrome.contextMenus.create({
-      id: "test-protection",
-      title: "Stealth Guard: Test Protection",
-      contexts: ["page"]
-    }, () => {
-      if (chrome.runtime.lastError) {
-        debugWarn("Context menu create warning:", chrome.runtime.lastError.message);
-      }
-    });
+function showContextMenuNotification(message) {
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icons/64.png",
+    title: "Stealth Guard",
+    message,
+  });
+}
+
+function reloadTabAfterAllowlistChange(tabId) {
+  chrome.tabs.reload(tabId, () => {
+    if (chrome.runtime.lastError) {
+      debugWarn(
+        "Failed to reload tab after allowlist change:",
+        chrome.runtime.lastError.message,
+      );
+    }
   });
 }
 
@@ -1378,52 +1344,26 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const hostname = url.hostname;
 
     if (info.menuItemId === "add-to-global-whitelist") {
-      const result = await updateGlobalWhitelist({ domain: hostname }, (filter, domain, whitelist) => {
-        return filter.addDomainToWhitelist(domain, whitelist);
-      });
-
-      // Show notification
-      chrome.notifications.create({
-        type: "basic",
-        iconUrl: "icons/64.png",
-        title: "Stealth Guard",
-        message: result.changed ? `Added *.${hostname} to allowlist` : `${hostname} is already allowlisted`
-      });
-
-      // Reload tab to apply changes
-      chrome.tabs.reload(tab.id, () => {
-        if (chrome.runtime.lastError) {
-          debugWarn("Failed to reload tab after allowlist add:", chrome.runtime.lastError.message);
-        }
-      });
-
+      const result = await handleAddToWhitelistMessage({ domain: hostname });
+      showContextMenuNotification(
+        result.changed
+          ? `Added *.${hostname} to allowlist`
+          : `${hostname} is already allowlisted`,
+      );
+      reloadTabAfterAllowlistChange(tab.id);
     } else if (info.menuItemId === "remove-from-global-whitelist") {
-      const result = await updateGlobalWhitelist({ domain: hostname }, (filter, domain, whitelist) => {
-        return filter.removeDomainFromWhitelist(domain, whitelist);
+      const result = await handleRemoveFromWhitelistMessage({
+        domain: hostname,
       });
-
-      // Show notification
-      chrome.notifications.create({
-        type: "basic",
-        iconUrl: "icons/64.png",
-        title: "Stealth Guard",
-        message: result.changed
+      showContextMenuNotification(
+        result.changed
           ? `Removed the allowlist rule covering ${hostname}`
-          : `No allowlist rule covers ${hostname}`
-      });
-
-      // Reload tab to apply changes
-      chrome.tabs.reload(tab.id, () => {
-        if (chrome.runtime.lastError) {
-          debugWarn("Failed to reload tab after allowlist removal:", chrome.runtime.lastError.message);
-        }
-      });
-
+          : `No allowlist rule covers ${hostname}`,
+      );
+      reloadTabAfterAllowlistChange(tab.id);
     } else if (info.menuItemId === "test-protection") {
-      // Open test page
       chrome.tabs.create({ url: "https://browserleaks.com/" });
     }
-
   } catch (e) {
     debugError("Context menu error:", e);
   }
@@ -1440,13 +1380,17 @@ chrome.proxy.onProxyError.addListener((details) => {
     console.error("[Proxy] Fatal error, proxy settings may be invalid");
 
     // Optional: Notify user via notification
-    if (currentConfig && currentConfig.notifications && currentConfig.notifications.enabled) {
+    if (
+      currentConfig &&
+      currentConfig.notifications &&
+      currentConfig.notifications.enabled
+    ) {
       chrome.notifications.create({
         type: "basic",
         iconUrl: "icons/64.png",
         title: "Stealth Guard - Proxy Error",
         message: "Proxy connection failed. Check your proxy settings.",
-        priority: 2
+        priority: 2,
       });
     }
   }
@@ -1455,10 +1399,7 @@ chrome.proxy.onProxyError.addListener((details) => {
 // ========== CONFIG HELPER ==========
 
 async function getConfig() {
-  if (currentConfig) {
-    return currentConfig;
-  }
-  setCurrentConfig(await loadConfig());
+  await ensureBackgroundInitialized();
   return currentConfig;
 }
 

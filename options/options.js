@@ -1,444 +1,414 @@
-// Options Page Script
-
 let currentConfig = null;
 let saveTimeout = null;
-let lastSavedConfigSerialized = null;
-let saveInFlightSerialized = null;
+let lastSavedSnapshot = null;
+let saveInFlightSnapshot = null;
 let editingProxyProfileName = null;
-let editingProxyWasActive = false;
-const DEBOUNCE_DELAY = 1000; // 1 second debounce
 
-// ========== AUTO-SAVE ==========
+const AUTO_SAVE_DELAY_MS = 1000;
+const MAX_CONFIG_FILE_SIZE = 1024 * 1024;
 
-function autoSave() {
-  // Clear any pending save
-  if (saveTimeout) {
-    clearTimeout(saveTimeout);
-  }
+document.addEventListener("DOMContentLoaded", initializeOptions);
+document.addEventListener("visibilitychange", saveWhenHidden);
 
-  // Debounce the save
-  saveTimeout = setTimeout(() => {
-    if (collectValues()) {
-      saveConfig(false); // Don't refresh tabs on auto-save
+async function initializeOptions() {
+  try {
+    await loadOptionsConfig();
+    setupEventListeners();
+    if (window.location.hash) {
+      setTimeout(() => scrollToSection(window.location.hash.slice(1)), 300);
     }
-  }, DEBOUNCE_DELAY);
+  } catch (error) {
+    console.error("Failed to initialize options:", error);
+    showToast(
+      "Failed to load settings. Reload the extension and try again.",
+      "error",
+    );
+  }
 }
 
-function serializeConfigSnapshot(config) {
+function serializeConfig(config) {
   try {
     return JSON.stringify(config);
-  } catch (e) {
+  } catch (error) {
     return null;
   }
 }
 
-function refreshAllHttpTabsWithToast() {
-  chrome.tabs.query({}, (tabs) => {
-    if (chrome.runtime.lastError) {
-      console.error("Failed to query tabs:", chrome.runtime.lastError);
-      showToast("Settings saved! Please reload pages manually to apply changes.", "success");
-      return;
-    }
+async function loadOptionsConfig() {
+  currentConfig = await loadRuntimeConfig();
+  lastSavedSnapshot = serializeConfig(currentConfig);
+  saveInFlightSnapshot = null;
+  populateForm();
+}
 
-    let reloadCount = 0;
-    for (const tab of tabs) {
-      if (tab.url && (tab.url.startsWith("http://") || tab.url.startsWith("https://"))) {
-        chrome.tabs.reload(tab.id, {}, () => {
-          if (!chrome.runtime.lastError) {
-            reloadCount++;
-          }
-        });
-      }
-    }
+function populateForm() {
+  document.getElementById("global-whitelist").value =
+    currentConfig.globalWhitelist;
+  document.getElementById("notifications-enabled").checked =
+    currentConfig.notifications.enabled;
 
-    // Show toast with reload count after a brief delay
-    setTimeout(() => {
-      if (reloadCount > 0) {
-        showToast(`Settings saved! ${reloadCount} tab(s) refreshed.`, "success");
-      } else {
-        showToast("Settings saved!", "success");
+  for (const featureName of PROTECTION_FEATURES) {
+    document.getElementById(`${featureName}-enabled`).checked =
+      currentConfig[featureName].enabled;
+    document.getElementById(`${featureName}-whitelist`).value =
+      currentConfig[featureName].whitelist;
+  }
+
+  document.getElementById("webgl-preset").value = currentConfig.webgl.preset;
+  document.getElementById("timezone-select").value =
+    `${currentConfig.timezone.name}|${currentConfig.timezone.offset}`;
+  document.getElementById("useragent-preset").value =
+    currentConfig.useragent.preset;
+  document.getElementById("webrtc-policy").value = currentConfig.webrtc.policy;
+  document.getElementById("proxy-enabled").checked =
+    currentConfig.proxy.enabled;
+  document.getElementById("proxy-bypass-list").value =
+    currentConfig.proxy.bypassList.join(", ");
+
+  updateUserAgentString();
+  populateProxyProfiles();
+}
+
+function collectForm(options = {}) {
+  const showErrors = options.showErrors !== false;
+  if (!currentConfig) {
+    return false;
+  }
+
+  currentConfig.globalWhitelist =
+    document.getElementById("global-whitelist").value;
+  currentConfig.notifications.enabled = document.getElementById(
+    "notifications-enabled",
+  ).checked;
+
+  for (const featureName of PROTECTION_FEATURES) {
+    currentConfig[featureName].enabled = document.getElementById(
+      `${featureName}-enabled`,
+    ).checked;
+    currentConfig[featureName].whitelist = document.getElementById(
+      `${featureName}-whitelist`,
+    ).value;
+  }
+
+  currentConfig.webgl.preset = document.getElementById("webgl-preset").value;
+  const [timezoneName, timezoneOffset] = document
+    .getElementById("timezone-select")
+    .value.split("|");
+  currentConfig.timezone.name = timezoneName;
+  currentConfig.timezone.offset = Number.parseInt(timezoneOffset, 10);
+  currentConfig.useragent.preset =
+    document.getElementById("useragent-preset").value;
+  currentConfig.webrtc.policy = document.getElementById("webrtc-policy").value;
+
+  currentConfig.proxy.enabled =
+    document.getElementById("proxy-enabled").checked;
+  currentConfig.proxy.activeProfile =
+    document.getElementById("proxy-active-profile").value || null;
+  currentConfig.proxy.bypassList = document
+    .getElementById("proxy-bypass-list")
+    .value.split(",")
+    .map((pattern) => pattern.trim())
+    .filter(Boolean);
+
+  if (
+    currentConfig.proxy.enabled &&
+    !currentConfig.proxy.activeProfile &&
+    currentConfig.proxy.domainRoutes.length === 0
+  ) {
+    if (showErrors) {
+      showToast(
+        "Select an active proxy profile before enabling the proxy.",
+        "error",
+      );
+    }
+    return false;
+  }
+
+  return true;
+}
+
+function scheduleAutoSave() {
+  clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(async () => {
+    saveTimeout = null;
+    if (collectForm()) {
+      await saveOptionsConfig();
+    }
+  }, AUTO_SAVE_DELAY_MS);
+}
+
+async function saveOptionsConfig(refreshTabs = false) {
+  const snapshot = serializeConfig(currentConfig);
+  if (!snapshot) {
+    showToast("Failed to serialize settings.", "error");
+    return false;
+  }
+
+  if (snapshot === lastSavedSnapshot || snapshot === saveInFlightSnapshot) {
+    if (refreshTabs) {
+      await refreshAllHttpTabs();
+    }
+    return true;
+  }
+
+  saveInFlightSnapshot = snapshot;
+  try {
+    const response = await sendRuntimeMessage({
+      type: "update-config",
+      config: currentConfig,
+    });
+    assertSuccessfulResponse(response, "Failed to save settings");
+    lastSavedSnapshot = snapshot;
+    if (refreshTabs) {
+      await refreshAllHttpTabs();
+    } else {
+      showToast("Settings saved", "success");
+    }
+    return true;
+  } catch (error) {
+    console.error("Failed to save settings:", error);
+    showToast(error.message, "error");
+    await loadOptionsConfig();
+    return false;
+  } finally {
+    if (saveInFlightSnapshot === snapshot) {
+      saveInFlightSnapshot = null;
+    }
+  }
+}
+
+async function saveWhenHidden() {
+  if (document.visibilityState !== "hidden" || !currentConfig) {
+    return;
+  }
+  clearTimeout(saveTimeout);
+  saveTimeout = null;
+  if (collectForm({ showErrors: false })) {
+    await saveOptionsConfig();
+  }
+}
+
+function assertSuccessfulResponse(response, fallbackMessage) {
+  if (!response || response.success === false) {
+    throw new Error((response && response.error) || fallbackMessage);
+  }
+  return response;
+}
+
+function queryTabs() {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.query({}, (tabs) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
       }
-    }, 500);
+      resolve(tabs || []);
+    });
   });
 }
 
-function saveConfig(refreshTabs = false) {
-  const serializedConfig = serializeConfigSnapshot(currentConfig);
-  if (!serializedConfig) {
-    showToast("Failed to save settings", "error");
-    return;
-  }
-
-  if (serializedConfig === lastSavedConfigSerialized || serializedConfig === saveInFlightSerialized) {
-    if (refreshTabs) {
-      refreshAllHttpTabsWithToast();
-    }
-    return;
-  }
-
-  saveInFlightSerialized = serializedConfig;
-
-  try {
-    chrome.runtime.sendMessage({
-      type: "update-config",
-      config: currentConfig
-    }, (response) => {
-      if (saveInFlightSerialized === serializedConfig) {
-        saveInFlightSerialized = null;
-      }
-
-      if (chrome.runtime.lastError) {
-        console.error("Failed to save config:", chrome.runtime.lastError);
-        showToast("Failed to save settings", "error");
-        return;
-      }
-
-      if (!response || response.success === false) {
-        const message = response && response.error ? response.error : "Failed to save settings";
-        console.error("Failed to save config:", message);
-        showToast(message, "error");
-        return;
-      }
-
-      lastSavedConfigSerialized = serializedConfig;
-
-      if (refreshTabs) {
-        refreshAllHttpTabsWithToast();
-      } else {
-        showToast("Settings saved", "success");
-      }
+function reloadTab(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.reload(tabId, {}, () => {
+      resolve(!chrome.runtime.lastError);
     });
-
-  } catch (e) {
-    if (saveInFlightSerialized === serializedConfig) {
-      saveInFlightSerialized = null;
-    }
-    console.error("Failed to save config:", e);
-    showToast("Failed to save settings", "error");
-  }
+  });
 }
 
-// ========== INITIALIZATION ==========
-
-document.addEventListener('DOMContentLoaded', () => {
-  loadConfig();
-  setupEventListeners();
-
-  // Check if there's a hash in the URL to scroll to
-  if (window.location.hash) {
-    const sectionId = window.location.hash.substring(1); // Remove the '#'
-    // Delay scroll slightly to ensure page is fully rendered
-    setTimeout(() => {
-      scrollToSection(sectionId);
-    }, 300);
+async function refreshAllHttpTabs() {
+  try {
+    const tabs = await queryTabs();
+    const reloads = tabs
+      .filter(
+        (tab) => typeof tab.id === "number" && /^https?:/.test(tab.url || ""),
+      )
+      .map((tab) => reloadTab(tab.id));
+    const results = await Promise.all(reloads);
+    const reloadCount = results.filter(Boolean).length;
+    showToast(
+      reloadCount
+        ? `Settings saved. ${reloadCount} tab(s) refreshed.`
+        : "Settings saved.",
+      "success",
+    );
+  } catch (error) {
+    console.error("Failed to refresh tabs:", error);
+    showToast("Settings saved. Reload open pages manually.", "success");
   }
-});
-
-// Save on tab visibility change (user switches away)
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden' && currentConfig) {
-    // Clear debounce and save immediately
-    if (saveTimeout) {
-      clearTimeout(saveTimeout);
-      saveTimeout = null;
-    }
-    if (collectValues({ showErrors: false })) {
-      saveConfig(false);
-    }
-  }
-});
-
-// Save before page unload
-window.addEventListener('beforeunload', () => {
-  if (currentConfig) {
-    if (saveTimeout) {
-      clearTimeout(saveTimeout);
-      saveTimeout = null;
-    }
-    if (!collectValues({ showErrors: false })) {
-      return;
-    }
-    const serializedConfig = serializeConfigSnapshot(currentConfig);
-    if (!serializedConfig) {
-      return;
-    }
-    if (serializedConfig === lastSavedConfigSerialized || serializedConfig === saveInFlightSerialized) {
-      return;
-    }
-    // Use sendMessage synchronously before unload
-    chrome.runtime.sendMessage({
-      type: "update-config",
-      config: currentConfig
-    });
-    lastSavedConfigSerialized = serializedConfig;
-  }
-});
-
-// ========== SCROLL TO SECTION ==========
+}
 
 function scrollToSection(sectionId) {
   const section = document.getElementById(sectionId);
-  if (section) {
-    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    // Flash the section to draw attention
-    section.style.transition = 'background 0.5s';
-    section.style.background = '#e6f0ff';
-    setTimeout(() => {
-      section.style.background = '';
-    }, 1000);
+  if (!section) {
+    return;
   }
+  section.scrollIntoView({ behavior: "smooth", block: "start" });
+  section.classList.add("highlight");
+  setTimeout(() => section.classList.remove("highlight"), 1000);
 }
-
-// ========== LOAD CONFIG ==========
-
-function loadConfig() {
-  try {
-    chrome.runtime.sendMessage({ type: "get-config" }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.error("Message error:", chrome.runtime.lastError);
-        showToast("Failed to load settings. Please reload the extension.", "error");
-        return;
-      }
-
-      if (!response || !response.config) {
-        console.error("Invalid config response:", response);
-        // Retry once
-        setTimeout(() => {
-          chrome.runtime.sendMessage({ type: "get-config" }, (retryResponse) => {
-            if (chrome.runtime.lastError) {
-              console.error("Retry message error:", chrome.runtime.lastError);
-              showToast("Failed to load settings. Please reload the extension.", "error");
-              return;
-            }
-
-            if (!retryResponse || !retryResponse.config) {
-              console.error("Invalid config after retry:", retryResponse);
-              showToast("Failed to load settings. Please reload the extension.", "error");
-              return;
-            }
-
-            currentConfig = retryResponse.config;
-            lastSavedConfigSerialized = serializeConfigSnapshot(currentConfig);
-            saveInFlightSerialized = null;
-            populateFields();
-          });
-        }, 100);
-      } else {
-        currentConfig = response.config;
-        lastSavedConfigSerialized = serializeConfigSnapshot(currentConfig);
-        saveInFlightSerialized = null;
-        populateFields();
-      }
-    });
-  } catch (e) {
-    console.error("Failed to load config:", e);
-    showToast("Failed to load settings. Please reload the extension.", "error");
-  }
-}
-
-// ========== POPULATE FIELDS ==========
-
-function populateFields() {
-  if (!currentConfig) return;
-
-  // Global settings
-  document.getElementById('global-whitelist').value = currentConfig.globalWhitelist || "";
-  document.getElementById('notifications-enabled').checked = currentConfig.notifications.enabled;
-
-  // Canvas
-  document.getElementById('canvas-enabled').checked = currentConfig.canvas.enabled;
-  document.getElementById('canvas-whitelist').value = currentConfig.canvas.whitelist || "";
-
-  // WebGL
-  document.getElementById('webgl-enabled').checked = currentConfig.webgl.enabled;
-  document.getElementById('webgl-whitelist').value = currentConfig.webgl.whitelist || "";
-  document.getElementById('webgl-preset').value = currentConfig.webgl.preset || "auto";
-
-  // Font
-  document.getElementById('font-enabled').checked = currentConfig.font.enabled;
-  document.getElementById('font-whitelist').value = currentConfig.font.whitelist || "";
-
-  // ClientRects
-  document.getElementById('clientrects-enabled').checked = currentConfig.clientrects?.enabled ?? true;
-  document.getElementById('clientrects-whitelist').value = currentConfig.clientrects?.whitelist || "";
-
-  // WebGPU
-  document.getElementById('webgpu-enabled').checked = currentConfig.webgpu?.enabled ?? true;
-  document.getElementById('webgpu-whitelist').value = currentConfig.webgpu?.whitelist || "";
-
-  // AudioContext
-  document.getElementById('audiocontext-enabled').checked = currentConfig.audiocontext?.enabled ?? true;
-  document.getElementById('audiocontext-whitelist').value = currentConfig.audiocontext?.whitelist || "";
-
-  // Timezone
-  document.getElementById('timezone-enabled').checked = currentConfig.timezone.enabled;
-  document.getElementById('timezone-whitelist').value = currentConfig.timezone.whitelist || "";
-
-  // Set timezone dropdown based on stored name and offset
-  const timezoneValue = `${currentConfig.timezone.name}|${currentConfig.timezone.offset}`;
-  const timezoneSelect = document.getElementById('timezone-select');
-
-  // Try to find exact match
-  let found = false;
-  for (let i = 0; i < timezoneSelect.options.length; i++) {
-    if (timezoneSelect.options[i].value === timezoneValue) {
-      timezoneSelect.selectedIndex = i;
-      found = true;
-      break;
-    }
-  }
-
-  // If not found, default to first option
-  if (!found) {
-    timezoneSelect.selectedIndex = 0;
-  }
-
-  // User-Agent
-  document.getElementById('useragent-enabled').checked = currentConfig.useragent.enabled;
-  document.getElementById('useragent-whitelist').value = currentConfig.useragent.whitelist || "";
-  document.getElementById('useragent-preset').value = currentConfig.useragent.preset || "macos";
-  updateUserAgentString();
-
-  // WebRTC
-  document.getElementById('webrtc-enabled').checked = currentConfig.webrtc.enabled;
-  document.getElementById('webrtc-whitelist').value = currentConfig.webrtc.whitelist || "";
-  document.getElementById('webrtc-policy').value = currentConfig.webrtc.policy;
-
-  // Proxy
-  document.getElementById('proxy-enabled').checked = currentConfig.proxy?.enabled || false;
-  document.getElementById('proxy-bypass-list').value = (currentConfig.proxy?.bypassList || []).join(', ');
-  populateProxyProfiles();
-
-}
-
-// ========== USER-AGENT PRESETS ==========
-
-const USER_AGENT_PRESETS = {
-  macos: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
-  macos_chrome: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-  windows: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
-  iphone: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1",
-  android: "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
-};
 
 function updateUserAgentString() {
-  const preset = document.getElementById('useragent-preset').value;
-  const uaString = USER_AGENT_PRESETS[preset] || "";
-  document.getElementById('useragent-string').value = uaString;
+  const preset = document.getElementById("useragent-preset").value;
+  document.getElementById("useragent-string").value =
+    USER_AGENT_STRINGS[preset] || "";
 }
 
-// ========== PROXY MANAGEMENT ==========
+function populateProxyProfiles() {
+  const profiles = currentConfig.proxy.profiles;
+  const activeSelect = document.getElementById("proxy-active-profile");
+  activeSelect.replaceChildren(new Option("None (Direct)", ""));
 
-function isValidProxyHost(host) {
-  return Boolean(host) && !/[\u0000-\u001f\u007f\s"'\\;/:?#]/.test(host);
+  for (const profile of profiles) {
+    const option = new Option(
+      profile.name,
+      profile.name,
+      false,
+      profile.name === currentConfig.proxy.activeProfile,
+    );
+    activeSelect.appendChild(option);
+  }
+
+  const list = document.getElementById("proxy-profiles-list");
+  list.replaceChildren();
+  if (profiles.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No proxy profiles configured";
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const profile of profiles) {
+    const card = document.createElement("div");
+    card.className = "proxy-profile-card";
+
+    const info = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = profile.name;
+    const details = document.createElement("div");
+    details.className = "proxy-profile-details";
+    details.textContent = `${profile.scheme.toUpperCase()} ${profile.host}:${profile.port}`;
+    if (profile.location) {
+      const location = document.createElement("div");
+      location.className = "proxy-profile-location";
+      location.textContent = `${profile.location.city || "Unknown"}, ${profile.location.country || "Unknown"}`;
+      details.appendChild(location);
+    }
+    info.append(name, details);
+
+    const actions = document.createElement("div");
+    actions.className = "proxy-profile-actions";
+    actions.append(
+      createProfileButton("Edit", "btn-secondary", () =>
+        editProxyProfile(profile.name),
+      ),
+      createProfileButton("Remove", "btn-danger", () =>
+        removeProxyProfile(profile.name),
+      ),
+    );
+    card.append(info, actions);
+    list.appendChild(card);
+  }
 }
 
-function isValidProxyPattern(pattern) {
-  const normalized = String(pattern || '').trim().toLowerCase();
-  if (!normalized || /[\u0000-\u001f\u007f\s"'\\;/:?#]/.test(normalized)) {
-    return false;
+function createProfileButton(label, className, handler) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.className = `${className} btn-compact`;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function editProxyProfile(profileName) {
+  const profile = currentConfig.proxy.profiles.find(
+    (entry) => entry.name === profileName,
+  );
+  if (!profile) {
+    return;
   }
 
-  const wildcardCount = (normalized.match(/\*/g) || []).length;
-  const wildcardShapeAllowed =
-    wildcardCount === 0 ||
-    (wildcardCount === 1 && normalized.startsWith('*.') && normalized.length > 2) ||
-    (wildcardCount === 1 && normalized.endsWith('.*') && normalized.length > 2) ||
-    (wildcardCount === 1 && normalized.startsWith('*') && normalized.length > 1) ||
-    (wildcardCount === 2 && normalized.startsWith('*') && normalized.endsWith('*') && normalized.length > 2);
+  editingProxyProfileName = profileName;
+  document.getElementById("new-proxy-host").value = profile.host;
+  document.getElementById("new-proxy-port").value = profile.port;
+  document.getElementById("new-proxy-scheme").value = profile.scheme;
+  document.getElementById("new-proxy-name").value = profile.name;
+  document.getElementById("add-proxy-profile").textContent = "Save Profile";
 
-  if (!wildcardShapeAllowed) {
-    return false;
-  }
-
-  const candidate = normalized.replace(/\*/g, '').replace(/^\./, '').replace(/\.$/, '');
-  return Boolean(candidate) && !candidate.includes('..');
+  const editor = document.querySelector("#proxy-section details");
+  editor.open = true;
+  editor.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function resetProxyEditor() {
   editingProxyProfileName = null;
-  editingProxyWasActive = false;
-  const addButton = document.getElementById('add-proxy-profile');
-  if (addButton) {
-    addButton.textContent = 'Add Profile';
-  }
+  document.getElementById("new-proxy-host").value = "";
+  document.getElementById("new-proxy-port").value = "";
+  document.getElementById("new-proxy-name").value = "";
+  document.getElementById("add-proxy-profile").textContent = "Add Profile";
 }
 
-function populateProxyProfiles() {
-  const profiles = currentConfig.proxy?.profiles || [];
-  const activeProfile = currentConfig.proxy?.activeProfile || null;
-
-  // Update active profile dropdown
-  const activeSelect = document.getElementById('proxy-active-profile');
-  activeSelect.innerHTML = '<option value="">None (Direct)</option>';
-  profiles.forEach(profile => {
-    const option = document.createElement('option');
-    option.value = profile.name;
-    option.textContent = profile.name;
-    if (profile.name === activeProfile) {
-      option.selected = true;
-    }
-    activeSelect.appendChild(option);
+async function prepareProxyProfileFromForm() {
+  const existing = currentConfig.proxy.profiles.find(
+    (profile) => profile.name === editingProxyProfileName,
+  );
+  const response = await sendRuntimeMessage({
+    type: "prepare-proxy-profile",
+    profile: {
+      host: document.getElementById("new-proxy-host").value,
+      port: document.getElementById("new-proxy-port").value,
+      scheme: document.getElementById("new-proxy-scheme").value,
+      name: document.getElementById("new-proxy-name").value,
+      location: existing && existing.location,
+    },
   });
+  return assertSuccessfulResponse(response, "Invalid proxy profile").profile;
+}
 
-  // Update profiles list
-  const profilesList = document.getElementById('proxy-profiles-list');
-  profilesList.replaceChildren();
+async function saveProxyProfile() {
+  const wasEditing = Boolean(editingProxyProfileName);
+  try {
+    showToast("Preparing proxy profile...", "success");
+    const profile = await prepareProxyProfileFromForm();
+    const otherProfiles = currentConfig.proxy.profiles.filter(
+      (entry) => entry.name !== editingProxyProfileName,
+    );
 
-  if (profiles.length === 0) {
-    const emptyMessage = document.createElement('p');
-    emptyMessage.className = 'empty-state';
-    emptyMessage.textContent = 'No proxy profiles configured';
-    profilesList.appendChild(emptyMessage);
-    return;
+    const baseName = profile.name;
+    let finalName = baseName;
+    let suffix = 1;
+    while (otherProfiles.some((entry) => entry.name === finalName)) {
+      finalName = `${baseName} (${suffix++})`;
+    }
+    profile.name = finalName;
+
+    const wasActive =
+      currentConfig.proxy.activeProfile === editingProxyProfileName;
+    currentConfig.proxy.profiles = [...otherProfiles, profile];
+    if (editingProxyProfileName) {
+      currentConfig.proxy.domainRoutes = currentConfig.proxy.domainRoutes.map(
+        (route) =>
+          route.profile === editingProxyProfileName
+            ? { ...route, profile: finalName }
+            : route,
+      );
+    }
+    if (wasActive) {
+      currentConfig.proxy.activeProfile = finalName;
+    }
+
+    resetProxyEditor();
+    document.querySelector("#proxy-section details").open = false;
+    populateProxyProfiles();
+    scheduleAutoSave();
+    showToast(
+      `Profile "${finalName}" ${wasEditing ? "updated" : "added"}.`,
+      "success",
+    );
+  } catch (error) {
+    console.error("Failed to prepare proxy profile:", error);
+    showToast(error.message, "error");
   }
-
-  profiles.forEach(profile => {
-    const profileCard = document.createElement('div');
-    profileCard.className = 'proxy-profile-card';
-
-    const profileInfo = document.createElement('div');
-    const profileName = document.createElement('strong');
-    profileName.textContent = profile.name || 'Unnamed proxy';
-
-    const profileDetails = document.createElement('div');
-    profileDetails.className = 'proxy-profile-details';
-    profileDetails.textContent = `${String(profile.scheme || '').toUpperCase()} ${profile.host || ''}:${profile.port || ''}`;
-
-    if (profile.location) {
-      const lineBreak = document.createElement('br');
-      const location = document.createElement('span');
-      location.className = 'proxy-profile-location';
-      location.textContent = `Location: ${profile.location.city || 'Unknown'}, ${profile.location.country || 'Unknown'}`;
-      profileDetails.appendChild(lineBreak);
-      profileDetails.appendChild(location);
-    }
-
-    profileInfo.appendChild(profileName);
-    profileInfo.appendChild(profileDetails);
-
-    const buttonsDiv = document.createElement('div');
-    buttonsDiv.className = 'proxy-profile-actions';
-
-    const editBtn = document.createElement('button');
-    editBtn.textContent = 'Edit';
-    editBtn.className = 'btn-secondary';
-    editBtn.classList.add('btn-compact');
-    editBtn.onclick = () => editProxyProfile(profile.name);
-
-    const removeBtn = document.createElement('button');
-    removeBtn.textContent = 'Remove';
-    removeBtn.className = 'btn-danger';
-    removeBtn.classList.add('btn-compact');
-    removeBtn.onclick = () => removeProxyProfile(profile.name);
-
-    buttonsDiv.appendChild(editBtn);
-    buttonsDiv.appendChild(removeBtn);
-
-    profileCard.appendChild(profileInfo);
-    profileCard.appendChild(buttonsDiv);
-    profilesList.appendChild(profileCard);
-  });
 }
 
 function removeProxyProfile(profileName) {
@@ -446,434 +416,145 @@ function removeProxyProfile(profileName) {
     return;
   }
 
-  currentConfig.proxy.profiles = currentConfig.proxy.profiles.filter(p => p.name !== profileName);
-  currentConfig.proxy.domainRoutes = (currentConfig.proxy.domainRoutes || []).filter(route => route.profile !== profileName);
-
-  // If active profile was removed, disable it
+  currentConfig.proxy.profiles = currentConfig.proxy.profiles.filter(
+    (profile) => profile.name !== profileName,
+  );
+  currentConfig.proxy.domainRoutes = currentConfig.proxy.domainRoutes.filter(
+    (route) => route.profile !== profileName,
+  );
   if (currentConfig.proxy.activeProfile === profileName) {
     currentConfig.proxy.activeProfile = null;
+    currentConfig.proxy.enabled = false;
+    document.getElementById("proxy-enabled").checked = false;
   }
-
   if (editingProxyProfileName === profileName) {
     resetProxyEditor();
   }
 
   populateProxyProfiles();
-  autoSave();
-  showToast(`Profile "${profileName}" removed`, 'success');
+  scheduleAutoSave();
+  showToast(`Profile "${profileName}" removed.`, "success");
 }
-
-function editProxyProfile(profileName) {
-  const profile = currentConfig.proxy.profiles.find(p => p.name === profileName);
-  if (!profile) return;
-
-  // Populate the form with existing values
-  document.getElementById('new-proxy-host').value = profile.host;
-  document.getElementById('new-proxy-port').value = profile.port;
-  document.getElementById('new-proxy-scheme').value = profile.scheme;
-  document.getElementById('new-proxy-name').value = profile.name;
-  document.getElementById('new-proxy-remote-dns').checked = profile.remoteDNS || false;
-
-  editingProxyProfileName = profileName;
-  editingProxyWasActive = currentConfig.proxy.activeProfile === profileName;
-  document.getElementById('add-proxy-profile').textContent = 'Save Profile';
-
-  populateProxyProfiles();
-  showToast(`Editing "${profileName}" - modify and click "Save Profile" to save`, 'success');
-
-  // Scroll to the add profile form
-  const addSection = document.querySelector('#proxy-section details');
-  if (addSection) {
-    addSection.open = true;
-    addSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }
-}
-
-async function addProxyProfileHandler() {
-  const host = document.getElementById('new-proxy-host').value.trim();
-  const port = parseInt(document.getElementById('new-proxy-port').value, 10);
-  const scheme = document.getElementById('new-proxy-scheme').value;
-  const name = document.getElementById('new-proxy-name').value.trim();
-  const remoteDNS = document.getElementById('new-proxy-remote-dns').checked;
-
-  if (!host || !port) {
-    showToast('Host and port are required', 'error');
-    return;
-  }
-
-  if (!isValidProxyHost(host)) {
-    showToast('Proxy host contains invalid characters', 'error');
-    return;
-  }
-
-  if (port < 1 || port > 65535) {
-    showToast('Invalid port number', 'error');
-    return;
-  }
-
-  showToast('Fetching location info...', 'success');
-
-  // Fetch location info
-  let location = null;
-  let profileName = name;
-
-  if (!profileName) {
-    try {
-      const encodedHost = encodeURIComponent(host);
-      const response = await fetch(`https://ipinfo.io/${encodedHost}/json`);
-
-      if (response.ok) {
-        const data = await response.json();
-        // org format from ipinfo.io: "AS12345 Company Name"
-        const orgName = data.org ? data.org.replace(/^AS\d+\s*/, '') : '';
-        location = {
-          city: data.city || 'Unknown',
-          region: data.region || '',
-          country: data.country || 'Unknown',
-          loc: data.loc || '',
-          org: orgName,
-          timezone: data.timezone || '',
-          source: 'ipinfo.io'
-        };
-
-        const countryCode = location.country.length > 2 ? location.country.substring(0, 2).toUpperCase() : location.country;
-        const orgPart = orgName ? ` (${orgName})` : '';
-        profileName = `${location.city}, ${countryCode}${orgPart}`;
-      } else {
-        // Fallback to ipapi.co
-        const response2 = await fetch(`https://ipapi.co/${encodedHost}/json/`);
-        if (response2.ok) {
-          const data = await response2.json();
-          const orgName = data.org || '';
-          location = {
-            city: data.city || 'Unknown',
-            region: data.region || '',
-            country: data.country_name || 'Unknown',
-            loc: `${data.latitude},${data.longitude}`,
-            org: orgName,
-            timezone: data.timezone || '',
-            source: 'ipapi.co'
-          };
-
-          const countryCode = location.country.length > 2 ? location.country.substring(0, 2).toUpperCase() : location.country;
-          const orgPart = orgName ? ` (${orgName})` : '';
-          profileName = `${location.city}, ${countryCode}${orgPart}`;
-        } else {
-          profileName = `Proxy ${host}`;
-        }
-      }
-    } catch (e) {
-      console.error('Failed to fetch location:', e);
-      profileName = `Proxy ${host}`;
-    }
-  }
-
-  // Check for duplicate names
-  const profiles = (currentConfig.proxy?.profiles || []).filter((profile) => profile.name !== editingProxyProfileName);
-  let finalName = profileName;
-  let counter = 1;
-  while (profiles.some(p => p.name === finalName)) {
-    finalName = `${profileName} (${counter})`;
-    counter++;
-  }
-
-  // Add profile
-  const profile = {
-    name: finalName,
-    host,
-    port,
-    scheme,
-    remoteDNS,
-    location
-  };
-
-  if (!currentConfig.proxy) {
-    currentConfig.proxy = { enabled: false, activeProfile: null, profiles: [], domainRoutes: [], bypassList: [] };
-  }
-  currentConfig.proxy.profiles = profiles;
-  currentConfig.proxy.profiles.push(profile);
-
-  if (editingProxyProfileName) {
-    currentConfig.proxy.domainRoutes = (currentConfig.proxy.domainRoutes || []).map((route) => {
-      return route.profile === editingProxyProfileName ? { ...route, profile: finalName } : route;
-    });
-  }
-
-  if (editingProxyWasActive) {
-    currentConfig.proxy.activeProfile = finalName;
-  }
-
-  // Clear form
-  document.getElementById('new-proxy-host').value = '';
-  document.getElementById('new-proxy-port').value = '';
-  document.getElementById('new-proxy-name').value = '';
-  resetProxyEditor();
-
-  // Collapse the accordion
-  const addSection = document.querySelector('#proxy-section details');
-  if (addSection) {
-    addSection.open = false;
-  }
-
-  populateProxyProfiles();
-  autoSave();
-  showToast(`Profile "${finalName}" added`, 'success');
-}
-
-// ========== COLLECT VALUES ==========
-
-function collectValues(options = {}) {
-  const showErrors = options.showErrors !== false;
-  if (!currentConfig) {
-    return false;
-  }
-
-  // Global settings
-  currentConfig.globalWhitelist = document.getElementById('global-whitelist').value;
-  currentConfig.notifications.enabled = document.getElementById('notifications-enabled').checked;
-
-  // Canvas
-  currentConfig.canvas.enabled = document.getElementById('canvas-enabled').checked;
-  currentConfig.canvas.whitelist = document.getElementById('canvas-whitelist').value;
-
-  // WebGL
-  currentConfig.webgl.enabled = document.getElementById('webgl-enabled').checked;
-  currentConfig.webgl.whitelist = document.getElementById('webgl-whitelist').value;
-  currentConfig.webgl.preset = document.getElementById('webgl-preset').value;
-
-  // Font
-  currentConfig.font.enabled = document.getElementById('font-enabled').checked;
-  currentConfig.font.whitelist = document.getElementById('font-whitelist').value;
-
-  // ClientRects
-  if (!currentConfig.clientrects) {
-    currentConfig.clientrects = { enabled: true, whitelist: "" };
-  }
-  currentConfig.clientrects.enabled = document.getElementById('clientrects-enabled').checked;
-  currentConfig.clientrects.whitelist = document.getElementById('clientrects-whitelist').value;
-
-  // WebGPU
-  if (!currentConfig.webgpu) {
-    currentConfig.webgpu = { enabled: true, whitelist: "" };
-  }
-  currentConfig.webgpu.enabled = document.getElementById('webgpu-enabled').checked;
-  currentConfig.webgpu.whitelist = document.getElementById('webgpu-whitelist').value;
-
-  // AudioContext
-  if (!currentConfig.audiocontext) {
-    currentConfig.audiocontext = { enabled: true, whitelist: "" };
-  }
-  currentConfig.audiocontext.enabled = document.getElementById('audiocontext-enabled').checked;
-  currentConfig.audiocontext.whitelist = document.getElementById('audiocontext-whitelist').value;
-
-  // Timezone
-  currentConfig.timezone.enabled = document.getElementById('timezone-enabled').checked;
-  currentConfig.timezone.whitelist = document.getElementById('timezone-whitelist').value;
-
-  // Parse timezone dropdown value (format: "timezone-name|offset")
-  const timezoneValue = document.getElementById('timezone-select').value;
-  const [timezoneName, timezoneOffset] = timezoneValue.split('|');
-  currentConfig.timezone.name = timezoneName;
-  currentConfig.timezone.offset = parseInt(timezoneOffset, 10);
-
-  // User-Agent
-  currentConfig.useragent.enabled = document.getElementById('useragent-enabled').checked;
-  currentConfig.useragent.whitelist = document.getElementById('useragent-whitelist').value;
-  currentConfig.useragent.preset = document.getElementById('useragent-preset').value;
-
-  // WebRTC
-  currentConfig.webrtc.enabled = document.getElementById('webrtc-enabled').checked;
-  currentConfig.webrtc.whitelist = document.getElementById('webrtc-whitelist').value;
-  currentConfig.webrtc.policy = document.getElementById('webrtc-policy').value;
-
-  // Proxy
-  if (!currentConfig.proxy) {
-    currentConfig.proxy = { enabled: false, activeProfile: null, profiles: [], domainRoutes: [], bypassList: [] };
-  }
-  currentConfig.proxy.enabled = document.getElementById('proxy-enabled').checked;
-  currentConfig.proxy.activeProfile = document.getElementById('proxy-active-profile').value || null;
-
-  // Parse bypass list
-  const bypassListValue = document.getElementById('proxy-bypass-list').value;
-  const bypassList = bypassListValue
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  const invalidBypassPattern = bypassList.find(pattern => !isValidProxyPattern(pattern));
-  if (invalidBypassPattern) {
-    if (showErrors) {
-      showToast(`Invalid proxy bypass pattern: ${invalidBypassPattern}`, 'error');
-    }
-    return false;
-  }
-
-  currentConfig.proxy.bypassList = bypassList;
-  return true;
-}
-
-// ========== EVENT LISTENERS ==========
 
 function setupEventListeners() {
-  // Auto-save on any input change
-  const inputs = document.querySelectorAll('input, select, textarea');
-  inputs.forEach(input => {
-    input.addEventListener('change', autoSave);
-    if (input.type === 'text' || input.tagName === 'TEXTAREA') {
-      input.addEventListener('input', autoSave);
+  for (const input of document.querySelectorAll("input, select, textarea")) {
+    input.addEventListener("change", scheduleAutoSave);
+    if (input.type === "text" || input.tagName === "TEXTAREA") {
+      input.addEventListener("input", scheduleAutoSave);
     }
-  });
+  }
 
-  // Save & Refresh All Tabs button
-  document.getElementById('save-settings').addEventListener('click', () => {
-    // Clear any pending auto-save
-    if (saveTimeout) {
+  document
+    .getElementById("save-settings")
+    .addEventListener("click", async () => {
       clearTimeout(saveTimeout);
       saveTimeout = null;
-    }
-    if (collectValues()) {
-      saveConfig(true); // Refresh all tabs
-    }
+      if (collectForm()) {
+        await saveOptionsConfig(true);
+      }
+    });
+
+  document
+    .getElementById("reset-settings")
+    .addEventListener("click", resetSettings);
+  document
+    .getElementById("useragent-preset")
+    .addEventListener("change", updateUserAgentString);
+  document
+    .getElementById("add-proxy-profile")
+    .addEventListener("click", saveProxyProfile);
+  document
+    .getElementById("export-config")
+    .addEventListener("click", exportConfig);
+  document.getElementById("import-config").addEventListener("click", () => {
+    document.getElementById("import-file").click();
   });
-
-  // Reset button
-  document.getElementById('reset-settings').addEventListener('click', () => {
-    if (!confirm("Are you sure you want to reset all settings to defaults?")) {
-      return;
-    }
-
-    try {
-      // Send reset command to background
-      chrome.runtime.sendMessage({ type: "reset-config" }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error("Failed to reset config:", chrome.runtime.lastError);
-          showToast("Failed to reset settings", "error");
-          return;
-        }
-
-        if (!response || response.success === false) {
-          console.error("Failed to reset config:", response && response.error);
-          showToast(response && response.error ? response.error : "Failed to reset settings", "error");
-          return;
-        }
-
-        // Reload config
-        loadConfig();
-
-        showToast("Settings reset to defaults", "success");
-      });
-
-    } catch (e) {
-      console.error("Failed to reset config:", e);
-      showToast("Failed to reset settings", "error");
-    }
-  });
-
-  // User-Agent preset change
-  document.getElementById('useragent-preset').addEventListener('change', updateUserAgentString);
-
-  // Proxy event listeners
-  document.getElementById('add-proxy-profile').addEventListener('click', addProxyProfileHandler);
-
-  // Export/Import event listeners
-  document.getElementById('export-config').addEventListener('click', exportConfig);
-  document.getElementById('import-config').addEventListener('click', () => {
-    document.getElementById('import-file').click();
-  });
-  document.getElementById('import-file').addEventListener('change', (e) => {
-    if (e.target.files.length > 0) {
-      importConfig(e.target.files[0]);
-      e.target.value = ''; // Reset for future imports
+  document.getElementById("import-file").addEventListener("change", (event) => {
+    const file = event.target.files[0];
+    event.target.value = "";
+    if (file) {
+      importConfig(file);
     }
   });
 }
 
-// ========== TOAST NOTIFICATION ==========
+async function resetSettings() {
+  if (!confirm("Reset all settings to defaults?")) {
+    return;
+  }
+
+  try {
+    const response = await sendRuntimeMessage({ type: "reset-config" });
+    assertSuccessfulResponse(response, "Failed to reset settings");
+    await loadOptionsConfig();
+    showToast("Settings reset to defaults", "success");
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+}
 
 function showToast(message, type = "success") {
-  const toast = document.getElementById('toast');
+  const toast = document.getElementById("toast");
   toast.textContent = message;
   toast.className = `toast ${type} show`;
-
   setTimeout(() => {
-    toast.className = 'toast';
+    toast.className = "toast";
   }, 3000);
 }
 
-// ========== EXPORT / IMPORT ==========
-
 function exportConfig() {
-  if (!currentConfig) {
-    showToast('No configuration to export', 'error');
-    return;
-  }
-
-  if (!collectValues()) {
+  if (!currentConfig || !collectForm()) {
     return;
   }
 
   const exportData = {
-    version: '1.0',
+    version: "1.0",
     exportedAt: new Date().toISOString(),
-    config: currentConfig
+    config: currentConfig,
   };
-
-  const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `stealth-guard-config-${new Date().toISOString().split('T')[0]}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(exportData, null, 2)], {
+      type: "application/json",
+    }),
+  );
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `stealth-guard-config-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
   URL.revokeObjectURL(url);
-
-  showToast('Settings exported successfully', 'success');
+  showToast("Settings exported", "success");
 }
 
 function importConfig(file) {
-  const MAX_CONFIG_FILE_SIZE = 1024 * 1024;
-  if (!file || file.size > MAX_CONFIG_FILE_SIZE) {
-    showToast('Config files must be smaller than 1 MB', 'error');
+  if (file.size > MAX_CONFIG_FILE_SIZE) {
+    showToast("Config files must be smaller than 1 MB", "error");
     return;
   }
 
   const reader = new FileReader();
-
-  reader.onload = (e) => {
+  reader.onload = async (event) => {
     try {
-      const data = JSON.parse(e.target.result);
-
-      if (!data.config || typeof data.config !== 'object' || Array.isArray(data.config)) {
-        showToast('Invalid config file: missing config data', 'error');
-        return;
+      const data = JSON.parse(event.target.result);
+      if (
+        !data.config ||
+        typeof data.config !== "object" ||
+        Array.isArray(data.config)
+      ) {
+        throw new Error("Invalid config file");
       }
 
-      chrome.runtime.sendMessage({ type: 'update-config', config: data.config }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error('Failed to import config:', chrome.runtime.lastError);
-          showToast('Failed to import settings', 'error');
-          return;
-        }
-
-        if (!response || response.success === false) {
-          showToast(response && response.error ? response.error : 'Failed to import settings', 'error');
-          return;
-        }
-
-        loadConfig();
-        showToast('Settings imported successfully', 'success');
+      const response = await sendRuntimeMessage({
+        type: "update-config",
+        config: data.config,
       });
-    } catch (err) {
-      console.error('Failed to parse config file:', err);
-      showToast('Failed to parse config file', 'error');
+      assertSuccessfulResponse(response, "Failed to import settings");
+      await loadOptionsConfig();
+      showToast("Settings imported", "success");
+    } catch (error) {
+      console.error("Failed to import settings:", error);
+      showToast(error.message, "error");
     }
   };
-
-  reader.onerror = () => {
-    showToast('Failed to read file', 'error');
-  };
-
+  reader.onerror = () => showToast("Failed to read file", "error");
   reader.readAsText(file);
 }

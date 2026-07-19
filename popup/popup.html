@@ -1,212 +1,337 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Stealth Guard</title>
-  <link rel="stylesheet" href="popup.css">
-  <script src="../lib/domainFilter.js"></script>
-</head>
-<body>
-  <div class="container">
-    <!-- Header -->
-    <div class="header">
-      <div class="header-title">
-        <img src="../icons/64.png" alt="Stealth Guard Icon" class="header-icon">
-        <h1>Stealth Guard</h1>
-      </div>
-      <div class="header-controls">
-        <div class="global-toggle">
-          <label class="switch">
-            <input type="checkbox" id="global-enabled" aria-label="Enable Stealth Guard">
-            <span class="slider"></span>
-          </label>
-          <span>Enabled</span>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stealth Guard</title>
+    <link rel="stylesheet" href="popup.css" />
+    <script src="../lib/domainFilter.js"></script>
+    <script src="../lib/runtime.js"></script>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <div class="header-title">
+          <img
+            src="../icons/64.png"
+            alt="Stealth Guard Icon"
+            class="header-icon"
+          />
+          <h1>Stealth Guard</h1>
         </div>
-        <div class="global-toggle">
-          <label class="switch">
-            <input type="checkbox" id="notifications-enabled" aria-label="Enable fingerprint notifications and debug logging">
-            <span class="slider"></span>
-          </label>
-          <span>Debug</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="current-site" aria-label="Current site controls">
-      <div class="current-site-copy">
-        <span class="current-site-label">Current site</span>
-        <strong id="current-url">Loading…</strong>
-      </div>
-      <button id="toggle-current-site" class="btn-site" disabled>Add to Allowlist</button>
-    </div>
-
-    <!-- Features -->
-    <div class="features">
-      <div class="feature-row">
-        <div class="feature-icon">🌍</div>
-        <div class="feature-name">Proxy</div>
-        <div class="proxy-info" id="proxy-info">
-          <span id="proxy-status">No proxy</span>
-        </div>
-        <label class="switch">
-          <input type="checkbox" id="proxy-enabled" aria-label="Enable proxy protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="feature-row">
-        <div class="feature-icon">🌐</div>
-        <div class="feature-name">User-Agent</div>
-        <select id="useragent-quick-select" class="timezone-select" aria-label="User-Agent preset">
-          <option value="macos">macOS Safari</option>
-          <option value="macos_chrome">macOS Chrome</option>
-          <option value="windows">Windows Edge</option>
-          <option value="iphone">iPhone Safari</option>
-          <option value="android">Android Chrome</option>
-        </select>
-        <label class="switch">
-          <input type="checkbox" id="useragent-enabled" aria-label="Enable User-Agent protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="feature-row">
-        <div class="feature-icon">🕐</div>
-        <div class="feature-name">Timezone</div>
-        <select id="timezone-quick-select" class="timezone-select" aria-label="Timezone preset">
-          <option value="America/Los_Angeles|-480">PST/Pacific (-8)</option>
-          <option value="America/Denver|-420">MST/Mountain (-7)</option>
-          <option value="America/Chicago|-360">CST/Central (-6)</option>
-          <option value="America/New_York|-300">EST/Eastern (-5)</option>
-          <option value="Europe/London|0">GMT/London (+0)</option>
-          <option value="Europe/Paris|60">CET/Paris (+1)</option>
-          <option value="Europe/Athens|120">EET/Athens (+2)</option>
-          <option value="Europe/Istanbul|180">TRT/Istanbul (+3)</option>
-          <option value="Asia/Dubai|240">GST/Dubai (+4)</option>
-          <option value="Asia/Jakarta|420">WIB/Jakarta (+7)</option>
-          <option value="Asia/Shanghai|480">China/Shanghai (+8)</option>
-          <option value="Asia/Tokyo|540">JST/Tokyo (+9)</option>
-        </select>
-        <label class="switch">
-          <input type="checkbox" id="timezone-enabled" aria-label="Enable timezone protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="feature-row">
-        <div class="feature-icon">📡</div>
-        <div class="feature-name">WebRTC</div>
-        <label class="switch">
-          <input type="checkbox" id="webrtc-enabled" aria-label="Enable WebRTC protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="feature-row">
-        <div class="feature-icon">🎨</div>
-        <div class="feature-name">Canvas</div>
-        <label class="switch">
-          <input type="checkbox" id="canvas-enabled" aria-label="Enable canvas protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="feature-row">
-        <div class="feature-icon">📐</div>
-        <div class="feature-name">ClientRects</div>
-        <label class="switch">
-          <input type="checkbox" id="clientrects-enabled" aria-label="Enable ClientRects protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="feature-row">
-        <div class="feature-icon">🔤</div>
-        <div class="feature-name">Font</div>
-        <label class="switch">
-          <input type="checkbox" id="font-enabled" aria-label="Enable font protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="feature-row">
-        <div class="feature-icon">🔊</div>
-        <div class="feature-name">AudioContext</div>
-        <label class="switch">
-          <input type="checkbox" id="audiocontext-enabled" aria-label="Enable AudioContext protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="feature-row">
-        <div class="feature-icon">🕹️</div>
-        <div class="feature-name">WebGL</div>
-        <select id="webgl-quick-select" class="timezone-select" aria-label="WebGL device preset">
-          <option value="auto">Auto (based on User-Agent)</option>
-          <option value="apple">Apple</option>
-          <option value="pixel_4">Pixel 4</option>
-          <option value="surface_pro_7">Surface Pro 7</option>
-        </select>
-        <label class="switch">
-          <input type="checkbox" id="webgl-enabled" aria-label="Enable WebGL protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="feature-row">
-        <div class="feature-icon">🎮</div>
-        <div class="feature-name">WebGPU</div>
-        <label class="switch">
-          <input type="checkbox" id="webgpu-enabled" aria-label="Enable WebGPU protection">
-          <span class="slider"></span>
-        </label>
-      </div>
-    </div>
-
-    <!-- Footer -->
-    <div class="footer">
-      <div class="legend">
-        <div class="legend-item">
-          <span class="legend-color legend-green"></span>
-          <span>Blocked</span>
-        </div>
-        <div class="legend-item">
-          <span class="legend-color legend-yellow"></span>
-          <span>Allowlisted</span>
+        <div class="header-controls">
+          <div class="global-toggle">
+            <label class="switch">
+              <input
+                type="checkbox"
+                id="global-enabled"
+                aria-label="Enable Stealth Guard"
+              />
+              <span class="slider"></span>
+            </label>
+            <span>Enabled</span>
+          </div>
+          <div class="global-toggle">
+            <label class="switch">
+              <input
+                type="checkbox"
+                id="notifications-enabled"
+                aria-label="Enable fingerprint notifications"
+              />
+              <span class="slider"></span>
+            </label>
+            <span>Notifications</span>
+          </div>
         </div>
       </div>
-      <button id="open-options" class="btn-secondary">
-        <span class="btn-icon-inline" aria-hidden="true">⚙️</span>
-        <span>Advanced Settings</span>
-      </button>
-      <button id="test-webrtc" class="btn-secondary">
-        <span class="btn-icon-inline" aria-hidden="true">🧪</span>
-        <span>Test WebRTC/DNS Leak</span>
-      </button>
-    </div>
 
-    <div class="session-switcher">
-      <div class="session-switcher-header">
-        <h2>Session Switcher</h2>
-        <span id="session-domain">No active site</span>
-      </div>
-      <div class="session-switcher-actions">
-        <input type="text" id="session-name-input" maxlength="64" aria-label="Session name" placeholder="Session name (optional)">
-        <button id="save-session" class="btn-session-primary">
-          <span class="btn-icon-inline" aria-hidden="true">💾</span>
-          <span>Save Current Session</span>
-        </button>
-        <button id="clear-current-session" class="btn-session-secondary">
-          <span class="btn-icon-inline" aria-hidden="true">✨</span>
-          <span>New Empty Session</span>
+      <div class="current-site" aria-label="Current site controls">
+        <div class="current-site-copy">
+          <span class="current-site-label">Current site</span>
+          <strong id="current-url">Loading…</strong>
+        </div>
+        <button id="toggle-current-site" class="btn-site" disabled>
+          Add to Allowlist
         </button>
       </div>
-      <div id="session-status" class="session-status" role="status" aria-live="polite"></div>
-      <div id="session-list" class="session-list"></div>
-    </div>
-  </div>
 
-  <script src="popup.js"></script>
-</body>
+      <div class="features">
+        <div
+          class="feature-row"
+          data-feature="proxy"
+          data-section="proxy-section"
+        >
+          <div class="feature-icon">🌍</div>
+          <div class="feature-name">Proxy</div>
+          <div class="proxy-info" id="proxy-info">
+            <span id="proxy-status">No proxy</span>
+          </div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="proxy-enabled"
+              data-feature-toggle="proxy"
+              aria-label="Enable proxy protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="useragent"
+          data-section="useragent-section"
+        >
+          <div class="feature-icon">🌐</div>
+          <div class="feature-name">User-Agent</div>
+          <select
+            id="useragent-quick-select"
+            class="feature-select"
+            aria-label="User-Agent preset"
+          >
+            <option value="macos">macOS Safari</option>
+            <option value="macos_chrome">macOS Chrome</option>
+            <option value="windows">Windows Edge</option>
+            <option value="iphone">iPhone Safari</option>
+            <option value="android">Android Chrome</option>
+          </select>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="useragent-enabled"
+              data-feature-toggle="useragent"
+              aria-label="Enable User-Agent protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="timezone"
+          data-section="timezone-section"
+        >
+          <div class="feature-icon">🕐</div>
+          <div class="feature-name">Timezone</div>
+          <select
+            id="timezone-quick-select"
+            class="feature-select"
+            aria-label="Timezone preset"
+          >
+            <option value="America/Los_Angeles|-480">PST/Pacific (-8)</option>
+            <option value="America/Denver|-420">MST/Mountain (-7)</option>
+            <option value="America/Chicago|-360">CST/Central (-6)</option>
+            <option value="America/New_York|-300">EST/Eastern (-5)</option>
+            <option value="Europe/London|0">GMT/London (+0)</option>
+            <option value="Europe/Paris|60">CET/Paris (+1)</option>
+            <option value="Europe/Athens|120">EET/Athens (+2)</option>
+            <option value="Europe/Istanbul|180">TRT/Istanbul (+3)</option>
+            <option value="Asia/Dubai|240">GST/Dubai (+4)</option>
+            <option value="Asia/Jakarta|420">WIB/Jakarta (+7)</option>
+            <option value="Asia/Shanghai|480">China/Shanghai (+8)</option>
+            <option value="Asia/Tokyo|540">JST/Tokyo (+9)</option>
+          </select>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="timezone-enabled"
+              data-feature-toggle="timezone"
+              aria-label="Enable timezone protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="webrtc"
+          data-section="webrtc-section"
+        >
+          <div class="feature-icon">📡</div>
+          <div class="feature-name">WebRTC</div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="webrtc-enabled"
+              data-feature-toggle="webrtc"
+              aria-label="Enable WebRTC protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="canvas"
+          data-section="canvas-section"
+        >
+          <div class="feature-icon">🎨</div>
+          <div class="feature-name">Canvas</div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="canvas-enabled"
+              data-feature-toggle="canvas"
+              aria-label="Enable canvas protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="clientrects"
+          data-section="clientrects-section"
+        >
+          <div class="feature-icon">📐</div>
+          <div class="feature-name">ClientRects</div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="clientrects-enabled"
+              data-feature-toggle="clientrects"
+              aria-label="Enable ClientRects protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="font"
+          data-section="font-section"
+        >
+          <div class="feature-icon">🔤</div>
+          <div class="feature-name">Font</div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="font-enabled"
+              data-feature-toggle="font"
+              aria-label="Enable font protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="audiocontext"
+          data-section="audiocontext-section"
+        >
+          <div class="feature-icon">🔊</div>
+          <div class="feature-name">AudioContext</div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="audiocontext-enabled"
+              data-feature-toggle="audiocontext"
+              aria-label="Enable AudioContext protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="webgl"
+          data-section="webgl-section"
+        >
+          <div class="feature-icon">🕹️</div>
+          <div class="feature-name">WebGL</div>
+          <select
+            id="webgl-quick-select"
+            class="feature-select"
+            aria-label="WebGL device preset"
+          >
+            <option value="auto">Auto (based on User-Agent)</option>
+            <option value="apple">Apple</option>
+            <option value="pixel_4">Pixel 4</option>
+            <option value="surface_pro_7">Surface Pro 7</option>
+          </select>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="webgl-enabled"
+              data-feature-toggle="webgl"
+              aria-label="Enable WebGL protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="webgpu"
+          data-section="webgpu-section"
+        >
+          <div class="feature-icon">🎮</div>
+          <div class="feature-name">WebGPU</div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="webgpu-enabled"
+              data-feature-toggle="webgpu"
+              aria-label="Enable WebGPU protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="footer">
+        <div class="legend">
+          <div class="legend-item">
+            <span class="legend-color legend-green"></span>
+            <span>Blocked</span>
+          </div>
+          <div class="legend-item">
+            <span class="legend-color legend-yellow"></span>
+            <span>Allowlisted</span>
+          </div>
+        </div>
+        <button id="open-options" class="btn-secondary">
+          <span class="btn-icon-inline" aria-hidden="true">⚙️</span>
+          <span>Advanced Settings</span>
+        </button>
+        <button id="test-webrtc" class="btn-secondary">
+          <span class="btn-icon-inline" aria-hidden="true">🧪</span>
+          <span>Test WebRTC/DNS Leak</span>
+        </button>
+      </div>
+
+      <div class="session-switcher">
+        <div class="session-switcher-header">
+          <h2>Session Switcher</h2>
+          <span id="session-domain">No active site</span>
+        </div>
+        <div class="session-switcher-actions">
+          <input
+            type="text"
+            id="session-name-input"
+            maxlength="64"
+            aria-label="Session name"
+            placeholder="Session name (optional)"
+          />
+          <button id="save-session" class="btn-session-primary">
+            <span class="btn-icon-inline" aria-hidden="true">💾</span>
+            <span>Save Current Session</span>
+          </button>
+          <button id="clear-current-session" class="btn-session-secondary">
+            <span class="btn-icon-inline" aria-hidden="true">✨</span>
+            <span>New Empty Session</span>
+          </button>
+        </div>
+        <div
+          id="session-status"
+          class="session-status"
+          role="status"
+          aria-live="polite"
+        ></div>
+        <div id="session-list" class="session-list"></div>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
 </html>

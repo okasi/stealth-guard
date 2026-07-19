@@ -9,15 +9,16 @@ export default defineConfig({
         "lib/config.js",
         "lib/domainFilter.js",
         "lib/proxy.js",
+        "lib/runtime.js",
         "lib/session.js",
-        "lib/storage.js"
+        "lib/storage.js",
       ],
       thresholds: {
         statements: 100,
         branches: 100,
         functions: 100,
-        lines: 100
-      }
-    }
-  }
+        lines: 100,
+      },
+    },
+  },
 });

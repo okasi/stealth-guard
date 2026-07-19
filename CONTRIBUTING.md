@@ -5,9 +5,10 @@ Thank you for helping improve Stealth Guard. Changes should preserve privacy, br
 ## Development setup
 
 1. Use Node.js 20.19+ or 22.12+.
-2. Run `npm ci`.
-3. Run `npm run check` before opening a pull request.
-4. Load the repository as an unpacked extension in an MV2-compatible browser for manual verification.
+2. Install Chrome/Chromium or set `CHROME_PATH` for browser automation.
+3. Run `npm ci`.
+4. Run `npm run check` before opening a pull request.
+5. Load the repository as an unpacked extension in an MV2-compatible browser for native extension verification.
 
 There is no production build step. Source files are loaded directly by the extension, so keep browser compatibility in mind and do not introduce runtime npm dependencies.
 
@@ -15,7 +16,8 @@ There is no production build step. Source files are loaded directly by the exten
 
 - Use concise Vitest tests with Arrange, Act, and Assert comments.
 - Keep the deterministic library layer at 100% statements, branches, functions, and lines coverage.
-- Manually exercise affected browser lifecycle paths, especially proxy, cookies, WebRTC policy, and document-start injection.
+- Extend the background integration or Chrome end-to-end harness for changed browser lifecycle behavior.
+- Manually verify native-browser differences that the automated Chrome harness cannot represent.
 - Include before/after screenshots for popup or options UI changes.
 
 ## Pull requests
