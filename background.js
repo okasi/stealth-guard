@@ -1,44 +1,292 @@
 let currentConfig = null;
-let currentDomainFilter = null;
 let initializationPromise = null;
 const lastNotificationTime = new Map();
 const triggeredFeaturesPerTab = new Map();
 let lastAppliedWebRTCPolicy = null;
 let webRTCPolicyQueue = Promise.resolve();
 let configMutationQueue = Promise.resolve();
+let proxyAuthListenersInstalled = false;
+let proxyAuthenticationConfig = null;
+let proxyRuntimeStatus = {
+  state: "idle",
+  profile: null,
+  verifiedAt: null,
+  exitIp: null,
+  error: null,
+  controlLevel: null,
+  changedAt: null,
+};
+const PROXY_CONNECTION_HISTORY_KEY = "stealth-guard-proxy-history";
+const MAX_PROXY_CONNECTION_HISTORY = 100;
+let proxyConnectionHistory = [];
+let proxyHistoryInitialized = false;
+let proxyHistoryWriteQueue = Promise.resolve();
 
 const NOTIFICATION_THROTTLE_MS = 3770;
-const SESSION_STORAGE_KEY = "stealth-guard-sessions";
-const ACTIVE_SESSIONS_STORAGE_KEY = "stealth-guard-active-sessions";
-const MAX_SAVED_SESSIONS_PER_DOMAIN = 20;
 const REPORTED_FEATURES = new Set([
   ...PROTECTION_FEATURES.filter((feature) => feature !== "useragent"),
   "user-agent",
 ]);
 
-const debugLog = function (...args) {
-  if (
-    currentConfig &&
-    currentConfig.notifications &&
-    currentConfig.notifications.enabled
-  ) {
-    console.log(...args);
+function debug(method, ...args) {
+  if (currentConfig && currentConfig.notifications.enabled) {
+    console[method](...args);
   }
-};
+}
 
-const debugWarn = function (...args) {
-  if (
-    currentConfig &&
-    currentConfig.notifications &&
-    currentConfig.notifications.enabled
-  ) {
-    console.warn(...args);
+const debugLog = (...args) => debug("log", ...args);
+const debugWarn = (...args) => debug("warn", ...args);
+const debugError = (...args) => console.error(...args);
+
+const sessionManager = createSessionManager({
+  storageApi: storage,
+  browserApi: chrome,
+  callApi: callChromeApi,
+  warn: debugWarn,
+});
+
+const proxyCredentialManager = createProxyCredentialManager({
+  storageApi: storage,
+  getConfig: () => proxyAuthenticationConfig || currentConfig,
+});
+
+function setProxyRuntimeStatus(nextStatus) {
+  const next = {
+    state: nextStatus.state || "idle",
+    profile: nextStatus.profile || null,
+    verifiedAt: nextStatus.verifiedAt || null,
+    exitIp: nextStatus.exitIp || null,
+    error: nextStatus.error || null,
+    controlLevel: nextStatus.controlLevel || null,
+    changedAt: Date.now(),
+  };
+  const previousComparable = { ...proxyRuntimeStatus, changedAt: null };
+  const nextComparable = { ...next, changedAt: null };
+  if (JSON.stringify(previousComparable) === JSON.stringify(nextComparable)) {
+    return;
   }
-};
+  proxyRuntimeStatus = next;
+  recordProxyConnectionEvent(next);
+}
 
-const debugError = function (...args) {
-  console.error(...args);
-};
+function normalizeProxyHistoryEntry(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const timestamp = Number(value.timestamp);
+  const allowedStates = new Set([
+    "idle",
+    "connecting",
+    "connected",
+    "routing",
+    "degraded",
+    "error",
+    "conflict",
+  ]);
+  if (!Number.isFinite(timestamp) || !allowedStates.has(value.state)) {
+    return null;
+  }
+  return {
+    timestamp,
+    state: value.state,
+    profile:
+      typeof value.profile === "string" ? value.profile.slice(0, 128) : null,
+    exitIp:
+      typeof value.exitIp === "string" ? value.exitIp.slice(0, 64) : null,
+    error:
+      typeof value.error === "string" ? value.error.slice(0, 512) : null,
+    controlLevel:
+      typeof value.controlLevel === "string"
+        ? value.controlLevel.slice(0, 128)
+        : null,
+  };
+}
+
+async function initializeProxyConnectionHistory() {
+  const stored = await storage.read(PROXY_CONNECTION_HISTORY_KEY);
+  proxyConnectionHistory = Array.isArray(stored[PROXY_CONNECTION_HISTORY_KEY])
+    ? stored[PROXY_CONNECTION_HISTORY_KEY]
+        .map(normalizeProxyHistoryEntry)
+        .filter(Boolean)
+        .slice(-MAX_PROXY_CONNECTION_HISTORY)
+    : [];
+  proxyHistoryInitialized = true;
+}
+
+function persistProxyConnectionHistory() {
+  const snapshot = proxyConnectionHistory.map((entry) => ({ ...entry }));
+  const operation = () =>
+    storage.write({ [PROXY_CONNECTION_HISTORY_KEY]: snapshot });
+  proxyHistoryWriteQueue = proxyHistoryWriteQueue.then(operation, operation);
+  proxyHistoryWriteQueue.catch((error) => {
+    debugWarn("[Proxy] Failed to persist connection history:", error);
+  });
+}
+
+function recordProxyConnectionEvent(status) {
+  if (!proxyHistoryInitialized) {
+    return;
+  }
+  const entry = normalizeProxyHistoryEntry({
+    timestamp: status.changedAt || Date.now(),
+    ...status,
+  });
+  if (!entry) {
+    return;
+  }
+  proxyConnectionHistory.push(entry);
+  proxyConnectionHistory = proxyConnectionHistory.slice(
+    -MAX_PROXY_CONNECTION_HISTORY,
+  );
+  persistProxyConnectionHistory();
+}
+
+async function getProxySettingsDetails() {
+  try {
+    return (
+      (await callChromeApi(chrome.proxy.settings, "get", {
+        incognito: false,
+      })) || {}
+    );
+  } catch (error) {
+    debugWarn("[Proxy] Could not inspect proxy ownership:", error);
+    return {};
+  }
+}
+
+function isConflictingProxyControl(levelOfControl) {
+  return (
+    levelOfControl === "not_controllable" ||
+    levelOfControl === "controlled_by_other_extensions"
+  );
+}
+
+async function verifyProxyExit() {
+  const data = await fetchJson(PROXY_VERIFICATION_URL, 5000);
+  const ip = data && typeof data.ip === "string" ? data.ip.trim() : "";
+  if (!ip || ip.length > 64 || !/^[0-9a-f:.]+$/i.test(ip)) {
+    throw new Error("Exit IP verification failed");
+  }
+  return ip;
+}
+
+async function applyProxyPolicy(config) {
+  proxyAuthenticationConfig = config;
+  const proxyEnabled = Boolean(
+    config && config.enabled && config.proxy && config.proxy.enabled,
+  );
+  const before = await getProxySettingsDetails();
+  const controlLevel = before.levelOfControl || null;
+
+  if (isConflictingProxyControl(controlLevel)) {
+    setProxyRuntimeStatus({
+      state: proxyEnabled ? "conflict" : "idle",
+      error: proxyEnabled
+        ? "Proxy settings are controlled by another extension or policy"
+        : null,
+      controlLevel,
+    });
+    return;
+  }
+
+  if (!proxyEnabled) {
+    await applyProxySettings(config);
+    setProxyRuntimeStatus({ state: "idle", controlLevel });
+    return;
+  }
+
+  const activeProfile = (config.proxy.profiles || []).find(
+    (profile) => profile.name === config.proxy.activeProfile,
+  );
+  setProxyRuntimeStatus({
+    state: "connecting",
+    profile: activeProfile ? activeProfile.name : null,
+    controlLevel,
+  });
+
+  try {
+    await applyProxySettings(config);
+  } catch (error) {
+    setProxyRuntimeStatus({
+      state: "error",
+      profile: activeProfile ? activeProfile.name : null,
+      error: error.message,
+      controlLevel,
+    });
+    throw error;
+  }
+
+  const effective = await getProxySettingsDetails();
+  const effectiveControlLevel = effective.levelOfControl || controlLevel;
+  if (isConflictingProxyControl(effectiveControlLevel)) {
+    setProxyRuntimeStatus({
+      state: "conflict",
+      profile: activeProfile ? activeProfile.name : null,
+      error: "Proxy settings were overridden by another extension or policy",
+      controlLevel: effectiveControlLevel,
+    });
+    return;
+  }
+
+  if (!activeProfile) {
+    setProxyRuntimeStatus({
+      state: "routing",
+      controlLevel: effectiveControlLevel,
+    });
+    return;
+  }
+
+  try {
+    const exitIp = await verifyProxyExit();
+    setProxyRuntimeStatus({
+      state:
+        config.proxy.routingMode === "protect-selected"
+          ? "routing"
+          : "connected",
+      profile: activeProfile.name,
+      exitIp,
+      verifiedAt: Date.now(),
+      controlLevel: effectiveControlLevel,
+    });
+  } catch (error) {
+    setProxyRuntimeStatus({
+      state: "degraded",
+      profile: activeProfile.name,
+      error: error.message,
+      controlLevel: effectiveControlLevel,
+    });
+  }
+}
+
+function setupProxyAuthentication() {
+  if (proxyAuthListenersInstalled) {
+    return;
+  }
+
+  if (
+    !chrome.webRequest.onAuthRequired ||
+    !chrome.webRequest.onCompleted ||
+    !chrome.webRequest.onErrorOccurred
+  ) {
+    debugWarn("[Proxy] Proxy authentication events are unavailable");
+    return;
+  }
+
+  chrome.webRequest.onAuthRequired.addListener(
+    proxyCredentialManager.handleAuthRequired,
+    { urls: ["<all_urls>"] },
+    ["blocking"],
+  );
+  chrome.webRequest.onCompleted.addListener(
+    proxyCredentialManager.clearRequest,
+    { urls: ["<all_urls>"] },
+  );
+  chrome.webRequest.onErrorOccurred.addListener(
+    proxyCredentialManager.clearRequest,
+    { urls: ["<all_urls>"] },
+  );
+  proxyAuthListenersInstalled = true;
+}
 
 function getHostnameFromUrl(url) {
   try {
@@ -58,54 +306,6 @@ function resolveTabHostname(sender, fallbackHostname = null) {
   return fallbackHostname;
 }
 
-function setCurrentConfig(config) {
-  currentConfig = config;
-  currentDomainFilter = config ? new DomainFilter(config) : null;
-}
-
-function getDomainFilter(config = currentConfig) {
-  if (!config) {
-    return null;
-  }
-
-  if (!currentDomainFilter || currentDomainFilter.config !== config) {
-    currentDomainFilter = new DomainFilter(config);
-  }
-
-  return currentDomainFilter;
-}
-
-function isHostnameOnGlobalAllowlist(hostname, config = currentConfig) {
-  if (!hostname || !config) {
-    return false;
-  }
-
-  const filter = getDomainFilter(config);
-  return filter
-    ? filter.isAllowlisted(hostname, config.globalWhitelist || "")
-    : false;
-}
-
-function isHostnameOnFeatureAllowlist(
-  hostname,
-  whitelist,
-  config = currentConfig,
-) {
-  if (!hostname || !whitelist || !config) {
-    return false;
-  }
-
-  const filter = getDomainFilter(config);
-  return filter ? filter.isAllowlisted(hostname, whitelist) : false;
-}
-
-function isCloudflareChallengeHostname(hostname) {
-  return (
-    hostname === "challenges.cloudflare.com" ||
-    hostname.endsWith(".challenges.cloudflare.com")
-  );
-}
-
 async function ensureBackgroundInitialized() {
   if (currentConfig) {
     return;
@@ -118,7 +318,8 @@ async function ensureBackgroundInitialized() {
   }
 
   if (!currentConfig) {
-    setCurrentConfig(await loadConfig());
+    initializationPromise = initializeBackground();
+    await initializationPromise;
   }
 }
 
@@ -180,19 +381,6 @@ function sendMessageToTabIgnoringErrors(tabId, message) {
   });
 }
 
-function callChromeApi(method, ...args) {
-  return new Promise((resolve, reject) => {
-    method(...args, (result) => {
-      const error = chrome.runtime.lastError;
-      if (error) {
-        reject(new Error(error.message || String(error)));
-        return;
-      }
-      resolve(result);
-    });
-  });
-}
-
 async function broadcastConfigUpdated(config) {
   const tabs = await queryTabs({ url: ["http://*/*", "https://*/*"] });
   await Promise.all(
@@ -207,349 +395,26 @@ async function broadcastConfigUpdated(config) {
   );
 }
 
-function resolveSessionHostname(request, sender) {
-  const explicitHostname = normalizeSessionHostname(
-    request && (request.hostname || request.domain),
-  );
-  if (explicitHostname) {
-    return explicitHostname;
-  }
-
-  return normalizeSessionHostname(resolveTabHostname(sender));
-}
-
-function createSessionId() {
-  return (
-    "session-" +
-    Date.now().toString(36) +
-    "-" +
-    Math.random().toString(36).slice(2, 8)
-  );
-}
-
-async function readSessionState() {
-  const stored = await storage.read([
-    SESSION_STORAGE_KEY,
-    ACTIVE_SESSIONS_STORAGE_KEY,
-  ]);
-  const sessions = Array.isArray(stored[SESSION_STORAGE_KEY])
-    ? stored[SESSION_STORAGE_KEY]
-    : [];
-  const activeSessions =
-    stored[ACTIVE_SESSIONS_STORAGE_KEY] &&
-    typeof stored[ACTIVE_SESSIONS_STORAGE_KEY] === "object" &&
-    !Array.isArray(stored[ACTIVE_SESSIONS_STORAGE_KEY])
-      ? stored[ACTIVE_SESSIONS_STORAGE_KEY]
-      : {};
-
-  return { sessions, activeSessions };
-}
-
-async function writeSessionState(sessions, activeSessions) {
-  await storage.write({
-    [SESSION_STORAGE_KEY]: sessions,
-    [ACTIVE_SESSIONS_STORAGE_KEY]: activeSessions,
-  });
-}
-
-function cookiesGetAllCookieStores() {
-  return callChromeApi(chrome.cookies.getAllCookieStores).then(
-    (stores) => stores || [],
-  );
-}
-
-function cookiesGetAll(details) {
-  return callChromeApi(chrome.cookies.getAll, details).then(
-    (cookies) => cookies || [],
-  );
-}
-
-function cookiesRemove(details) {
-  return callChromeApi(chrome.cookies.remove, details);
-}
-
-function cookiesSet(details) {
-  return callChromeApi(chrome.cookies.set, details);
-}
-
-function maybeCopyCookiePartitionKey(targetDetails, cookie) {
-  if (!cookie || !cookie.partitionKey) {
-    return;
-  }
-
-  // Preserve partitioned cookie identity when the browser exposes it.
-  // Without this, restored auth cookies may become non-partitioned and invalid.
-  targetDetails.partitionKey = cookie.partitionKey;
-}
-
-async function getCookiesForHostname(hostname, tabId) {
-  if (!chrome.cookies || !chrome.cookies.getAllCookieStores) {
-    return [];
-  }
-
-  const stores = await cookiesGetAllCookieStores();
-  const tabStores = stores.filter((store) => {
-    return Array.isArray(store.tabIds) && store.tabIds.includes(tabId);
-  });
-  const allCookies = [];
-
-  for (const store of tabStores) {
-    const storeCookies = await cookiesGetAll({ storeId: store.id });
-    const matchingCookies = storeCookies.filter((cookie) =>
-      cookieMatchesHostname(cookie, hostname),
-    );
-    allCookies.push(...matchingCookies);
-  }
-
-  return allCookies;
-}
-
-async function clearCookiesForHostname(hostname, tabId) {
-  const cookies = await getCookiesForHostname(hostname, tabId);
-  const removeOperations = cookies.map(async (cookie) => {
-    try {
-      const removeDetails = {
-        url: buildCookieUrl(cookie, hostname),
-        name: cookie.name,
-        storeId: cookie.storeId,
-      };
-
-      maybeCopyCookiePartitionKey(removeDetails, cookie);
-      await cookiesRemove(removeDetails);
-    } catch (error) {
-      debugWarn("[Session] Failed to remove cookie:", cookie.name, error);
-    }
-  });
-
-  await Promise.all(removeOperations);
-}
-
-async function restoreCookies(cookies, fallbackHostname) {
-  if (!Array.isArray(cookies) || cookies.length === 0) {
-    return;
-  }
-
-  const restoreOperations = cookies.map(async (cookie) => {
-    try {
-      const details = {
-        url: buildCookieUrl(cookie, fallbackHostname),
-        name: cookie.name,
-        value: cookie.value,
-        path: cookie.path,
-        secure: cookie.secure,
-        httpOnly: cookie.httpOnly,
-        storeId: cookie.storeId,
-      };
-
-      if (cookie.domain && cookie.domain.startsWith(".")) {
-        details.domain = cookie.domain;
-      }
-
-      if (!cookie.session && typeof cookie.expirationDate === "number") {
-        details.expirationDate = cookie.expirationDate;
-      }
-
-      if (cookie.sameSite && cookie.sameSite !== "unspecified") {
-        details.sameSite = cookie.sameSite;
-      }
-
-      if (typeof cookie.sameParty === "boolean") {
-        details.sameParty = cookie.sameParty;
-      }
-
-      maybeCopyCookiePartitionKey(details, cookie);
-
-      await cookiesSet(details);
-    } catch (error) {
-      debugWarn(
-        "[Session] Failed to restore cookie:",
-        cookie && cookie.name,
-        error,
-      );
-    }
-  });
-
-  await Promise.all(restoreOperations);
-}
-
-function executeScriptInTab(tabId, code, runAt = "document_idle") {
-  return callChromeApi(chrome.tabs.executeScript, tabId, { code, runAt });
-}
-
-function getTabById(tabId) {
-  return callChromeApi(chrome.tabs.get, tabId).then((tab) => tab || null);
-}
-
-async function resolveVerifiedSessionTarget(request, sender) {
-  const tabId = resolveSessionTabId(request, sender);
-  if (typeof tabId !== "number") {
-    return { error: "Missing tab id" };
-  }
-
-  const tab = await getTabById(tabId);
-  let tabUrl = null;
-  try {
-    tabUrl = tab && tab.url ? new URL(tab.url) : null;
-  } catch (error) {
-    tabUrl = null;
-  }
-  const isHttpSite =
-    tabUrl && (tabUrl.protocol === "http:" || tabUrl.protocol === "https:");
-  const hostname = normalizeSessionHostname(isHttpSite ? tabUrl.hostname : "");
-  if (!hostname) {
-    return { error: "The target tab is not an HTTP(S) site" };
-  }
-
-  const requestedHostname = normalizeSessionHostname(
-    request && (request.hostname || request.domain),
-  );
-  if (requestedHostname && requestedHostname !== hostname) {
-    return {
-      error: "The target tab changed sites; reopen the popup and try again",
-    };
-  }
-
-  return { tabId, hostname };
-}
-
-async function readTabStorageSnapshot(tabId) {
-  const script = `
-    (() => {
-      const snapshot = { localStorage: {}, sessionStorage: {} };
-
-      try {
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (key !== null) {
-            snapshot.localStorage[key] = localStorage.getItem(key);
-          }
-        }
-      } catch (error) {}
-
-      try {
-        for (let i = 0; i < sessionStorage.length; i++) {
-          const key = sessionStorage.key(i);
-          if (key !== null) {
-            snapshot.sessionStorage[key] = sessionStorage.getItem(key);
-          }
-        }
-      } catch (error) {}
-
-      return snapshot;
-    })();
-  `;
-
-  try {
-    const results = await executeScriptInTab(tabId, script);
-    return (results && results[0]) || { localStorage: {}, sessionStorage: {} };
-  } catch (error) {
-    debugWarn("[Session] Failed to read storage snapshot:", error);
-    return { localStorage: {}, sessionStorage: {} };
-  }
-}
-
-async function clearTabStorage(tabId) {
-  const script = `
-    (() => {
-      try { localStorage.clear(); } catch (error) {}
-      try { sessionStorage.clear(); } catch (error) {}
-      return true;
-    })();
-  `;
-
-  await executeScriptInTab(tabId, script);
-}
-
-async function restoreTabStorage(tabId, storageSnapshot) {
-  const payload = JSON.stringify({
-    localStorage:
-      storageSnapshot && storageSnapshot.localStorage
-        ? storageSnapshot.localStorage
-        : {},
-    sessionStorage:
-      storageSnapshot && storageSnapshot.sessionStorage
-        ? storageSnapshot.sessionStorage
-        : {},
-  });
-
-  const script = `
-    ((snapshot) => {
-      try {
-        localStorage.clear();
-        Object.keys(snapshot.localStorage || {}).forEach((key) => {
-          const value = snapshot.localStorage[key];
-          localStorage.setItem(key, value === null || value === undefined ? "" : String(value));
-        });
-      } catch (error) {}
-
-      try {
-        sessionStorage.clear();
-        Object.keys(snapshot.sessionStorage || {}).forEach((key) => {
-          const value = snapshot.sessionStorage[key];
-          sessionStorage.setItem(key, value === null || value === undefined ? "" : String(value));
-        });
-      } catch (error) {}
-
-      return true;
-    })(${payload});
-  `;
-
-  await executeScriptInTab(tabId, script);
-}
-
-function reloadTab(tabId) {
-  return new Promise((resolve) => {
-    chrome.tabs.reload(tabId, { bypassCache: true }, () => {
-      if (chrome.runtime.lastError) {
-        debugWarn(
-          "[Background] Failed to reload tab:",
-          chrome.runtime.lastError.message,
-        );
-      }
-      resolve();
-    });
-  });
-}
-
-function sortSessionsForHostname(sessions, hostname) {
-  return sessions
-    .filter((session) => session.domain === hostname)
-    .sort(
-      (a, b) =>
-        (b.lastUsed || b.createdAt || 0) - (a.lastUsed || a.createdAt || 0),
-    );
-}
-
-function cleanupSessionLimits(sessions, activeSessions, hostname) {
-  const domainSessions = sortSessionsForHostname(sessions, hostname);
-  if (domainSessions.length <= MAX_SAVED_SESSIONS_PER_DOMAIN) {
-    return sessions;
-  }
-
-  const keepIds = new Set(
-    domainSessions
-      .slice(0, MAX_SAVED_SESSIONS_PER_DOMAIN)
-      .map((session) => session.id),
-  );
-  const nextSessions = sessions.filter(
-    (session) => session.domain !== hostname || keepIds.has(session.id),
-  );
-
-  if (activeSessions[hostname] && !keepIds.has(activeSessions[hostname])) {
-    delete activeSessions[hostname];
-  }
-
-  return nextSessions;
-}
-
 async function applyCurrentConfig(config) {
-  setCurrentConfig(config);
   await applyUserAgentSpoofing(config);
   await applyWebRTCPolicy(config);
-  await applyProxySettings(config);
+  await applyProxyPolicy(config);
+  currentConfig = config;
 }
 
 async function initializeBackground() {
+  try {
+    await proxyCredentialManager.initialize();
+    setupProxyAuthentication();
+  } catch (error) {
+    debugWarn("[Proxy] Credential support failed to initialize:", error);
+  }
+  try {
+    await initializeProxyConnectionHistory();
+  } catch (error) {
+    proxyHistoryInitialized = true;
+    debugWarn("[Proxy] Connection history failed to initialize:", error);
+  }
   await applyCurrentConfig(await loadConfig());
   setupContextMenus();
   debugLog("Stealth Guard initialized");
@@ -557,13 +422,11 @@ async function initializeBackground() {
 
 initializationPromise = initializeBackground().catch((error) => {
   debugError("Failed to initialize Stealth Guard:", error);
-  throw error;
 });
 
 chrome.runtime.onInstalled.addListener(async (details) => {
   try {
     await ensureBackgroundInitialized();
-    setupContextMenus();
     if (details.reason === "install") {
       chrome.tabs.create({ url: "options/options.html" });
     }
@@ -572,97 +435,52 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
 });
 
-// HTTP User-Agent header modification using MV2 blocking webRequest.
 let uaListener = null;
 
 async function applyUserAgentSpoofing(configOverride) {
-  try {
-    const config = configOverride || (await getConfig());
+  const config = configOverride || (await getConfig());
 
-    if (uaListener) {
-      chrome.webRequest.onBeforeSendHeaders.removeListener(uaListener);
-      uaListener = null;
-    }
-
-    if (
-      config.enabled === false ||
-      !config.useragent ||
-      !config.useragent.enabled
-    ) {
-      debugLog("User-Agent spoofing disabled");
-      return;
-    }
-
-    const preset = config.useragent.preset || "macos";
-    const userAgent = getUserAgentString(preset);
-
-    if (!userAgent) {
-      throw new Error(`Invalid User-Agent preset: ${preset}`);
-    }
-
-    uaListener = function (details) {
-      let hostname = null;
-      try {
-        hostname = new URL(details.url).hostname;
-      } catch (e) {
-        return { requestHeaders: details.requestHeaders };
-      }
-
-      if (isCloudflareChallengeHostname(hostname)) {
-        debugLog(
-          "[UA Listener] BYPASS: Cloudflare challenge domain:",
-          hostname,
-        );
-        return { requestHeaders: details.requestHeaders };
-      }
-
-      if (
-        isHostnameOnGlobalAllowlist(hostname, config) ||
-        isHostnameOnFeatureAllowlist(
-          hostname,
-          config.useragent.whitelist || "",
-          config,
-        )
-      ) {
-        debugLog("[UA Listener] BYPASS: allowlisted domain:", hostname);
-        return { requestHeaders: details.requestHeaders };
-      }
-
-      let uaHeaderFound = false;
-      for (let i = 0; i < details.requestHeaders.length; ++i) {
-        if (details.requestHeaders[i].name.toLowerCase() === "user-agent") {
-          details.requestHeaders[i].value = userAgent;
-          uaHeaderFound = true;
-          break;
-        }
-      }
-
-      if (!uaHeaderFound) {
-        details.requestHeaders.push({
-          name: "User-Agent",
-          value: userAgent,
-        });
-      }
-
-      return { requestHeaders: details.requestHeaders };
-    };
-
-    chrome.webRequest.onBeforeSendHeaders.addListener(
-      uaListener,
-      { urls: ["<all_urls>"] },
-      ["blocking", "requestHeaders", "extraHeaders"],
-    );
-
-    debugLog(
-      "User-Agent spoofing enabled (webRequest):",
-      preset,
-      "->",
-      userAgent,
-    );
-  } catch (error) {
-    debugError("Failed to apply User-Agent spoofing:", error);
-    throw error;
+  if (uaListener) {
+    chrome.webRequest.onBeforeSendHeaders.removeListener(uaListener);
+    uaListener = null;
   }
+
+  if (!config.enabled || !config.useragent.enabled) {
+    return;
+  }
+
+  const userAgent = getUserAgentString(config.useragent.preset);
+  if (!userAgent) {
+    throw new Error(`Invalid User-Agent preset: ${config.useragent.preset}`);
+  }
+
+  uaListener = function (details) {
+    const requestHeaders = details.requestHeaders || [];
+    const hostname = getHostnameFromUrl(details.url);
+    if (
+      !hostname ||
+      isCloudflareChallengeHostname(hostname) ||
+      !isFeatureActiveForHostname(config, "useragent", hostname)
+    ) {
+      return { requestHeaders };
+    }
+
+    const header = requestHeaders.find(
+      (entry) => entry.name.toLowerCase() === "user-agent",
+    );
+    if (header) {
+      header.value = userAgent;
+    } else {
+      requestHeaders.push({ name: "User-Agent", value: userAgent });
+    }
+    return { requestHeaders };
+  };
+
+  chrome.webRequest.onBeforeSendHeaders.addListener(
+    uaListener,
+    { urls: ["<all_urls>"] },
+    ["blocking", "requestHeaders", "extraHeaders"],
+  );
 }
 
 async function applyWebRTCPolicyValue(policy) {
@@ -697,41 +515,29 @@ async function applyWebRTCPolicyValue(policy) {
 }
 
 function setWebRTCPolicySetting(policy) {
-  return new Promise((resolve, reject) => {
-    chrome.privacy.network.webRTCIPHandlingPolicy.set({ value: policy }, () => {
-      const error = chrome.runtime.lastError;
-      if (error) {
-        reject(new Error(error.message || String(error)));
-        return;
-      }
-      resolve();
-    });
-  });
+  return callChromeApi(
+    chrome.privacy.network.webRTCIPHandlingPolicy,
+    "set",
+    { value: policy },
+  );
 }
 
 function getWebRTCPolicySetting() {
   return callChromeApi(
-    chrome.privacy.network.webRTCIPHandlingPolicy.get,
+    chrome.privacy.network.webRTCIPHandlingPolicy,
+    "get",
     {},
   ).then((details) => details || {});
 }
 
 async function applyWebRTCPolicy(configOverride) {
-  try {
-    const config = configOverride || (await getConfig());
-    const policy =
-      config.enabled !== false && config.webrtc.enabled
-        ? config.webrtc.policy
-        : "default";
-    await applyWebRTCPolicyValue(policy);
-    debugLog("[WebRTC] Base policy applied:", policy);
-  } catch (error) {
-    debugError("Failed to apply WebRTC policy:", error);
-    throw error;
-  }
+  const config = configOverride || (await getConfig());
+  const policy =
+    config.enabled && config.webrtc.enabled ? config.webrtc.policy : "default";
+  await applyWebRTCPolicyValue(policy);
 }
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url) {
     const newHostname = getHostnameFromUrl(changeInfo.url);
     const tabData = triggeredFeaturesPerTab.get(tabId);
@@ -773,26 +579,11 @@ function handleFingerprintDetectedMessage(request, sender) {
 }
 
 async function handleGetConfigMessage() {
-  try {
-    debugLog(
-      "Getting config, current:",
-      currentConfig ? "loaded" : "not loaded",
-    );
-    const config = await getConfig();
-    debugLog("Sending config response:", config ? "success" : "null");
-    return { config };
-  } catch (error) {
-    debugError("Error getting config:", error);
-    return { config: null, error: error.message };
-  }
+  return { config: await getConfig() };
 }
 
 function serializeConfigValue(value) {
-  try {
-    return JSON.stringify(value);
-  } catch (error) {
-    return String(value);
-  }
+  return JSON.stringify(value);
 }
 
 function didConfigSectionChange(previousConfig, nextConfig, key) {
@@ -829,17 +620,17 @@ function getConfigChangeFlags(previousConfig, nextConfig) {
   };
 }
 
-async function applyConfigChanges(changeFlags) {
+async function applyConfigChanges(changeFlags, config) {
   if (changeFlags.userAgentChanged) {
-    await applyUserAgentSpoofing(currentConfig);
+    await applyUserAgentSpoofing(config);
   }
 
   if (changeFlags.webrtcChanged) {
-    await applyWebRTCPolicy(currentConfig);
+    await applyWebRTCPolicy(config);
   }
 
   if (changeFlags.proxyChanged) {
-    await applyProxySettings(currentConfig);
+    await applyProxyPolicy(config);
   }
 }
 
@@ -847,16 +638,14 @@ async function saveConfigWithRollback(previousConfig, nextConfig) {
   const changeFlags = getConfigChangeFlags(previousConfig, nextConfig);
 
   await saveConfig(nextConfig);
-  setCurrentConfig(nextConfig);
 
   try {
-    await applyConfigChanges(changeFlags);
+    await applyConfigChanges(changeFlags, nextConfig);
   } catch (error) {
     await saveConfig(previousConfig);
-    setCurrentConfig(previousConfig);
 
     try {
-      await applyConfigChanges(changeFlags);
+      await applyConfigChanges(changeFlags, previousConfig);
       await broadcastConfigUpdated(previousConfig);
     } catch (rollbackError) {
       debugError(
@@ -868,6 +657,10 @@ async function saveConfigWithRollback(previousConfig, nextConfig) {
     throw error;
   }
 
+  currentConfig = nextConfig;
+  proxyCredentialManager.prune(nextConfig.proxy.profiles).catch((error) => {
+    debugError("[Proxy] Failed to prune unused credentials:", error);
+  });
   await broadcastConfigUpdated(nextConfig);
 }
 
@@ -877,7 +670,7 @@ function enqueueConfigMutation(operation) {
   return queuedOperation;
 }
 
-async function handleUpdateConfigMessage(request) {
+function handleUpdateConfigMessage(request) {
   return enqueueConfigMutation(async () => {
     if (
       !request ||
@@ -890,10 +683,9 @@ async function handleUpdateConfigMessage(request) {
 
     const previousConfig = cloneConfig(await getConfig());
     const nextConfig = normalizeConfig(request.config);
-    const configChanged =
-      serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
-
-    if (!configChanged) {
+    if (
+      serializeConfigValue(previousConfig) === serializeConfigValue(nextConfig)
+    ) {
       return { success: true };
     }
 
@@ -903,21 +695,16 @@ async function handleUpdateConfigMessage(request) {
   });
 }
 
-async function updateGlobalWhitelist(request, mutator) {
+function updateGlobalWhitelist(request, mutator) {
   return enqueueConfigMutation(async () => {
     const previousConfig = cloneConfig(await getConfig());
     const nextConfig = cloneConfig(previousConfig);
-    const filter = new DomainFilter(nextConfig);
     const domain = normalizeDomainPattern(request && request.domain);
     if (!domain || domain.includes("*")) {
       throw new Error("Invalid domain");
     }
 
-    nextConfig.globalWhitelist = mutator(
-      filter,
-      domain,
-      nextConfig.globalWhitelist,
-    );
+    nextConfig.globalWhitelist = mutator(domain, nextConfig.globalWhitelist);
     const changed =
       serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
 
@@ -929,19 +716,15 @@ async function updateGlobalWhitelist(request, mutator) {
   });
 }
 
-async function handleAddToWhitelistMessage(request) {
-  return updateGlobalWhitelist(request, (filter, domain, whitelist) => {
-    return filter.addDomainToAllowlist(domain, whitelist);
-  });
+function handleAddToWhitelistMessage(request) {
+  return updateGlobalWhitelist(request, addDomainToAllowlist);
 }
 
-async function handleRemoveFromWhitelistMessage(request) {
-  return updateGlobalWhitelist(request, (filter, domain, whitelist) => {
-    return filter.removeDomainFromAllowlist(domain, whitelist);
-  });
+function handleRemoveFromWhitelistMessage(request) {
+  return updateGlobalWhitelist(request, removeDomainFromAllowlist);
 }
 
-async function handleResetConfigMessage() {
+function handleResetConfigMessage() {
   return enqueueConfigMutation(async () => {
     const previousConfig = cloneConfig(await getConfig());
     const nextConfig = cloneConfig(DEFAULT_CONFIG);
@@ -951,6 +734,8 @@ async function handleResetConfigMessage() {
     ) {
       await saveConfigWithRollback(previousConfig, nextConfig);
     }
+
+    await proxyCredentialManager.clearAll();
 
     return { success: true };
   });
@@ -970,173 +755,113 @@ async function handlePrepareProxyProfileMessage(request) {
   };
 }
 
-function resolveSessionTabId(request, sender) {
-  if (sender && sender.tab && typeof sender.tab.id === "number") {
-    return sender.tab.id;
+function assertExtensionPageSender(sender) {
+  if (sender && sender.tab) {
+    throw new Error("Proxy credentials are available only to extension pages");
   }
-
-  if (request && typeof request.tabId === "number") {
-    return request.tabId;
-  }
-
-  return null;
 }
 
-async function handleGetSessionsMessage(request, sender) {
-  const hostname = resolveSessionHostname(request, sender);
-  if (!hostname) {
-    return {
-      success: false,
-      error: "Missing hostname",
-      sessions: [],
-      activeSessionId: null,
-    };
-  }
-
-  const { sessions, activeSessions } = await readSessionState();
+function handleGetProxyCredentialStatusMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  const profiles = Array.isArray(request && request.profiles)
+    ? request.profiles
+    : [request && request.profile];
   return {
     success: true,
-    sessions: sortSessionsForHostname(sessions, hostname),
-    activeSessionId: activeSessions[hostname] || null,
+    credentials: profiles
+      .filter(Boolean)
+      .map((profile) => proxyCredentialManager.getStatus(profile)),
   };
 }
 
-async function handleSaveSessionMessage(request, sender) {
-  const target = await resolveVerifiedSessionTarget(request, sender);
-  if (target.error) {
-    return { success: false, error: target.error };
-  }
-  const { hostname, tabId } = target;
-
-  const [cookies, storageSnapshot] = await Promise.all([
-    getCookiesForHostname(hostname, tabId),
-    readTabStorageSnapshot(tabId),
-  ]);
-
-  const { sessions, activeSessions } = await readSessionState();
-  const now = Date.now();
-
-  const session = {
-    id: createSessionId(),
-    name: sanitizeSessionName(request && request.name),
-    domain: hostname,
-    createdAt: now,
-    lastUsed: now,
-    cookies,
-    localStorage: storageSnapshot.localStorage || {},
-    sessionStorage: storageSnapshot.sessionStorage || {},
+async function handleSetProxyCredentialsMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  return {
+    success: true,
+    credential: await proxyCredentialManager.setCredential(
+      request && request.profile,
+      request && request.credentials,
+    ),
   };
+}
 
-  const nextSessions = cleanupSessionLimits(
-    [...sessions, session],
-    activeSessions,
-    hostname,
+async function handleClearProxyCredentialsMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  return {
+    success: true,
+    credential: await proxyCredentialManager.removeCredential(
+      request && request.profile,
+    ),
+  };
+}
+
+function handleGetProxyRuntimeStatusMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  return { success: true, status: { ...proxyRuntimeStatus } };
+}
+
+async function handleVerifyProxyConnectionMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  await applyProxyPolicy(await getConfig());
+  return { success: true, status: { ...proxyRuntimeStatus } };
+}
+
+async function handleGetProxyDiagnosticsMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  const config = await getConfig();
+  const proxy = config.proxy;
+  const effective = await getProxySettingsDetails();
+  const activeProfile = proxy.profiles.find(
+    (profile) => profile.name === proxy.activeProfile,
   );
-  activeSessions[hostname] = session.id;
-  await writeSessionState(nextSessions, activeSessions);
-
-  return { success: true, session };
+  return {
+    success: true,
+    diagnostics: {
+      generatedAt: Date.now(),
+      status: { ...proxyRuntimeStatus },
+      effectiveSettings: {
+        mode:
+          effective && effective.value && typeof effective.value.mode === "string"
+            ? effective.value.mode
+            : null,
+        controlLevel: effective.levelOfControl || null,
+      },
+      configuration: {
+        enabled: Boolean(config.enabled && proxy.enabled),
+        routingMode: proxy.routingMode,
+        activeProfile: proxy.activeProfile,
+        profileCount: proxy.profiles.length,
+        fallbackCount: proxy.fallbackProfiles.length,
+        routeCount: proxy.domainRoutes.length,
+        bypassCount: proxy.bypassList.length,
+        syncTimezone: proxy.syncTimezone,
+        syncGeolocation: proxy.syncGeolocation,
+        credentialProfileCount: proxy.profiles.filter(
+          (profile) => proxyCredentialManager.getStatus(profile).configured,
+        ).length,
+        location:
+          activeProfile && activeProfile.location
+            ? {
+                city: activeProfile.location.city || "",
+                country: activeProfile.location.country || "",
+                countryCode: activeProfile.location.countryCode || "",
+                timezone: activeProfile.location.timezone || "",
+              }
+            : null,
+      },
+      history: proxyConnectionHistory
+        .slice()
+        .reverse()
+        .map((entry) => ({ ...entry })),
+    },
+  };
 }
 
-async function handleSwitchSessionMessage(request, sender) {
-  const sessionId = request && request.sessionId;
-
-  if (!sessionId) {
-    return { success: false, error: "Missing session id" };
-  }
-
-  const { sessions, activeSessions } = await readSessionState();
-  const session = sessions.find((entry) => entry.id === sessionId);
-  if (!session) {
-    return { success: false, error: "Session not found" };
-  }
-
-  const target = await resolveVerifiedSessionTarget(request, sender);
-  if (target.error) {
-    return { success: false, error: target.error };
-  }
-  if (target.hostname !== session.domain) {
-    return {
-      success: false,
-      error: "This session belongs to a different site",
-    };
-  }
-  const { tabId } = target;
-
-  await Promise.all([
-    clearCookiesForHostname(session.domain, tabId),
-    clearTabStorage(tabId),
-  ]);
-
-  await Promise.all([
-    restoreCookies(session.cookies, session.domain),
-    restoreTabStorage(tabId, {
-      localStorage: session.localStorage || {},
-      sessionStorage: session.sessionStorage || {},
-    }),
-  ]);
-
-  session.lastUsed = Date.now();
-  activeSessions[session.domain] = session.id;
-
-  await writeSessionState(sessions, activeSessions);
-  await reloadTab(tabId);
-
-  return { success: true };
-}
-
-async function handleDeleteSessionMessage(request) {
-  const sessionId = request && request.sessionId;
-  if (!sessionId) {
-    return { success: false, error: "Missing session id" };
-  }
-
-  const { sessions, activeSessions } = await readSessionState();
-  const targetSession = sessions.find((entry) => entry.id === sessionId);
-
-  const nextSessions = sessions.filter((entry) => entry.id !== sessionId);
-  if (targetSession && activeSessions[targetSession.domain] === sessionId) {
-    delete activeSessions[targetSession.domain];
-  }
-
-  await writeSessionState(nextSessions, activeSessions);
-  return { success: true };
-}
-
-async function handleRenameSessionMessage(request) {
-  const sessionId = request && request.sessionId;
-  if (!sessionId) {
-    return { success: false, error: "Missing session id" };
-  }
-
-  const { sessions, activeSessions } = await readSessionState();
-  const session = sessions.find((entry) => entry.id === sessionId);
-  if (!session) {
-    return { success: false, error: "Session not found" };
-  }
-
-  session.name = sanitizeSessionName(request && request.name);
-  await writeSessionState(sessions, activeSessions);
-  return { success: true, session };
-}
-
-async function handleClearCurrentSessionMessage(request, sender) {
-  const target = await resolveVerifiedSessionTarget(request, sender);
-  if (target.error) {
-    return { success: false, error: target.error };
-  }
-  const { hostname, tabId } = target;
-
-  await Promise.all([
-    clearCookiesForHostname(hostname, tabId),
-    clearTabStorage(tabId),
-  ]);
-
-  const { sessions, activeSessions } = await readSessionState();
-  delete activeSessions[hostname];
-  await writeSessionState(sessions, activeSessions);
-  await reloadTab(tabId);
-
+async function handleClearProxyHistoryMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  proxyConnectionHistory = [];
+  await proxyHistoryWriteQueue.catch(() => {});
+  await storage.write({ [PROXY_CONNECTION_HISTORY_KEY]: [] });
   return { success: true };
 }
 
@@ -1149,12 +874,19 @@ const messageHandlers = {
   "reset-config": handleResetConfigMessage,
   "get-triggered-features": handleGetTriggeredFeaturesMessage,
   "prepare-proxy-profile": handlePrepareProxyProfileMessage,
-  "get-sessions": handleGetSessionsMessage,
-  "save-session": handleSaveSessionMessage,
-  "switch-session": handleSwitchSessionMessage,
-  "delete-session": handleDeleteSessionMessage,
-  "rename-session": handleRenameSessionMessage,
-  "clear-current-session": handleClearCurrentSessionMessage,
+  "get-proxy-credential-status": handleGetProxyCredentialStatusMessage,
+  "set-proxy-credentials": handleSetProxyCredentialsMessage,
+  "clear-proxy-credentials": handleClearProxyCredentialsMessage,
+  "get-proxy-runtime-status": handleGetProxyRuntimeStatusMessage,
+  "verify-proxy-connection": handleVerifyProxyConnectionMessage,
+  "get-proxy-diagnostics": handleGetProxyDiagnosticsMessage,
+  "clear-proxy-history": handleClearProxyHistoryMessage,
+  "get-sessions": sessionManager.getSessions,
+  "save-session": sessionManager.saveSession,
+  "switch-session": sessionManager.switchSession,
+  "delete-session": sessionManager.deleteSession,
+  "rename-session": sessionManager.renameSession,
+  "clear-current-session": sessionManager.clearCurrentSession,
 };
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -1163,7 +895,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     "Received message:",
     messageType,
     "from:",
-    sender.tab ? "tab" : "popup/options",
+    sender && sender.tab ? "tab" : "popup/options",
   );
 
   const handler = messageHandlers[messageType];
@@ -1195,76 +927,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
-// ========== FINGERPRINT DETECTION HANDLING ==========
-
 async function handleFingerprintDetection(feature, hostname) {
-  debugLog(
-    "[Background] handleFingerprintDetection called for:",
-    feature,
-    hostname,
-  );
   const config = await getConfig();
-
-  debugLog("[Background] Notifications enabled:", config.notifications.enabled);
-
-  if (!config.notifications.enabled) {
-    debugLog("[Background] Notifications disabled, skipping");
-    return;
-  }
-
-  // Check if global protection is enabled
-  if (!config.enabled) {
-    debugLog("[Background] Global protection disabled, skipping notification");
-    return;
-  }
-
-  const featureConfig =
-    config[feature === "user-agent" ? "useragent" : feature];
-  if (!featureConfig || !featureConfig.enabled) {
-    debugLog(
-      "[Background] Feature",
-      feature,
-      "is disabled, skipping notification",
-    );
-    return;
-  }
-
-  if (isHostnameOnGlobalAllowlist(hostname, config)) {
-    debugLog("[Background] Domain", hostname, "is globally allowlisted");
-    return;
-  }
-
-  const featureWhitelist = featureConfig.whitelist || "";
-  if (isHostnameOnFeatureAllowlist(hostname, featureWhitelist, config)) {
-    debugLog(
-      "[Background] Domain",
-      hostname,
-      "is allowlisted for",
-      feature,
-      "- skipping notification",
-    );
+  const configFeature = feature === "user-agent" ? "useragent" : feature;
+  if (
+    !config.notifications.enabled ||
+    !isFeatureActiveForHostname(config, configFeature, hostname)
+  ) {
     return;
   }
 
   const key = `${feature}-${hostname}`;
   const now = Date.now();
-  const lastTime = lastNotificationTime.get(key) || 0;
-
-  debugLog("[Background] Throttle check:", {
-    key: key,
-    timeSinceLastNotification: now - lastTime,
-    throttleLimit: NOTIFICATION_THROTTLE_MS,
-  });
-
-  if (now - lastTime < NOTIFICATION_THROTTLE_MS) {
-    debugLog("[Background] Notification throttled (too soon)");
+  if (now - (lastNotificationTime.get(key) || 0) < NOTIFICATION_THROTTLE_MS) {
     return;
   }
-
+  if (!lastNotificationTime.has(key) && lastNotificationTime.size >= 512) {
+    lastNotificationTime.delete(lastNotificationTime.keys().next().value);
+  }
   lastNotificationTime.set(key, now);
 
-  // Show notification
-  debugLog("[Background] Creating notification for:", feature, "on", hostname);
   chrome.notifications.create(
     {
       type: "basic",
@@ -1273,19 +955,14 @@ async function handleFingerprintDetection(feature, hostname) {
       message: `${feature.toUpperCase()} fingerprinting attempt blocked on ${hostname}`,
       priority: 1,
     },
-    (notificationId) => {
-      if (chrome.runtime.lastError) {
-        debugError(
-          "[Background] Notification error:",
-          chrome.runtime.lastError,
-        );
-      } else {
-        debugLog("[Background] Notification created with ID:", notificationId);
+    () => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        debugError("[Background] Notification error:", error);
       }
     },
   );
 }
-// ========== CONTEXT MENUS ==========
 
 function setupContextMenus() {
   chrome.contextMenus.removeAll(() => {
@@ -1293,25 +970,20 @@ function setupContextMenus() {
       debugWarn("Error removing context menus:", chrome.runtime.lastError);
     }
 
-    createContextMenu(
-      "add-to-global-whitelist",
-      "Stealth Guard: Add to Allowlist",
-    );
-    createContextMenu(
-      "remove-from-global-whitelist",
-      "Stealth Guard: Remove from Allowlist",
-    );
-    createContextMenu("test-protection", "Stealth Guard: Test Protection");
-  });
-}
-
-function createContextMenu(id, title) {
-  chrome.contextMenus.create({ id, title, contexts: ["page"] }, () => {
-    if (chrome.runtime.lastError) {
-      debugWarn(
-        "Context menu create warning:",
-        chrome.runtime.lastError.message,
-      );
+    const menus = [
+      ["add-to-global-whitelist", "Stealth Guard: Add to Allowlist"],
+      ["remove-from-global-whitelist", "Stealth Guard: Remove from Allowlist"],
+      ["test-protection", "Stealth Guard: Test Protection"],
+    ];
+    for (const [id, title] of menus) {
+      chrome.contextMenus.create({ id, title, contexts: ["page"] }, () => {
+        if (chrome.runtime.lastError) {
+          debugWarn(
+            "Context menu create warning:",
+            chrome.runtime.lastError.message,
+          );
+        }
+      });
     }
   });
 }
@@ -1341,7 +1013,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
   try {
     const url = new URL(tab.url);
-    const hostname = url.hostname;
+    const hostname = normalizeHostname(url.hostname).replace(/^www\./, "");
 
     if (info.menuItemId === "add-to-global-whitelist") {
       const result = await handleAddToWhitelistMessage({ domain: hostname });
@@ -1369,34 +1041,44 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-// ========== PROXY ERROR HANDLING ==========
-
 chrome.proxy.onProxyError.addListener((details) => {
-  debugError("[Proxy] Error detected:", details.error);
-  debugError("[Proxy] Error details:", details.details);
-
-  // If we have a fatal proxy error, we could consider notifying the user
-  if (details.fatal) {
-    console.error("[Proxy] Fatal error, proxy settings may be invalid");
-
-    // Optional: Notify user via notification
-    if (
-      currentConfig &&
-      currentConfig.notifications &&
-      currentConfig.notifications.enabled
-    ) {
-      chrome.notifications.create({
-        type: "basic",
-        iconUrl: "icons/64.png",
-        title: "Stealth Guard - Proxy Error",
-        message: "Proxy connection failed. Check your proxy settings.",
-        priority: 2,
-      });
-    }
+  debugError("[Proxy] Error:", details.error, details.details || "");
+  if (currentConfig && currentConfig.proxy.enabled) {
+    setProxyRuntimeStatus({
+      state: details.fatal ? "error" : "degraded",
+      profile: proxyRuntimeStatus.profile,
+      error: details.error || details.details || "Proxy connection failed",
+      controlLevel: proxyRuntimeStatus.controlLevel,
+    });
+  }
+  if (details.fatal && currentConfig && currentConfig.notifications.enabled) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/64.png",
+      title: "Stealth Guard - Proxy Error",
+      message: "Proxy connection failed. Check your proxy settings.",
+      priority: 2,
+    });
   }
 });
 
-// ========== CONFIG HELPER ==========
+if (chrome.proxy.settings.onChange) {
+  chrome.proxy.settings.onChange.addListener((details) => {
+    const controlLevel = details && details.levelOfControl;
+    if (
+      currentConfig &&
+      currentConfig.proxy.enabled &&
+      isConflictingProxyControl(controlLevel)
+    ) {
+      setProxyRuntimeStatus({
+        state: "conflict",
+        profile: proxyRuntimeStatus.profile,
+        error: "Proxy settings are controlled by another extension or policy",
+        controlLevel,
+      });
+    }
+  });
+}
 
 async function getConfig() {
   await ensureBackgroundInitialized();

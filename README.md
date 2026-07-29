@@ -10,7 +10,7 @@
 
 </div>
 
-Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts, AudioContext, ClientRects, WebGPU, timezone, User-Agent, and WebRTC surfaces. Settings and optional saved site sessions stay in local extension storage; there is no telemetry or analytics.
+Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts, AudioContext, ClientRects, WebGPU, timezone, geolocation, User-Agent, and WebRTC surfaces. Settings, bounded proxy connection history, and optional saved site sessions stay in local extension storage; there is no telemetry or analytics.
 
 > [!IMPORTANT]
 > Stealth Guard currently uses Manifest V2. Standard Google Chrome releases have disabled MV2, and most Chromium forks followed upstream. Opera is the primary current target because it still supports existing MV2 extensions. See [Browser compatibility](#-browser-compatibility) before installing.
@@ -32,19 +32,22 @@ Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts
 | **🌍 Proxy**        | Masks your IP address by routing traffic through SOCKS4/5 or HTTP/HTTPS proxy servers |
 | **🌐 User-Agent**   | Spoofs browser User-Agent string in both HTTP headers and JavaScript                  |
 | **🕐 Timezone**     | Spoofs timezone information (configurable, default: UTC+1)                            |
+| **📍 Geolocation**  | Replaces permitted HTML geolocation results with coarse proxy-location coordinates   |
 | **📡 WebRTC**       | Prevents IP address leaks through WebRTC connections                                  |
 | **🎨 Canvas**       | Adds imperceptible noise to canvas data exports, preventing canvas fingerprinting     |
 | **📐 ClientRects**  | Adds noise to element bounding rectangle measurements                                 |
 | **🔤 Font**         | Randomizes font measurement values to prevent font enumeration                        |
 | **🔊 AudioContext** | Injects noise into audio frequency data to prevent audio fingerprinting               |
-| **🕹️ WebGL**        | Spoofs GPU vendor/renderer information and adds noise to WebGL buffers                |
+| **🕹️ WebGL**        | Hides specific GPU models and rotates report/image fingerprints per page load           |
 | **🎮 WebGPU**       | Spoofs WebGPU adapter limits and buffer operations                                    |
 
 ### 🚀 Additional Features
 
-- **🔌 SOCKS5/HTTP/HTTPS Proxy Support** - Route traffic through proxy servers with per-profile configuration
+- **🔌 SOCKS5/HTTP/HTTPS Proxy Support** - Route browser traffic through raw proxy endpoints with optional credentials and ordered fallback profiles
 - **🔄 Per-Site Session Switcher** - Save, rename, delete, clear, and switch login sessions (cookies + local/session storage) from the popup
-- **🗺️ Domain-based Routing Engine** - PAC-based domain routing is supported in core proxy logic (UI route editor is not currently exposed)
+- **🗺️ Split Tunneling** - Choose protect-all, bypass-selected, or protect-selected behavior with deterministic PAC-based per-site routes
+- **📍 Location Synchronization** - Match timezone and permission-approved HTML geolocation to each site's effective proxy profile
+- **📊 Local Diagnostics** - Inspect, export, or clear a bounded 100-event proxy connection history without exposing passwords
 - **✅ Global & Per-Feature Allowlists** - Allow sites globally or per protection feature
 - **🎯 Wildcard Domain Patterns** - Support for `*.example.com` and `webmail.*` patterns
 - **☁️ Cloudflare Challenge Compatibility** - Leaves Cloudflare-owned challenge frames unmodified without granting the embedding page a UA bypass
@@ -81,14 +84,16 @@ Open **Advanced Settings** from the popup to access:
 
 - Per-feature allowlists
 - Proxy profile management
-- Proxy active profile + bypass list
+- Proxy profiles, credentials, fallback order, and split-tunneling modes
+- Proxy-location timezone/geolocation synchronization
+- Connection diagnostics and local history
 - WebGL presets (Apple, Pixel 4, Surface Pro 7)
 - Export/import configuration
 - WebRTC policy settings
 
 ### 🖱️ Context Menu
 
-Right-click on any webpage to quickly add or remove the current domain from allowlists.
+Right-click on any webpage to quickly add or remove the current domain from the global allowlist.
 
 ## 🔧 Configuration
 
@@ -153,7 +158,7 @@ Run the local quality gate:
 npm run check
 ```
 
-This validates source syntax and manifest integrity, enforces 100% statements, branches, functions, and lines coverage for deterministic core modules, runs background integration tests, and drives Chrome through every protection plus popup/options workflows.
+This validates source syntax and manifest integrity, enforces 100% statements, branches, functions, and lines coverage for deterministic core modules, runs background integration tests, and drives Chrome through every protection plus popup/options workflows. Current Chrome cannot load this MV2 extension, so the harness injects the same classic-script bundles and mocked extension APIs; release validation still requires an unpacked-extension smoke test in an MV2-capable Opera build.
 
 The content script installs wrappers immediately at `document_start` with embedded safe defaults, then applies trusted `chrome.storage.local` config through a private authenticated MAIN-world update channel. This fail-closed design avoids a pre-patch fingerprinting window; if storage is slow, default protections may apply briefly before stored disables or allowlists take effect.
 
@@ -162,7 +167,7 @@ The content script installs wrappers immediately at `document_start` with embedd
 ### 📁 Architecture
 
 ```
-background.js              → Runtime orchestrator (UA headers, WebRTC, proxy, messages, sessions)
+background.js              → Runtime orchestrator (config, UA headers, WebRTC, proxy, messages)
     ↓
 content-scripts/
   injector.js              → Isolated bootstrap, trusted config updates, authenticated alerts
@@ -173,13 +178,13 @@ lib/
   domainFilter.js          → Canonical domain and wildcard allowlist matching
   proxy.js                 → Proxy validation, location lookup, PAC generation, browser settings
   runtime.js               → Promise-based popup/options messaging
-  session.js               → Session hostname and cookie-scope helpers
+  session.js               → Serialized session lifecycle and cookie/site-scope helpers
   storage.js               → Promise wrapper for chrome.storage.local
 ```
 
 ### 📋 Manifest Version
 
-This extension intentionally uses **Manifest V2** for maximum API compatibility. Key features like `webRequestBlocking` and synchronous header modification require MV2 and are restricted or impossible in Manifest V3.
+This extension intentionally remains on **Manifest V2** because its persistent background page and blocking header-modification architecture depend on MV2 APIs. A Manifest V3 port would require a separate runtime design.
 
 > [!WARNING]
 > Because of Manifest V2, **this extension does not work on current standard versions of Google Chrome**. A separate Manifest V3 architecture is required for broad Chrome, Brave, Vivaldi, and Edge support.

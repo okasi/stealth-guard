@@ -6,14 +6,11 @@
   }
   window.__STEALTH_GUARD_INJECTED__ = true;
 
-  const isChallengeFrame = isCloudflareChallengeHostname(
-    window.location.hostname,
-  );
-  if (isChallengeFrame) {
+  if (isCloudflareChallengeHostname(window.location.hostname)) {
     return;
   }
 
-  let config = createContentConfig(DEFAULT_CONFIG);
+  let config = createContentConfig(DEFAULT_CONFIG, window.location.hostname);
   let debugEnabled = config.notifications.enabled;
   const bridge = {
     configEvent: `stealth-guard-config-${createPrivateToken()}`,
@@ -21,13 +18,6 @@
     alertChannel: `stealth-guard-alert-${createPrivateToken()}`,
     alertToken: createPrivateToken(),
   };
-
-  function isCloudflareChallengeHostname(hostname) {
-    return (
-      hostname === "challenges.cloudflare.com" ||
-      hostname.endsWith(".challenges.cloudflare.com")
-    );
-  }
 
   function createPrivateToken() {
     if (
@@ -41,17 +31,14 @@
     return Math.random().toString(36).slice(2) + Date.now().toString(36);
   }
 
-  function debugLog(...args) {
+  function debug(method, ...args) {
     if (debugEnabled) {
-      console.log(...args);
+      console[method](...args);
     }
   }
 
-  function debugWarn(...args) {
-    if (debugEnabled) {
-      console.warn(...args);
-    }
-  }
+  const debugLog = (...args) => debug("log", ...args);
+  const debugWarn = (...args) => debug("warn", ...args);
 
   function loadStoredContentConfig() {
     return new Promise((resolve) => {
@@ -64,13 +51,18 @@
           resolve(config);
           return;
         }
-        resolve(createContentConfig(result && result[STORAGE_KEY]));
+        resolve(
+          createContentConfig(
+            result && result[STORAGE_KEY],
+            window.location.hostname,
+          ),
+        );
       });
     });
   }
 
   function applyTrustedContentConfig(nextConfig) {
-    config = createContentConfig(nextConfig);
+    config = createContentConfig(nextConfig, window.location.hostname);
     debugEnabled = config.notifications.enabled;
     window.dispatchEvent(
       new CustomEvent(bridge.configEvent, {
@@ -83,7 +75,14 @@
   }
 
   const script = document.createElement("script");
-  script.textContent = `(${installMainWorldProtections.toString()})(${JSON.stringify(config)}, ${JSON.stringify(bridge)}, ${createDomainPatternTools.toString()}, ${JSON.stringify(USER_AGENT_STRINGS)});`;
+  const serializedArguments = [
+    JSON.stringify(config),
+    JSON.stringify(bridge),
+    createDomainPatternTools.toString(),
+    JSON.stringify(USER_AGENT_STRINGS),
+  ].join(", ");
+  script.textContent =
+    `(${installMainWorldProtections.toString()})(${serializedArguments});`;
   (document.head || document.documentElement).appendChild(script);
   script.remove();
 
@@ -112,8 +111,6 @@
         type: "fingerprint-detected",
         feature: alert.feature,
         hostname: window.location.hostname,
-        url: window.location.href,
-        timestamp: Date.now(),
       },
       () => {
         if (chrome.runtime.lastError) {

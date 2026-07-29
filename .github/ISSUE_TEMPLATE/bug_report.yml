@@ -10,14 +10,14 @@ body:
     id: browser
     attributes:
       label: Browser
-      options: [Opera, Brave, Vivaldi, Microsoft Edge Enterprise, Other]
+      options: [Opera, Other MV2-capable Chromium build, Unsupported current Chromium build]
     validations:
       required: true
   - type: input
     id: versions
     attributes:
       label: Browser and extension versions
-      placeholder: "Brave 1.x, Stealth Guard 1.x"
+      placeholder: "Opera 1xx, Stealth Guard 1.x"
     validations:
       required: true
   - type: textarea

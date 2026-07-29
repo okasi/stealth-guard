@@ -19,10 +19,12 @@
   "description": "Fingerprinting protection: Canvas, WebGL, Font, Audio, Timezone, User-Agent spoofing, WebRTC leak prevention & proxy",
   "background": {
     "scripts": [
+      "lib/runtime.js",
       "lib/storage.js",
       "lib/config.js",
       "lib/domainFilter.js",
       "lib/proxy.js",
+      "lib/proxyCredentials.js",
       "lib/session.js",
       "background.js"
     ],

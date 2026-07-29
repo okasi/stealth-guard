@@ -4,6 +4,7 @@ let currentSessionHostname = "";
 let currentSessions = [];
 let activeSessionId = null;
 let pendingReloadTimeout = null;
+let currentProxyRuntimeStatus = null;
 
 const POPUP_RELOAD_DEBOUNCE_MS = 250;
 
@@ -11,9 +12,10 @@ document.addEventListener("DOMContentLoaded", initializePopup);
 
 async function initializePopup() {
   try {
-    [currentConfig, currentTab] = await Promise.all([
+    [currentConfig, currentTab, currentProxyRuntimeStatus] = await Promise.all([
       loadRuntimeConfig(),
       queryCurrentTab(),
+      loadProxyRuntimeStatus(),
     ]);
     currentSessionHostname = getTabHostname(currentTab);
     renderPopup();
@@ -26,16 +28,24 @@ async function initializePopup() {
   }
 }
 
-function queryCurrentTab() {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(tabs && tabs[0] ? tabs[0] : null);
+async function loadProxyRuntimeStatus() {
+  try {
+    const response = await sendRuntimeMessage({
+      type: "get-proxy-runtime-status",
     });
-  });
+    assertRuntimeResponse(response, "Failed to load proxy status");
+    return response.status;
+  } catch (error) {
+    console.warn("Proxy runtime status is unavailable:", error);
+    return null;
+  }
+}
+
+function queryCurrentTab() {
+  return callChromeApi(chrome.tabs, "query", {
+    active: true,
+    currentWindow: true,
+  }).then((tabs) => (tabs && tabs[0] ? tabs[0] : null));
 }
 
 function getTabHostname(tab) {
@@ -105,6 +115,33 @@ function renderProxyStatus() {
   if (!proxy.enabled) {
     status.textContent = "No proxy";
     status.dataset.state = "disabled";
+  } else if (
+    currentProxyRuntimeStatus &&
+    currentProxyRuntimeStatus.state === "connected"
+  ) {
+    status.textContent = `Protected · ${currentProxyRuntimeStatus.profile || activeProfile?.name || "Proxy"}`;
+    status.dataset.state = "connected";
+  } else if (
+    currentProxyRuntimeStatus &&
+    currentProxyRuntimeStatus.state === "conflict"
+  ) {
+    status.textContent = "Proxy conflict";
+    status.dataset.state = "error";
+  } else if (
+    currentProxyRuntimeStatus &&
+    ["error", "degraded"].includes(currentProxyRuntimeStatus.state)
+  ) {
+    status.textContent =
+      currentProxyRuntimeStatus.state === "error"
+        ? "Proxy error"
+        : "Not verified";
+    status.dataset.state = "warning";
+  } else if (
+    currentProxyRuntimeStatus &&
+    currentProxyRuntimeStatus.state === "connecting"
+  ) {
+    status.textContent = "Connecting…";
+    status.dataset.state = "configured";
   } else if (proxy.domainRoutes.length > 0) {
     status.textContent = `${proxy.domainRoutes.length} route(s)`;
     status.dataset.state = "active";
@@ -133,7 +170,7 @@ function renderCurrentSite() {
     return;
   }
 
-  const allowlisted = new DomainFilter(currentConfig).isAllowlisted(
+  const allowlisted = isDomainAllowlisted(
     hostname,
     currentConfig.globalWhitelist,
   );
@@ -153,8 +190,7 @@ function renderAllowlistHighlighting() {
     return;
   }
 
-  const filter = new DomainFilter(currentConfig);
-  if (filter.isAllowlisted(hostname, currentConfig.globalWhitelist)) {
+  if (isDomainAllowlisted(hostname, currentConfig.globalWhitelist)) {
     for (const row of rows) {
       row.classList.add("allowlisted-global");
     }
@@ -170,7 +206,7 @@ function renderAllowlistHighlighting() {
         : featureConfig.whitelist;
     row.classList.toggle(
       "allowlisted-feature",
-      filter.isAllowlisted(hostname, allowlist || ""),
+      isDomainAllowlisted(hostname, allowlist || ""),
     );
   }
 }
@@ -279,7 +315,7 @@ async function refreshSessionList() {
       type: "get-sessions",
       hostname: currentSessionHostname,
     });
-    assertSuccessfulResponse(response, "Failed to load sessions");
+    assertRuntimeResponse(response, "Failed to load sessions");
     currentSessions = Array.isArray(response.sessions) ? response.sessions : [];
     activeSessionId = response.activeSessionId || null;
     renderSessionList();
@@ -289,24 +325,20 @@ async function refreshSessionList() {
   }
 }
 
-function assertSuccessfulResponse(response, fallbackMessage) {
-  if (!response || response.success === false) {
-    throw new Error((response && response.error) || fallbackMessage);
-  }
-  return response;
-}
-
 async function saveCurrentConfig() {
   try {
     const response = await sendRuntimeMessage({
       type: "update-config",
       config: currentConfig,
     });
-    assertSuccessfulResponse(response, "Failed to save settings");
+    assertRuntimeResponse(response, "Failed to save settings");
+    currentProxyRuntimeStatus = await loadProxyRuntimeStatus();
+    renderProxyStatus();
     scheduleCurrentTabReload();
   } catch (error) {
     console.error("Failed to save settings:", error);
     currentConfig = await loadRuntimeConfig();
+    currentProxyRuntimeStatus = await loadProxyRuntimeStatus();
     renderPopup();
   }
 }
@@ -316,16 +348,13 @@ function scheduleCurrentTabReload() {
     return;
   }
   clearTimeout(pendingReloadTimeout);
-  pendingReloadTimeout = setTimeout(() => {
+  pendingReloadTimeout = setTimeout(async () => {
     pendingReloadTimeout = null;
-    chrome.tabs.reload(currentTab.id, () => {
-      if (chrome.runtime.lastError) {
-        console.error(
-          "Failed to reload current tab:",
-          chrome.runtime.lastError,
-        );
-      }
-    });
+    try {
+      await callChromeApi(chrome.tabs, "reload", currentTab.id);
+    } catch (error) {
+      console.error("Failed to reload current tab:", error);
+    }
   }, POPUP_RELOAD_DEBOUNCE_MS);
 }
 
@@ -416,8 +445,7 @@ async function toggleCurrentSiteAllowlist() {
     return;
   }
 
-  const filter = new DomainFilter(currentConfig);
-  const allowlisted = filter.isAllowlisted(
+  const allowlisted = isDomainAllowlisted(
     currentSessionHostname,
     currentConfig.globalWhitelist,
   );
@@ -427,7 +455,7 @@ async function toggleCurrentSiteAllowlist() {
       type: allowlisted ? "remove-from-whitelist" : "add-to-whitelist",
       domain: currentSessionHostname,
     });
-    assertSuccessfulResponse(response, "Failed to update allowlist");
+    assertRuntimeResponse(response, "Failed to update allowlist");
     currentConfig.globalWhitelist = response.whitelist;
     renderPopup();
     scheduleCurrentTabReload();
@@ -455,7 +483,7 @@ async function saveSession() {
       tabId: currentTab.id,
       name: input.value,
     });
-    assertSuccessfulResponse(response, "Failed to save session");
+    assertRuntimeResponse(response, "Failed to save session");
     input.value = "";
     setSessionStatus("Session saved.", "success");
     await refreshSessionList();
@@ -484,7 +512,7 @@ async function clearCurrentSession() {
       hostname: currentSessionHostname,
       tabId: currentTab.id,
     });
-    assertSuccessfulResponse(response, "Failed to clear current session");
+    assertRuntimeResponse(response, "Failed to clear current session");
     setSessionStatus("Current session cleared.", "success");
     await refreshSessionList();
   } catch (error) {
@@ -523,7 +551,7 @@ async function handleSessionAction(event) {
 
   try {
     const response = await sendRuntimeMessage(request);
-    assertSuccessfulResponse(response, `Failed to ${action} session`);
+    assertRuntimeResponse(response, `Failed to ${action} session`);
     setSessionStatus(
       `Session ${action === "switch" ? "switched" : `${action}d`}.`,
       "success",

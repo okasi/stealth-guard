@@ -226,6 +226,16 @@ button {
   color: var(--primary);
 }
 
+#proxy-status[data-state="connected"] {
+  color: var(--success);
+  font-weight: 700;
+}
+
+#proxy-status[data-state="error"] {
+  color: var(--danger);
+  font-weight: 700;
+}
+
 #proxy-status[data-state="configured"] {
   color: var(--muted);
 }

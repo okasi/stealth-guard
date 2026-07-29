@@ -14,7 +14,7 @@ There is no production build step. Source files are loaded directly by the exten
 
 ## Testing expectations
 
-- Use concise Vitest tests with Arrange, Act, and Assert comments.
+- Write concise behavioral tests; comments should explain only non-obvious intent.
 - Keep the deterministic library layer at 100% statements, branches, functions, and lines coverage.
 - Extend the background integration or Chrome end-to-end harness for changed browser lifecycle behavior.
 - Manually verify native-browser differences that the automated Chrome harness cannot represent.

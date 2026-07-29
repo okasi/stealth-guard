@@ -10,6 +10,7 @@
   --danger: #f44336;
   --danger-hover: #d32f2f;
   --success: #4caf50;
+  --warning: #f59e0b;
   --focus: #667eea;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
@@ -259,7 +260,6 @@ button {
   background: #5a6268;
 }
 
-/* Toast Notification */
 .toast {
   position: fixed;
   bottom: 20px;
@@ -325,8 +325,70 @@ textarea:focus-visible {
 }
 
 .proxy-profiles-list,
+.proxy-routes-list,
 .proxy-editor {
   margin-bottom: 10px;
+}
+
+.proxy-route-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.proxy-route-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+
+.proxy-route-card code {
+  overflow-wrap: anywhere;
+}
+
+.proxy-runtime-card,
+.proxy-credential-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.proxy-runtime-card {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--muted);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+
+.proxy-runtime-card[data-state="connected"],
+.proxy-runtime-card[data-state="routing"] {
+  border-left-color: var(--success);
+}
+
+.proxy-runtime-card[data-state="connecting"],
+.proxy-runtime-card[data-state="degraded"] {
+  border-left-color: var(--warning);
+}
+
+.proxy-runtime-card[data-state="error"],
+.proxy-runtime-card[data-state="conflict"] {
+  border-left-color: var(--danger);
+}
+
+.proxy-runtime-card small {
+  display: block;
+  margin-top: 3px;
 }
 
 .proxy-editor {
@@ -352,6 +414,104 @@ textarea:focus-visible {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.proxy-credential-controls {
+  margin: 4px 0 8px;
+}
+
+.checkbox-inline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.9em;
+}
+
+.credential-warning {
+  display: block;
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
+.proxy-credential-badge {
+  display: inline-block;
+  margin-top: 5px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #e8f5ef;
+  color: #087a54;
+  font-size: 0.78em;
+  font-weight: 650;
+}
+
+.proxy-location-sync {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+
+.proxy-location-sync .checkbox-inline {
+  margin: 7px 0;
+  font-weight: 500;
+}
+
+.proxy-diagnostics {
+  padding-top: 16px;
+  border-top: 2px solid #f0f0f0;
+}
+
+.proxy-diagnostics-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.proxy-diagnostics-heading > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.proxy-diagnostics-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.proxy-diagnostics-summary > div {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+
+.proxy-diagnostics-summary strong,
+.proxy-diagnostics-summary span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.proxy-diagnostics-summary span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.proxy-connection-history {
+  max-height: 240px;
+  margin: 8px 0 10px;
+  padding-left: 22px;
+  overflow: auto;
+  font-size: 0.86em;
+}
+
+.proxy-connection-history li {
+  margin-bottom: 5px;
+  overflow-wrap: anywhere;
 }
 
 .proxy-field-label {
@@ -433,15 +593,32 @@ textarea:focus-visible {
     padding: 18px;
   }
 
-  .proxy-editor-grid,
-  .actions {
+  .proxy-editor-grid {
     grid-template-columns: 1fr;
+  }
+
+  .actions {
     flex-direction: column;
   }
 
   .proxy-profile-card {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .proxy-route-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .proxy-runtime-card,
+  .proxy-credential-controls,
+  .proxy-diagnostics-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .proxy-diagnostics-summary {
+    grid-template-columns: 1fr;
   }
 }
 

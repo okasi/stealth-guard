@@ -21,10 +21,8 @@ afterEach(() => {
 });
 
 test("getDefaultUserAgentPreset maps platform and browser combinations", () => {
-  // Arrange
   const configModule = loadConfigModule();
 
-  // Act
   Object.defineProperty(globalThis, "navigator", {
     value: { platform: "MacIntel", userAgent: "Chrome/140" },
     configurable: true,
@@ -51,7 +49,6 @@ test("getDefaultUserAgentPreset maps platform and browser combinations", () => {
   });
   const missingNavigator = configModule.getDefaultUserAgentPreset();
 
-  // Assert
   expect([
     macChrome,
     macSafari,
@@ -62,7 +59,6 @@ test("getDefaultUserAgentPreset maps platform and browser combinations", () => {
 });
 
 test("User-Agent and content config helpers expose only trusted runtime data", () => {
-  // Arrange
   const {
     PROTECTION_FEATURES,
     USER_AGENT_STRINGS,
@@ -82,65 +78,126 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
     unknown: { secret: true },
   };
 
-  // Act
   const contentConfig = createContentConfig(source);
   const cloned = cloneConfig(contentConfig);
   const emptyClone = cloneConfig(null);
   cloned.canvas.enabled = true;
 
-  // Assert
   expect(PROTECTION_FEATURES).toContain("canvas");
+  expect(PROTECTION_FEATURES).toContain("geolocation");
   expect(getUserAgentString("macos")).toBe(USER_AGENT_STRINGS.macos);
   expect(getUserAgentString("missing")).toBeNull();
   expect(contentConfig.enabled).toBe(false);
   expect(contentConfig.canvas.enabled).toBe(false);
   expect(contentConfig.proxy).toBeUndefined();
+  expect(contentConfig.vpnLocation).toBeNull();
   expect(contentConfig.unknown).toBeUndefined();
   expect(cloned.canvas.enabled).toBe(true);
   expect(contentConfig.canvas.enabled).toBe(false);
   expect(emptyClone).toEqual({});
 });
 
-test("deepMerge recursively merges objects and ignores inherited source properties", () => {
-  // Arrange
-  const { deepMerge } = loadConfigModule();
-  const source = Object.create({ inherited: "ignored" });
-  source.nested = { enabled: false };
-  source.extra = { added: true };
-  source.list = ["custom"];
+test("content config resolves only coarse effective proxy location data", () => {
+  const {
+    createContentConfig,
+    normalizeProxyLocation,
+    parseCoarseCoordinates,
+    resolveContentVpnLocation,
+  } = loadConfigModule();
+  const config = {
+    enabled: true,
+    globalWhitelist: "direct.test",
+    proxy: {
+      enabled: true,
+      routingMode: "bypass-selected",
+      activeProfile: "Main",
+      fallbackProfiles: [],
+      bypassList: ["bypass.test"],
+      domainRoutes: [{ pattern: "*.video.test", profile: "Video" }],
+      syncTimezone: true,
+      syncGeolocation: true,
+      profiles: [
+        {
+          name: "Main",
+          host: "secret.proxy",
+          port: 443,
+          scheme: "https",
+          location: {
+            city: " Paris ",
+            country: "France",
+            countryCode: "fr",
+            loc: "48.8566,2.3522",
+            timezone: "Europe/Paris",
+          },
+        },
+        {
+          name: "Video",
+          host: "video.proxy",
+          port: 443,
+          scheme: "https",
+          location: {
+            city: "Tokyo",
+            country: "Japan",
+            countryCode: "JP",
+            loc: "35.6762,139.6503",
+            timezone: "Asia/Tokyo",
+          },
+        },
+      ],
+    },
+  };
 
-  // Act
-  const merged = deepMerge(
-    { nested: { enabled: true, whitelist: "" }, list: ["default"] },
-    source,
-  );
-
-  // Assert
-  expect(merged).toEqual({
-    nested: { enabled: false, whitelist: "" },
-    extra: { added: true },
-    list: ["custom"],
+  const contentConfig = createContentConfig(config, "www.example.test");
+  expect(contentConfig.vpnLocation).toEqual({
+    city: "Paris",
+    country: "France",
+    countryCode: "FR",
+    timezone: "Europe/Paris",
+    syncTimezone: true,
+    syncGeolocation: true,
+    latitude: 48.86,
+    longitude: 2.35,
   });
-  expect(merged.inherited).toBeUndefined();
-});
+  expect(JSON.stringify(contentConfig)).not.toContain("secret.proxy");
+  expect(createContentConfig(config, "cdn.video.test").vpnLocation).toMatchObject({
+    city: "Tokyo",
+    timezone: "Asia/Tokyo",
+    latitude: 35.68,
+    longitude: 139.65,
+  });
+  expect(resolveContentVpnLocation(config, "direct.test")).toBeNull();
+  expect(resolveContentVpnLocation(config, "bypass.test")).toBeNull();
+  expect(resolveContentVpnLocation(config, "localhost")).toBeNull();
+  expect(resolveContentVpnLocation({ ...config, enabled: false }, "site.test")).toBeNull();
+  expect(resolveContentVpnLocation(config, "")).toBeNull();
+  expect(parseCoarseCoordinates({ loc: "invalid" })).toBeNull();
+  expect(parseCoarseCoordinates({ loc: "91,181" })).toBeNull();
+  expect(normalizeProxyLocation(null)).toEqual({
+    city: "",
+    region: "",
+    country: "",
+    countryCode: "",
+    loc: "",
+    org: "",
+    timezone: "",
+    source: "",
+  });
 
-test("deepMerge blocks prototype pollution keys", () => {
-  // Arrange
-  const { deepMerge } = loadConfigModule();
-  const source = JSON.parse(
-    '{"__proto__":{"polluted":true},"constructor":{"polluted":true},"safe":true}',
-  );
+  globalThis.isDomainAllowlisted = () => false;
+  expect(resolveContentVpnLocation(config, "site.test")).toMatchObject({
+    city: "Paris",
+  });
+  delete globalThis.isDomainAllowlisted;
 
-  // Act
-  const merged = deepMerge({}, source);
-
-  // Assert
-  expect(merged).toEqual({ safe: true });
-  expect({}.polluted).toBeUndefined();
+  const selected = structuredClone(config);
+  selected.proxy.routingMode = "protect-selected";
+  expect(resolveContentVpnLocation(selected, "unmatched.test")).toBeNull();
+  expect(resolveContentVpnLocation(selected, "cdn.video.test")).toMatchObject({
+    city: "Tokyo",
+  });
 });
 
 test("normalizeConfig restores safe values for malformed configuration", () => {
-  // Arrange
   const { DEFAULT_CONFIG, normalizeConfig } = loadConfigModule();
   const malformed = {
     enabled: "yes",
@@ -148,6 +205,9 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
     notifications: "broken",
     proxy: {
       enabled: "yes",
+      routingMode: "invalid",
+      syncTimezone: "yes",
+      syncGeolocation: null,
       activeProfile: "  Main  ",
       profiles: {},
       domainRoutes: null,
@@ -164,10 +224,10 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
     webgpu: 5,
   };
 
-  // Act
   const normalized = normalizeConfig(malformed);
   const empty = normalizeConfig(null);
   const unknownFields = normalizeConfig({
+    globalWhitelist: "trusted.test",
     notifications: { showFingerprints: true },
     proxy: {
       profiles: [
@@ -186,19 +246,27 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
           scheme: "http",
           location: [],
         },
+        { name: null, host: null, port: 1, scheme: null },
       ],
-      domainRoutes: [null, { pattern: " *.route.test ", profile: " Main " }],
+      domainRoutes: [
+        null,
+        { pattern: " *.route.test ", profile: " Main " },
+        { pattern: null, profile: null },
+      ],
       bypassList: [" localhost ", null],
     },
     unknown: true,
+    __proto__: { polluted: true },
   });
 
-  // Assert
   expect(normalized.enabled).toBe(true);
   expect(normalized.globalWhitelist).toBe("");
   expect(normalized.notifications).toEqual(DEFAULT_CONFIG.notifications);
   expect(normalized.proxy).toMatchObject({
     enabled: false,
+    routingMode: "bypass-selected",
+    syncTimezone: true,
+    syncGeolocation: true,
     activeProfile: "Main",
     profiles: [],
     domainRoutes: [],
@@ -224,6 +292,9 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
   expect(normalized.webgpu).toEqual(DEFAULT_CONFIG.webgpu);
   expect(empty).toEqual(DEFAULT_CONFIG);
   expect(unknownFields.unknown).toBeUndefined();
+  expect(unknownFields.polluted).toBeUndefined();
+  expect({}.polluted).toBeUndefined();
+  expect(unknownFields.globalWhitelist).toBe("trusted.test");
   expect(unknownFields.notifications.showFingerprints).toBeUndefined();
   expect(unknownFields.proxy.profiles).toEqual([
     {
@@ -231,7 +302,16 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
       host: "proxy.test",
       port: 1080,
       scheme: "socks5",
-      location: { city: "Paris" },
+      location: {
+        city: "Paris",
+        region: "",
+        country: "",
+        countryCode: "",
+        loc: "",
+        org: "",
+        timezone: "",
+        source: "",
+      },
     },
     {
       name: "Backup",
@@ -239,18 +319,19 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
       port: 8080,
       scheme: "http",
     },
+    { name: "", host: "", port: 1, scheme: "" },
   ]);
   expect(unknownFields.proxy.domainRoutes).toEqual([
     {
       pattern: "*.route.test",
       profile: "Main",
     },
+    { pattern: "", profile: "" },
   ]);
   expect(unknownFields.proxy.bypassList).toEqual(["localhost"]);
 });
 
 test("normalizeConfig preserves supported values and bounds user-controlled strings", () => {
-  // Arrange
   const { normalizeConfig } = loadConfigModule();
   const longValue = "x".repeat(200);
   const config = {
@@ -260,17 +341,19 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
     webrtc: { policy: "default_public_interface_only" },
     timezone: { offset: "-840", name: `  ${longValue}  ` },
     proxy: {
+      routingMode: "protect-all",
+      syncTimezone: false,
+      syncGeolocation: false,
       activeProfile: `  ${longValue}  `,
+      fallbackProfiles: [" Backup ", "", 7, ...Array(12).fill("Extra")],
       profiles: [],
       domainRoutes: [],
       bypassList: [],
     },
   };
 
-  // Act
   const normalized = normalizeConfig(config);
 
-  // Assert
   expect(normalized.useragent.preset).toBe("iphone");
   expect(normalized.webgl.preset).toBe("apple");
   expect(normalized.canvas.noiseLevel).toBe("high");
@@ -278,10 +361,32 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
   expect(normalized.timezone.offset).toBe(-840);
   expect(normalized.timezone.name).toBe(longValue.slice(0, 128));
   expect(normalized.proxy.activeProfile).toBe(longValue.slice(0, 128));
+  expect(normalized.proxy.routingMode).toBe("protect-all");
+  expect(normalized.proxy.syncTimezone).toBe(false);
+  expect(normalized.proxy.syncGeolocation).toBe(false);
+  expect(normalized.proxy.fallbackProfiles).toEqual([
+    "Backup",
+    ...Array(9).fill("Extra"),
+  ]);
 });
 
-test("loadConfig deep merges stored config without re-adding removed allowlist defaults", async () => {
-  // Arrange
+test("legacy route-only proxy settings migrate to protect-selected mode", () => {
+  const { normalizeConfig } = loadConfigModule();
+  const migrated = normalizeConfig({
+    proxy: {
+      enabled: true,
+      activeProfile: null,
+      profiles: [
+        { name: "Route", host: "proxy.test", port: 443, scheme: "https" },
+      ],
+      domainRoutes: [{ pattern: "*.selected.test", profile: "Route" }],
+      bypassList: [],
+    },
+  });
+  expect(migrated.proxy.routingMode).toBe("protect-selected");
+});
+
+test("loadConfig fills missing fields without re-adding explicit allowlist values", async () => {
   const { DEFAULT_CONFIG, STORAGE_KEY, loadConfig } = loadConfigModule();
   globalThis.storage = {
     read: vi.fn().mockResolvedValue({
@@ -293,10 +398,8 @@ test("loadConfig deep merges stored config without re-adding removed allowlist d
     }),
   };
 
-  // Act
   const config = await loadConfig();
 
-  // Assert
   expect(config.enabled).toBe(false);
   expect(config.canvas.whitelist).toBe("custom.canvas");
   expect(config.webgpu.whitelist).toBe(DEFAULT_CONFIG.webgpu.whitelist);
@@ -306,53 +409,36 @@ test("loadConfig deep merges stored config without re-adding removed allowlist d
 });
 
 test("loadConfig uses defaults when storage has no saved config", async () => {
-  // Arrange
   const { DEFAULT_CONFIG, STORAGE_KEY, loadConfig } = loadConfigModule();
   globalThis.storage = {
     read: vi.fn().mockResolvedValue({}),
   };
 
-  // Act
   const config = await loadConfig();
 
-  // Assert
   expect(config.enabled).toBe(DEFAULT_CONFIG.enabled);
   expect(config.canvas.whitelist).toBe(DEFAULT_CONFIG.canvas.whitelist);
   expect(globalThis.storage.read).toHaveBeenCalledWith(STORAGE_KEY);
 });
 
-test("saveConfig and resetConfig write through the configured storage API", async () => {
-  // Arrange
-  const { DEFAULT_CONFIG, STORAGE_KEY, resetConfig, saveConfig } =
-    loadConfigModule();
+test("saveConfig normalizes data through the configured storage API", async () => {
+  const { STORAGE_KEY, saveConfig } = loadConfigModule();
   globalThis.storage = {
     write: vi.fn().mockResolvedValue(undefined),
   };
-  const nextConfig = { enabled: false };
 
-  // Act
-  await saveConfig(nextConfig);
-  await resetConfig();
+  await saveConfig({ enabled: false, unknown: true });
 
-  // Assert
   expect(globalThis.storage.write.mock.calls[0][0][STORAGE_KEY]).toMatchObject(
-    nextConfig,
+    { enabled: false },
   );
-  expect(globalThis.storage.write).toHaveBeenNthCalledWith(2, {
-    [STORAGE_KEY]: DEFAULT_CONFIG,
-  });
-  expect(globalThis.storage.write.mock.calls[1][0][STORAGE_KEY]).not.toBe(
-    DEFAULT_CONFIG,
-  );
+  expect(globalThis.storage.write.mock.calls[0][0][STORAGE_KEY].unknown).toBeUndefined();
 });
 
 test("loadConfig reports a clear error when no storage API is available", async () => {
-  // Arrange
   const { loadConfig } = loadConfigModule();
 
-  // Act
   const result = loadConfig();
 
-  // Assert
   await expect(result).rejects.toThrow("storage API is unavailable");
 });

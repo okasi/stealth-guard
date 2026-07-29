@@ -9,6 +9,7 @@ export default defineConfig({
         "lib/config.js",
         "lib/domainFilter.js",
         "lib/proxy.js",
+        "lib/proxyCredentials.js",
         "lib/runtime.js",
         "lib/session.js",
         "lib/storage.js",

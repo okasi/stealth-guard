@@ -33,6 +33,17 @@ function readSource(path) {
   return readFileSync(join(root, path), "utf8");
 }
 
+function setChecked(page, selector, checked) {
+  return page.$eval(
+    selector,
+    (input, nextValue) => {
+      input.checked = nextValue;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    },
+    checked,
+  );
+}
+
 const protectionSources = [
   "lib/domainFilter.js",
   "lib/config.js",
@@ -46,8 +57,63 @@ function protectionInitScript(config) {
   return `
     (() => {
       const storedConfig = ${JSON.stringify(config)};
-      const nativeUserAgentGetter = Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent").get;
+      const nativeUserAgentGetter = Object.getOwnPropertyDescriptor(
+        Navigator.prototype,
+        "userAgent",
+      ).get;
       window.__sgNativeUserAgent = nativeUserAgentGetter.call(navigator);
+      window.__sgNativeCanvasToBlob = HTMLCanvasElement.prototype.toBlob;
+      window.__sgNativeCanvasToDataURL = HTMLCanvasElement.prototype.toDataURL;
+      window.__sgNativeGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+      window.__sgNativeMeasureText = CanvasRenderingContext2D.prototype.measureText;
+      window.__sgNativeWebGL = {
+        getParameter: WebGLRenderingContext.prototype.getParameter,
+        getSupportedExtensions:
+          WebGLRenderingContext.prototype.getSupportedExtensions,
+        readPixels: WebGLRenderingContext.prototype.readPixels,
+      };
+      window.__sgNativeWebGL2 = {
+        readPixels: WebGL2RenderingContext.prototype.readPixels,
+      };
+      window.__sgNativeOffsetWidth = Object.getOwnPropertyDescriptor(
+        HTMLElement.prototype,
+        "offsetWidth",
+      ).get;
+      window.__sgNativeDescriptors = {
+        userAgent: Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent"),
+        offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth"),
+        webglGetParameter: Object.getOwnPropertyDescriptor(
+          WebGLRenderingContext.prototype,
+          "getParameter",
+        ),
+        webglReadPixels: Object.getOwnPropertyDescriptor(
+          WebGLRenderingContext.prototype,
+          "readPixels",
+        ),
+      };
+      const geolocationPrototype = Object.getPrototypeOf(navigator.geolocation);
+      window.__sgNativeGeolocation = {
+        getCurrentPosition: geolocationPrototype.getCurrentPosition,
+        watchPosition: geolocationPrototype.watchPosition,
+      };
+      geolocationPrototype.getCurrentPosition = function (success) {
+        success({
+          coords: {
+            latitude: 59.33,
+            longitude: 18.07,
+            accuracy: 25,
+            altitude: null,
+            altitudeAccuracy: null,
+            heading: null,
+            speed: null,
+          },
+          timestamp: Date.now(),
+        });
+      };
+      geolocationPrototype.watchPosition = function (success) {
+        this.getCurrentPosition(success);
+        return 1;
+      };
       window.__sgReports = [];
       window.__sgRuntimeListeners = [];
 
@@ -70,10 +136,16 @@ function protectionInitScript(config) {
         get limits() { return new FakeGPULimits(); }
       }
       class FakeGPUCommandEncoder {
-        beginRenderPass(descriptor) { return descriptor; }
+        beginRenderPass(descriptor) {
+          window.__sgRenderPassDescriptor = descriptor;
+          return descriptor;
+        }
       }
       class FakeGPUQueue {
-        writeBuffer() { return true; }
+        writeBuffer(...args) {
+          window.__sgWriteBufferArgs = args;
+          return true;
+        }
       }
       Object.assign(window, {
         GPUAdapter: window.GPUAdapter || FakeGPUAdapter,
@@ -113,9 +185,9 @@ function protectionInitScript(config) {
   `;
 }
 
-function uiMockInitScript(config) {
+function uiMockInitScript(config, options = {}) {
   return `
-    (${function installUiMock(initialConfig) {
+    (${function installUiMock(initialConfig, mockOptions) {
       const state = (window.__chromeState = {
         config: structuredClone(initialConfig),
         sessions: [],
@@ -123,18 +195,133 @@ function uiMockInitScript(config) {
         reloads: 0,
         createdTabs: [],
         openedOptions: 0,
+        failMessages: { ...(mockOptions.failMessages || {}) },
+        failReload: false,
+        failTabQuery: false,
+        proxyCredentials: {},
+        proxyHistory: [],
+        proxyStatus: {
+          state: "idle",
+          profile: null,
+          verifiedAt: null,
+          exitIp: null,
+          error: null,
+          controlLevel: "controlled_by_this_extension",
+        },
       });
 
+      function proxyEndpoint(profile) {
+        return profile
+          ? String(profile.host).toLowerCase() + ":" + Number(profile.port)
+          : null;
+      }
+
       function responseFor(message) {
+        if (state.failMessages[message.type]) {
+          return { success: false, error: state.failMessages[message.type] };
+        }
         if (message.type === "get-config") {
           return { config: structuredClone(state.config) };
         }
         if (message.type === "update-config") {
           state.config = structuredClone(message.config);
+          state.proxyStatus = state.config.proxy.enabled
+            ? {
+                state: "connected",
+                profile: state.config.proxy.activeProfile,
+                verifiedAt: Date.now(),
+                exitIp: "203.0.113.7",
+                error: null,
+                controlLevel: "controlled_by_this_extension",
+              }
+            : {
+                state: "idle",
+                profile: null,
+                verifiedAt: null,
+                exitIp: null,
+                error: null,
+                controlLevel: "controlled_by_this_extension",
+              };
+          state.proxyHistory.unshift({
+            timestamp: Date.now(),
+            state: state.proxyStatus.state,
+            profile: state.proxyStatus.profile,
+            exitIp: state.proxyStatus.exitIp,
+            error: null,
+            controlLevel: state.proxyStatus.controlLevel,
+          });
           return { success: true };
         }
         if (message.type === "reset-config") {
           state.config = structuredClone(initialConfig);
+          state.proxyCredentials = {};
+          state.proxyStatus.state = "idle";
+          return { success: true };
+        }
+        if (message.type === "get-proxy-runtime-status") {
+          return { success: true, status: structuredClone(state.proxyStatus) };
+        }
+        if (message.type === "verify-proxy-connection") {
+          return { success: true, status: structuredClone(state.proxyStatus) };
+        }
+        if (message.type === "get-proxy-diagnostics") {
+          return {
+            success: true,
+            diagnostics: {
+              generatedAt: Date.now(),
+              status: structuredClone(state.proxyStatus),
+              effectiveSettings: {
+                mode: state.config.proxy.enabled ? "pac_script" : "system",
+                controlLevel: "controlled_by_this_extension",
+              },
+              configuration: {
+                enabled: state.config.proxy.enabled,
+                routingMode: state.config.proxy.routingMode,
+                activeProfile: state.config.proxy.activeProfile,
+                profileCount: state.config.proxy.profiles.length,
+                fallbackCount: state.config.proxy.fallbackProfiles.length,
+                routeCount: state.config.proxy.domainRoutes.length,
+                bypassCount: state.config.proxy.bypassList.length,
+                syncTimezone: state.config.proxy.syncTimezone,
+                syncGeolocation: state.config.proxy.syncGeolocation,
+                credentialProfileCount: Object.keys(state.proxyCredentials).length,
+                location: null,
+              },
+              history: structuredClone(state.proxyHistory),
+            },
+          };
+        }
+        if (message.type === "clear-proxy-history") {
+          state.proxyHistory = [];
+          return { success: true };
+        }
+        if (message.type === "get-proxy-credential-status") {
+          return {
+            success: true,
+            credentials: (message.profiles || [message.profile])
+              .filter(Boolean)
+              .map((profile) => {
+                const endpoint = proxyEndpoint(profile);
+                const credential = state.proxyCredentials[endpoint];
+                return {
+                  endpoint,
+                  configured: Boolean(credential),
+                  username: credential ? credential.username : "",
+                  persisted: credential ? credential.persisted : false,
+                };
+              }),
+          };
+        }
+        if (message.type === "set-proxy-credentials") {
+          const endpoint = proxyEndpoint(message.profile);
+          state.proxyCredentials[endpoint] = {
+            username: message.credentials.username,
+            persisted: message.credentials.persist !== false,
+          };
+          return { success: true };
+        }
+        if (message.type === "clear-proxy-credentials") {
+          delete state.proxyCredentials[proxyEndpoint(message.profile)];
           return { success: true };
         }
         if (message.type === "get-triggered-features") {
@@ -239,14 +426,26 @@ function uiMockInitScript(config) {
         },
         tabs: {
           query(details, callback) {
-            callback([
-              { id: 1, url: "https://www.example.com/account", active: true },
-            ]);
+            if (state.failTabQuery) {
+              fakeChrome.runtime.lastError = { message: "Tab query failed" };
+              callback([]);
+              fakeChrome.runtime.lastError = null;
+              return;
+            }
+            callback(
+              mockOptions.tabUrl
+                ? [{ id: 1, url: mockOptions.tabUrl, active: true }]
+                : [],
+            );
           },
           reload(tabId, options, callback) {
             if (typeof options === "function") callback = options;
             state.reloads++;
+            if (state.failReload) {
+              fakeChrome.runtime.lastError = { message: "Tab reload failed" };
+            }
             if (callback) callback();
+            fakeChrome.runtime.lastError = null;
           },
           create(details) {
             state.createdTabs.push(details);
@@ -256,7 +455,10 @@ function uiMockInitScript(config) {
       Object.assign(window.chrome, fakeChrome);
       window.confirm = () => true;
       window.prompt = (message, value) => value || "Renamed Session";
-    }.toString()})(${JSON.stringify(config)});
+    }.toString()})(${JSON.stringify(config)}, ${JSON.stringify({
+      tabUrl: "https://www.example.com/account",
+      ...options,
+    })});
   `;
 }
 
@@ -300,23 +502,149 @@ async function exerciseProtections(page) {
       const context = canvas.getContext("2d");
       context.fillStyle = "rgb(10, 20, 30)";
       context.fillRect(0, 0, 2, 2);
+      const nativeCanvasData = Array.from(
+        window.__sgNativeGetImageData.call(
+          context,
+          0,
+          0,
+          1,
+          1,
+        ).data,
+      );
       const canvasData = Array.from(context.getImageData(0, 0, 1, 1).data);
+      const nativeDataUrl = window.__sgNativeCanvasToDataURL.call(canvas);
+      const protectedDataUrl = canvas.toDataURL();
+      const readBlob = (method) =>
+        new Promise((resolvePromise) =>
+          method.call(canvas, async (blob) =>
+            resolvePromise(Array.from(new Uint8Array(await blob.arrayBuffer()))),
+          ),
+        );
+      const nativeBlob = await readBlob(window.__sgNativeCanvasToBlob);
+      const protectedBlob = await readBlob(canvas.toBlob);
 
       const webglCanvas = document.createElement("canvas");
+      webglCanvas.width = 16;
+      webglCanvas.height = 16;
       const gl = webglCanvas.getContext("webgl");
       if (!gl) throw new Error("WebGL context unavailable");
       const webglVendor = gl.getParameter(7936);
+      const repeatedWebglVendor = gl.getParameter(7936);
+      const webglRenderer = gl.getParameter(7937);
+      const webglVersion = gl.getParameter(7938);
+      const webglShadingLanguage = gl.getParameter(35724);
+      const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+      const nativeWebglExtensions =
+        window.__sgNativeWebGL.getSupportedExtensions.call(gl);
+      const webglExtensions = gl.getSupportedExtensions();
+      const repeatedWebglExtensions = gl.getSupportedExtensions();
+      const unmaskedVendor = gl.getParameter(
+        debugInfo ? debugInfo.UNMASKED_VENDOR_WEBGL : 37445,
+      );
+      const unmaskedRenderer = gl.getParameter(
+        debugInfo ? debugInfo.UNMASKED_RENDERER_WEBGL : 37446,
+      );
+      const maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+      const repeatedMaxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+      const precision = gl.getShaderPrecisionFormat(
+        gl.FRAGMENT_SHADER,
+        gl.HIGH_FLOAT,
+      );
+      const precisionValues = [
+        precision.rangeMin,
+        precision.rangeMax,
+        precision.precision,
+      ];
+      gl.clearColor(0.2, 0.4, 0.6, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      const nativeWebglDataUrl = window.__sgNativeCanvasToDataURL.call(webglCanvas);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      const protectedWebglDataUrl = webglCanvas.toDataURL();
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      const repeatedWebglDataUrl = webglCanvas.toDataURL();
+      const nativeWebglPixels = new Uint8Array(4);
+      window.__sgNativeWebGL.readPixels.call(
+        gl,
+        0,
+        0,
+        1,
+        1,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        nativeWebglPixels,
+      );
+      const webglPixels = new Uint8Array(4);
+      const repeatedWebglPixels = new Uint8Array(4);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, webglPixels);
+      gl.readPixels(
+        0,
+        0,
+        1,
+        1,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        repeatedWebglPixels,
+      );
+      const webglError = gl.getError();
+
+      const webgl2Canvas = document.createElement("canvas");
+      webgl2Canvas.width = 1;
+      webgl2Canvas.height = 1;
+      const gl2 = webgl2Canvas.getContext("webgl2");
+      if (!gl2) throw new Error("WebGL 2 context unavailable");
+      const webgl2Vendor = gl2.getParameter(7936);
+      const webgl2Version = gl2.getParameter(7938);
+      const webgl2ShadingLanguage = gl2.getParameter(35724);
+      gl2.clearColor(0.2, 0.4, 0.6, 1);
+      gl2.clear(gl2.COLOR_BUFFER_BIT);
+      const nativeWebgl2Pixels = new Uint8Array(4);
+      window.__sgNativeWebGL2.readPixels.call(
+        gl2,
+        0,
+        0,
+        1,
+        1,
+        gl2.RGBA,
+        gl2.UNSIGNED_BYTE,
+        nativeWebgl2Pixels,
+      );
+      const webgl2Pixels = new Uint8Array(4);
+      const repeatedWebgl2Pixels = new Uint8Array(4);
+      gl2.readPixels(0, 0, 1, 1, gl2.RGBA, gl2.UNSIGNED_BYTE, webgl2Pixels);
+      gl2.readPixels(
+        0,
+        0,
+        1,
+        1,
+        gl2.RGBA,
+        gl2.UNSIGNED_BYTE,
+        repeatedWebgl2Pixels,
+      );
 
       const span = document.createElement("span");
       span.style.cssText = "display:inline-block;width:123px;font:16px Arial";
       span.textContent = "fingerprint";
       document.body.appendChild(span);
+      const nativeFontWidth = window.__sgNativeOffsetWidth.call(span);
       const fontWidth = span.offsetWidth;
-      const measuredWidth = context.measureText("fingerprint").width;
+      const nativeMeasuredWidth = window.__sgNativeMeasureText.call(
+        context,
+        "fingerprint",
+      ).width;
+      const metrics = context.measureText("fingerprint");
+      const measuredWidth = metrics.width;
 
-      const timezoneOffset = new Date(
-        "2026-01-15T12:00:00Z",
-      ).getTimezoneOffset();
+      const winterDate = new Date("2026-01-15T12:00:00Z");
+      const summerDate = new Date("2026-07-15T12:00:00Z");
+      const winterTimezoneOffset = winterDate.getTimezoneOffset();
+      const summerTimezoneOffset = summerDate.getTimezoneOffset();
+      const winterHour = winterDate.getHours();
+      const summerHour = summerDate.getHours();
+      const setterDate = new Date("2026-01-15T12:00:00Z");
+      setterDate.setHours(15);
+      setterDate.setSeconds(30);
+      setterDate.setMilliseconds(250);
+      const resolvedTimezone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
       const rect = new DOMRect(1, 2, 3, 4);
       const rectValues = [
         rect.x,
@@ -331,33 +659,115 @@ async function exerciseProtections(page) {
 
       const gpuLimit = new GPUAdapter().limits.maxBufferSize;
       const encoder = new GPUCommandEncoder();
-      encoder.beginRenderPass({
+      const renderPassDescriptor = {
         colorAttachments: [{ clearValue: { r: 1, g: 1, b: 1, a: 1 } }],
-      });
+      };
+      encoder.beginRenderPass(renderPassDescriptor);
       const queue = new GPUQueue();
-      queue.writeBuffer({}, 0, new Uint8Array([10, 20, 30, 40]));
+      const gpuInput = new Uint8Array([10, 20, 30, 40]);
+      queue.writeBuffer({}, 0, gpuInput);
 
       const offline = new OfflineAudioContext(1, 128, 44100);
       const audioBuffer = offline.createBuffer(1, 128, 44100);
       const audioData = audioBuffer.getChannelData(0);
       const audioSample = audioData[0];
+      const repeatedAudioSample = audioBuffer.getChannelData(0)[0];
 
       const userAgent = navigator.userAgent;
+      const navigatorValues = {
+        platform: navigator.platform,
+        appVersion: navigator.appVersion,
+        vendor: navigator.vendor,
+      };
       const peer = new RTCPeerConnection();
       peer.close();
+      class DerivedPeerConnection extends RTCPeerConnection {}
+      const derivedPeer = new DerivedPeerConnection();
+      const derivedPeerWorks =
+        derivedPeer instanceof DerivedPeerConnection &&
+        derivedPeer instanceof RTCPeerConnection;
+      derivedPeer.close();
+
+      window.postMessage(
+        { channel: "guessed", token: "guessed", feature: "forged" },
+        "*",
+      );
 
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
       return {
+        nativeCanvasData,
         canvasData,
+        nativeDataUrl,
+        protectedDataUrl,
+        nativeBlob,
+        protectedBlob,
         webglVendor,
+        repeatedWebglVendor,
+        webglRenderer,
+        webglVersion,
+        webglShadingLanguage,
+        unmaskedVendor,
+        unmaskedRenderer,
+        nativeWebglExtensions,
+        webglExtensions,
+        repeatedWebglExtensions,
+        maxTextureSize,
+        repeatedMaxTextureSize,
+        precisionValues,
+        precisionIsNative: precision instanceof WebGLShaderPrecisionFormat,
+        nativeWebglDataUrl,
+        protectedWebglDataUrl,
+        repeatedWebglDataUrl,
+        nativeWebglPixels: Array.from(nativeWebglPixels),
+        webglPixels: Array.from(webglPixels),
+        repeatedWebglPixels: Array.from(repeatedWebglPixels),
+        webglError,
+        webgl2Vendor,
+        webgl2Version,
+        webgl2ShadingLanguage,
+        nativeWebgl2Pixels: Array.from(nativeWebgl2Pixels),
+        webgl2Pixels: Array.from(webgl2Pixels),
+        repeatedWebgl2Pixels: Array.from(repeatedWebgl2Pixels),
+        nativeFontWidth,
         fontWidth,
+        nativeMeasuredWidth,
         measuredWidth,
-        timezoneOffset,
+        metricsAreNative: metrics instanceof TextMetrics,
+        winterTimezoneOffset,
+        summerTimezoneOffset,
+        winterHour,
+        summerHour,
+        setterIso: setterDate.toISOString(),
+        resolvedTimezone,
+        datePrototypeClean:
+          !("_date" in Date.prototype) && !("_offset" in Date.prototype),
         rectValues,
         gpuLimit,
+        originalClearValue: renderPassDescriptor.colorAttachments[0].clearValue.r,
+        receivedClearValue:
+          window.__sgRenderPassDescriptor.colorAttachments[0].clearValue.r,
+        gpuInput: Array.from(gpuInput),
+        receivedGpuInput: Array.from(window.__sgWriteBufferArgs[2]),
         audioSample,
+        repeatedAudioSample,
         userAgent,
+        navigatorValues,
         nativeUserAgent: window.__sgNativeUserAgent,
+        derivedPeerWorks,
+        descriptorsPreserved: [
+          ["userAgent", Navigator.prototype, "userAgent"],
+          ["offsetWidth", HTMLElement.prototype, "offsetWidth"],
+          ["webglGetParameter", WebGLRenderingContext.prototype, "getParameter"],
+          ["webglReadPixels", WebGLRenderingContext.prototype, "readPixels"],
+        ].every(([name, owner, property]) => {
+          const before = window.__sgNativeDescriptors[name];
+          const after = Object.getOwnPropertyDescriptor(owner, property);
+          return (
+            before.configurable === after.configurable &&
+            before.writable === after.writable &&
+            before.enumerable === after.enumerable
+          );
+        }),
         reports: window.__sgReports
           .filter((message) => message.type === "fingerprint-detected")
           .map((message) => message.feature),
@@ -397,9 +807,118 @@ async function testProtectionRuntime(browser, port) {
     assert(features.has(feature), `Missing browser-level ${feature} alert`);
   }
   assert.notEqual(result.userAgent, result.nativeUserAgent);
-  assert.equal(result.timezoneOffset, -60);
-  assert.equal(typeof result.webglVendor, "string");
-  assert.equal(typeof result.gpuLimit, "number");
+  assert.deepEqual(result.nativeCanvasData, [10, 20, 30, 255]);
+  assert.deepEqual(result.canvasData, [11, 21, 31, 255]);
+  assert.notEqual(result.protectedDataUrl, result.nativeDataUrl);
+  assert.notDeepEqual(result.protectedBlob, result.nativeBlob);
+  assert.equal(result.webglVendor, "WebKit");
+  assert.equal(result.webglVendor, result.repeatedWebglVendor);
+  assert.equal(result.webglRenderer, "WebKit WebGL");
+  assert.match(result.webglVersion, /^WebGL 1\.0(?: |$)/);
+  assert.match(result.webglShadingLanguage, /^WebGL GLSL ES 1\.0(?: |$)/);
+  assert.equal(typeof result.unmaskedVendor, "string");
+  assert.equal(typeof result.unmaskedRenderer, "string");
+  assert(result.unmaskedVendor.length > 0);
+  assert(result.unmaskedRenderer.length > 0);
+  assert(!result.unmaskedRenderer.includes("Apple M2"));
+  assert.deepEqual(result.webglExtensions, result.repeatedWebglExtensions);
+  assert.deepEqual(
+    result.webglExtensions.slice().sort(),
+    result.nativeWebglExtensions.slice().sort(),
+  );
+  assert.equal(result.maxTextureSize, result.repeatedMaxTextureSize);
+  assert(result.maxTextureSize <= 16384);
+  assert.deepEqual(result.precisionValues, [127, 127, 23]);
+  assert(result.precisionIsNative);
+  assert.notEqual(result.protectedWebglDataUrl, result.nativeWebglDataUrl);
+  assert.equal(result.protectedWebglDataUrl, result.repeatedWebglDataUrl);
+  assert.notDeepEqual(result.webglPixels, result.nativeWebglPixels);
+  assert.deepEqual(result.webglPixels, result.repeatedWebglPixels);
+  assert.equal(result.webglError, 0);
+  assert.equal(result.webgl2Vendor, result.webglVendor);
+  assert.match(result.webgl2Version, /^WebGL 2\.0(?: |$)/);
+  assert.match(result.webgl2ShadingLanguage, /^WebGL GLSL ES 3\.00(?: |$)/);
+  assert.notDeepEqual(result.webgl2Pixels, result.nativeWebgl2Pixels);
+  assert.deepEqual(result.webgl2Pixels, result.repeatedWebgl2Pixels);
+  assert.equal(result.fontWidth, result.nativeFontWidth + 1);
+  assert.equal(result.measuredWidth, result.nativeMeasuredWidth + 1);
+  assert(result.metricsAreNative);
+  assert.equal(result.winterTimezoneOffset, -60);
+  assert.equal(result.summerTimezoneOffset, -120);
+  assert.equal(result.winterHour, 13);
+  assert.equal(result.summerHour, 14);
+  assert.equal(result.setterIso, "2026-01-15T14:00:30.250Z");
+  assert.equal(result.resolvedTimezone, "Europe/Paris");
+  assert(result.datePrototypeClean);
+  assert.notDeepEqual(result.rectValues, [1, 2, 3, 4, 2, 4, 6, 1]);
+  assert.equal(result.gpuLimit, 1022);
+  assert.equal(result.originalClearValue, 1);
+  assert.equal(result.receivedClearValue, 1.01);
+  assert.deepEqual(result.gpuInput, [10, 20, 30, 40]);
+  assert.deepEqual(result.receivedGpuInput, [11, 20, 30, 40]);
+  assert(result.audioSample > 0);
+  assert.equal(result.repeatedAudioSample, result.audioSample);
+  const expectedNavigator = {
+    macos: ["MacIntel", "Apple Computer, Inc."],
+    macos_chrome: ["MacIntel", "Google Inc."],
+    windows: ["Win32", "Google Inc."],
+    iphone: ["iPhone", "Apple Computer, Inc."],
+    android: ["Linux armv8l", "Google Inc."],
+  }[DEFAULT_CONFIG.useragent.preset];
+  assert.deepEqual(
+    [result.navigatorValues.platform, result.navigatorValues.vendor],
+    expectedNavigator,
+  );
+  assert(result.navigatorValues.appVersion.length > 10);
+  assert(result.derivedPeerWorks);
+  assert(result.descriptorsPreserved);
+  assert(!features.has("forged"));
+
+  const secondPage = await context.newPage();
+  await secondPage.goto(`http://site.test:${port}/`);
+  await secondPage.waitForFunction(() => window.__sgHarnessReady === true);
+  const rotatedWebgl = await secondPage.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 16;
+    canvas.height = 16;
+    const gl = canvas.getContext("webgl");
+    gl.clearColor(0.2, 0.4, 0.6, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    return {
+      dataUrl: canvas.toDataURL(),
+      extensions: gl.getSupportedExtensions(),
+    };
+  });
+  assert.notEqual(rotatedWebgl.dataUrl, result.protectedWebglDataUrl);
+  assert.notDeepEqual(rotatedWebgl.extensions, result.webglExtensions);
+  await secondPage.close();
+
+  const updatedRuntime = await page.evaluate(async (nextConfig) => {
+    window.__sgUpdateConfig(nextConfig);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    const gl = document.createElement("canvas").getContext("webgl");
+    const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+    return {
+      userAgent: navigator.userAgent,
+      offset: new Date("2026-01-15T12:00:00Z").getTimezoneOffset(),
+      timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
+      webglRenderer: gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL),
+      webglVersion: gl.getParameter(gl.VERSION),
+    };
+  }, {
+    ...DEFAULT_CONFIG,
+    useragent: { ...DEFAULT_CONFIG.useragent, preset: "android" },
+    timezone: {
+      ...DEFAULT_CONFIG.timezone,
+      name: "Asia/Tokyo",
+      offset: 540,
+    },
+  });
+  assert(updatedRuntime.userAgent.includes("Android 13; Pixel 4"));
+  assert.equal(updatedRuntime.offset, -540);
+  assert.equal(updatedRuntime.timezone, "Asia/Tokyo");
+  assert(updatedRuntime.webglRenderer.includes("Adreno (TM) 640"));
+  assert(updatedRuntime.webglVersion.includes("Chromium"));
 
   const beforeDisable = result.reports.length;
   const disabledState = await page.evaluate(
@@ -410,16 +929,23 @@ async function testProtectionRuntime(browser, port) {
       canvas.width = 1;
       canvas.height = 1;
       canvas.getContext("2d").getImageData(0, 0, 1, 1);
+      const gl = document.createElement("canvas").getContext("webgl");
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
       return {
         userAgent: navigator.userAgent,
         nativeUserAgent: window.__sgNativeUserAgent,
+        webglVendor: gl.getParameter(gl.VENDOR),
+        nativeWebglVendor: window.__sgNativeWebGL.getParameter.call(
+          gl,
+          gl.VENDOR,
+        ),
         reportCount: window.__sgReports.length,
       };
     },
     { ...DEFAULT_CONFIG, enabled: false },
   );
   assert.equal(disabledState.userAgent, disabledState.nativeUserAgent);
+  assert.equal(disabledState.webglVendor, disabledState.nativeWebglVendor);
   assert.equal(disabledState.reportCount, beforeDisable);
 
   const child = page.frames().find((frame) => frame !== page.mainFrame());
@@ -435,6 +961,66 @@ async function testProtectionRuntime(browser, port) {
     "all_frames injection did not protect the child frame",
   );
   await context.close();
+
+  const synchronizedConfig = structuredClone(DEFAULT_CONFIG);
+  synchronizedConfig.proxy = {
+    ...synchronizedConfig.proxy,
+    enabled: true,
+    routingMode: "protect-all",
+    activeProfile: "Tokyo",
+    bypassList: [],
+    profiles: [
+      {
+        name: "Tokyo",
+        host: "proxy.test",
+        port: 443,
+        scheme: "https",
+        location: {
+          city: "Tokyo",
+          region: "Tokyo",
+          country: "Japan",
+          countryCode: "JP",
+          loc: "35.6762,139.6503",
+          org: "",
+          timezone: "Asia/Tokyo",
+          source: "test",
+        },
+      },
+    ],
+  };
+  const locationContext = await browser.newContext();
+  await locationContext.addInitScript({
+    content: protectionInitScript(synchronizedConfig),
+  });
+  const locationPage = await locationContext.newPage();
+  await locationPage.goto(`http://site.test:${port}/`);
+  await locationPage.waitForFunction(() => window.__sgHarnessReady === true);
+  await locationPage.waitForTimeout(40);
+  const synchronizedLocation = await locationPage.evaluate(async (nextConfig) => {
+    window.__sgUpdateConfig(nextConfig);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
+    const position = await new Promise((resolvePromise, rejectPromise) =>
+      navigator.geolocation.getCurrentPosition(resolvePromise, rejectPromise),
+    );
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    return {
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      accuracy: position.coords.accuracy,
+      timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
+      reports: window.__sgReports
+        .filter((message) => message.type === "fingerprint-detected")
+        .map((message) => message.feature),
+    };
+  }, synchronizedConfig);
+  assert.deepEqual(
+    [synchronizedLocation.latitude, synchronizedLocation.longitude],
+    [35.68, 139.65],
+  );
+  assert(synchronizedLocation.accuracy >= 2500);
+  assert.equal(synchronizedLocation.timezone, "Asia/Tokyo");
+  assert(synchronizedLocation.reports.includes("geolocation"));
+  await locationContext.close();
 }
 
 async function testAllowlistAndChallengeFrames(browser, port) {
@@ -456,16 +1042,59 @@ async function testAllowlistAndChallengeFrames(browser, port) {
     canvas.height = 1;
     canvas.getContext("2d").getImageData(0, 0, 1, 1);
     const userAgent = navigator.userAgent;
+    const gl = document.createElement("canvas").getContext("webgl");
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
     return {
       userAgent,
       nativeUserAgent: window.__sgNativeUserAgent,
+      webglVendor: gl.getParameter(gl.VENDOR),
+      nativeWebglVendor: window.__sgNativeWebGL.getParameter.call(
+        gl,
+        gl.VENDOR,
+      ),
       reports: window.__sgReports.length,
     };
   });
   assert.equal(allowlisted.userAgent, allowlisted.nativeUserAgent);
+  assert.equal(allowlisted.webglVendor, allowlisted.nativeWebglVendor);
   assert.equal(allowlisted.reports, 0);
   await allowlistedContext.close();
+
+  const featureAllowlistedConfig = structuredClone(DEFAULT_CONFIG);
+  featureAllowlistedConfig.canvas.whitelist = "site.test";
+  featureAllowlistedConfig.webgl.whitelist = "site.test";
+  featureAllowlistedConfig.useragent.whitelist = "";
+  const featureContext = await browser.newContext();
+  await featureContext.addInitScript({
+    content: protectionInitScript(featureAllowlistedConfig),
+  });
+  const featurePage = await featureContext.newPage();
+  await featurePage.goto(`http://site.test:${port}/`);
+  const featureResult = await featurePage.evaluate(async () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    canvas.getContext("2d").getImageData(0, 0, 1, 1);
+    const userAgent = navigator.userAgent;
+    const gl = document.createElement("canvas").getContext("webgl");
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    return {
+      userAgent,
+      nativeUserAgent: window.__sgNativeUserAgent,
+      webglVendor: gl.getParameter(gl.VENDOR),
+      nativeWebglVendor: window.__sgNativeWebGL.getParameter.call(
+        gl,
+        gl.VENDOR,
+      ),
+      reports: window.__sgReports.map((message) => message.feature),
+    };
+  });
+  assert.equal(featureResult.userAgent === featureResult.nativeUserAgent, false);
+  assert.equal(featureResult.webglVendor, featureResult.nativeWebglVendor);
+  assert(!featureResult.reports.includes("canvas"));
+  assert(!featureResult.reports.includes("webgl"));
+  assert(featureResult.reports.includes("user-agent"));
+  await featureContext.close();
 
   const challengeContext = await browser.newContext();
   await challengeContext.addInitScript({
@@ -495,34 +1124,111 @@ async function testPopup(browser) {
   await page.waitForSelector("#current-url:text-is('example.com')");
   await page.screenshot({ path: join(tmpdir(), "stealth-guard-popup.png") });
 
-  await page.$eval("#canvas-enabled", (input) => {
-    input.checked = false;
-    input.dispatchEvent(new Event("change", { bubbles: true }));
+  await page.evaluate(() => {
+    window.__chromeState.failMessages["update-config"] = "Save denied";
+  });
+  await setChecked(page, "#canvas-enabled", false);
+  await page.waitForFunction(
+    () => document.getElementById("canvas-enabled").checked,
+  );
+  await page.evaluate(() => {
+    delete window.__chromeState.failMessages["update-config"];
+  });
+
+  await setChecked(page, "#global-enabled", false);
+  await page.waitForFunction(() => !window.__chromeState.config.enabled);
+  await setChecked(page, "#global-enabled", true);
+  await setChecked(page, "#notifications-enabled", true);
+  await page.evaluate(() => {
+    for (const input of document.querySelectorAll("[data-feature-toggle]")) {
+      input.checked = false;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
   });
   await page.waitForTimeout(300);
-  assert.equal(
-    await page.evaluate(() => window.__chromeState.config.canvas.enabled),
-    false,
+  assert(
+    await page.evaluate(() =>
+      [
+        "proxy",
+        "useragent",
+        "timezone",
+        "geolocation",
+        "webrtc",
+        "canvas",
+        "clientrects",
+        "font",
+        "audiocontext",
+        "webgl",
+        "webgpu",
+      ].every((feature) => !window.__chromeState.config[feature].enabled),
+    ),
   );
   assert(await page.evaluate(() => window.__chromeState.reloads > 0));
+
+  await page.selectOption("#webgl-quick-select", "apple");
+  await page.selectOption("#useragent-quick-select", "android");
+  await page.selectOption("#timezone-quick-select", "Asia/Tokyo|540");
+  await page.waitForFunction(
+    () =>
+      window.__chromeState.config.webgl.preset === "apple" &&
+      window.__chromeState.config.useragent.preset === "android" &&
+      window.__chromeState.config.timezone.name === "Asia/Tokyo",
+  );
 
   await page.click("#toggle-current-site");
   assert.equal(
     await page.evaluate(() => window.__chromeState.config.globalWhitelist),
     "*.example.com",
   );
+  await page.click("#toggle-current-site");
+  assert.equal(
+    await page.evaluate(() => window.__chromeState.config.globalWhitelist),
+    "",
+  );
+
+  await page.click('[data-feature="canvas"] .feature-name');
+  await page.click("#open-options");
+  await page.click("#test-webrtc");
+  assert.equal(
+    await page.evaluate(() => window.__chromeState.openedOptions),
+    1,
+  );
+  assert.equal(
+    await page.evaluate(() => window.__chromeState.createdTabs.length),
+    2,
+  );
 
   await page.fill("#session-name-input", "Work");
   await page.click("#save-session");
   await page.waitForSelector(".session-entry-name:text-is('Work')");
+  await page.click('button[data-action="switch"]');
+  await page.waitForFunction(
+    () => window.__chromeState.activeSessionId === "session-1",
+  );
   await page.evaluate(() => {
     window.prompt = () => "Personal";
   });
   await page.click('button[data-action="rename"]');
   await page.waitForSelector(".session-entry-name:text-is('Personal')");
+  await page.click("#clear-current-session");
+  await page.waitForFunction(
+    () => window.__chromeState.activeSessionId === null,
+  );
   await page.click('button[data-action="delete"]');
   await page.waitForSelector(".session-list-empty");
   await context.close();
+
+  const noSiteContext = await browser.newContext();
+  await noSiteContext.addInitScript({
+    content: uiMockInitScript(DEFAULT_CONFIG, { tabUrl: null }),
+  });
+  const noSitePage = await noSiteContext.newPage();
+  await noSitePage.goto(pathToFileURL(join(root, "popup/popup.html")).href);
+  await noSitePage.waitForSelector("#current-url:text-is('No HTTP(S) site')");
+  assert(await noSitePage.isDisabled("#toggle-current-site"));
+  await noSitePage.click("#save-session");
+  await noSitePage.waitForSelector("#session-status.error");
+  await noSiteContext.close();
 }
 
 async function testOptions(browser) {
@@ -536,14 +1242,30 @@ async function testOptions(browser) {
     fullPage: true,
   });
 
+  await page.uncheck("#global-enabled");
   await page.fill("#canvas-whitelist", "*.custom.test");
+  await page.selectOption("#canvas-noise-level", "high");
   await page.waitForTimeout(1100);
-  assert.equal(
-    await page.evaluate(() => window.__chromeState.config.canvas.whitelist),
-    "*.custom.test",
+  assert.deepEqual(
+    await page.evaluate(() => [
+      window.__chromeState.config.enabled,
+      window.__chromeState.config.canvas.whitelist,
+      window.__chromeState.config.canvas.noiseLevel,
+    ]),
+    [false, "*.custom.test", "high"],
   );
+  await page.check("#global-enabled");
 
   await page.click("#proxy-section details summary");
+  await page.fill("#new-proxy-host", "bad host");
+  await page.fill("#new-proxy-port", "0");
+  await page.click("#add-proxy-profile");
+  await page.waitForSelector(".toast.error.show");
+  assert.equal(
+    await page.evaluate(() => window.__chromeState.config.proxy.profiles.length),
+    0,
+  );
+
   await page.fill("#new-proxy-host", "proxy.test");
   await page.fill("#new-proxy-port", "1080");
   await page.fill("#new-proxy-name", "Main");
@@ -557,12 +1279,118 @@ async function testOptions(browser) {
     { name: "Main", host: "proxy.test", port: 1080, scheme: "socks5" },
   );
 
-  await page.selectOption("#proxy-active-profile", "Main");
+  await page.getByRole("button", { name: "Edit" }).click();
+  await page.fill("#new-proxy-username", "proxy-user");
+  await page.fill("#new-proxy-password", "proxy-secret");
+  await page.click("#add-proxy-profile");
+  await page.waitForSelector(".proxy-credential-badge:text-is('Credentials saved')");
+  assert.deepEqual(
+    await page.evaluate(() => window.__chromeState.proxyCredentials),
+    {
+      "proxy.test:1080": {
+        username: "proxy-user",
+        persisted: true,
+      },
+    },
+  );
+
+  await page.getByRole("button", { name: "Edit" }).click();
+  await page.fill("#new-proxy-host", "renamed.proxy.test");
+  await page.fill("#new-proxy-name", "Renamed");
+  await page.click("#add-proxy-profile");
+  await page.waitForSelector(".proxy-profile-card strong:text-is('Renamed')");
+  await page.waitForFunction(
+    () =>
+      window.__chromeState.config.proxy.profiles[0]?.host ===
+      "renamed.proxy.test",
+  );
+  assert.deepEqual(
+    await page.evaluate(() => window.__chromeState.config.proxy.profiles[0]),
+    {
+      name: "Renamed",
+      host: "renamed.proxy.test",
+      port: 1080,
+      scheme: "socks5",
+    },
+  );
+
+  await page.click("#proxy-section details summary");
+  await page.fill("#new-proxy-host", "backup.proxy.test");
+  await page.fill("#new-proxy-port", "8080");
+  await page.fill("#new-proxy-name", "Backup");
+  await page.selectOption("#new-proxy-scheme", "http");
+  await page.click("#add-proxy-profile");
+  const backupCard = page.locator(".proxy-profile-card", { hasText: "Backup" });
+  await page.selectOption("#proxy-active-profile", "Renamed");
+  await page.selectOption("#proxy-fallback-profiles", ["Backup"]);
+  await page.fill("#new-proxy-route-pattern", "bad host");
+  await page.click("#add-proxy-route");
+  await page.waitForSelector(".toast.error.show");
+  await page.fill("#new-proxy-route-pattern", "*.video.example");
+  await page.selectOption("#new-proxy-route-profile", "Backup");
+  await page.click("#add-proxy-route");
+  await page.waitForSelector(".proxy-route-card", {
+    hasText: "*.video.example",
+  });
+  await page.selectOption("#proxy-routing-mode", "protect-selected");
+  assert(await page.isDisabled("#proxy-bypass-list"));
+  await page.uncheck("#proxy-sync-timezone");
+  await page.uncheck("#proxy-sync-geolocation");
+  await page.click("#save-settings");
+  assert.deepEqual(
+    await page.evaluate(() => window.__chromeState.config.proxy.fallbackProfiles),
+    ["Backup"],
+  );
+  assert.deepEqual(
+    await page.evaluate(() => window.__chromeState.config.proxy.domainRoutes),
+    [{ pattern: "*.video.example", profile: "Backup" }],
+  );
+  assert.deepEqual(
+    await page.evaluate(() => [
+      window.__chromeState.config.proxy.routingMode,
+      window.__chromeState.config.proxy.syncTimezone,
+      window.__chromeState.config.proxy.syncGeolocation,
+    ]),
+    ["protect-selected", false, false],
+  );
+  await backupCard.getByRole("button", { name: "Remove" }).click();
+  await page.waitForFunction(
+    () => window.__chromeState.config.proxy.profiles.length === 1,
+  );
+  assert.deepEqual(
+    await page.evaluate(() => window.__chromeState.config.proxy.fallbackProfiles),
+    [],
+  );
+  assert.deepEqual(
+    await page.evaluate(() => window.__chromeState.config.proxy.domainRoutes),
+    [],
+  );
+
+  await page.selectOption("#proxy-active-profile", "Renamed");
+  await page.selectOption("#proxy-routing-mode", "bypass-selected");
+  await page.check("#proxy-sync-timezone");
+  await page.check("#proxy-sync-geolocation");
   await page.check("#proxy-enabled");
   await page.click("#save-settings");
   assert(await page.evaluate(() => window.__chromeState.reloads > 0));
+  await page.click("#refresh-proxy-diagnostics");
+  await page.waitForSelector("#proxy-connection-history li:not(.empty-state)");
+  const diagnosticsDownloadPromise = page.waitForEvent("download");
+  await page.click("#export-proxy-diagnostics");
+  const diagnosticsDownload = await diagnosticsDownloadPromise;
+  const diagnosticsExport = JSON.parse(
+    readFileSync(await diagnosticsDownload.path(), "utf8"),
+  );
+  assert.equal(
+    diagnosticsExport.diagnostics.configuration.routingMode,
+    "bypass-selected",
+  );
+  assert(!JSON.stringify(diagnosticsExport).includes("proxy-secret"));
+  await page.click("#clear-proxy-history");
+  await page.waitForSelector("#proxy-connection-history .empty-state");
 
   const importedConfig = structuredClone(DEFAULT_CONFIG);
+  importedConfig.globalWhitelist = "*localhost*, *kameleoon*";
   importedConfig.canvas.whitelist = "*.imported.test";
   await page.setInputFiles("#import-file", {
     name: "settings.json",
@@ -570,13 +1398,53 @@ async function testOptions(browser) {
     buffer: Buffer.from(JSON.stringify({ config: importedConfig })),
   });
   await page.waitForFunction(
-    () => window.__chromeState.config.canvas.whitelist === "*.imported.test",
+    () =>
+      window.__chromeState.config.globalWhitelist ===
+        "*localhost*, *kameleoon*" &&
+      window.__chromeState.config.canvas.whitelist === "*.imported.test",
+  );
+  assert.equal(
+    await page.inputValue("#global-whitelist"),
+    "*localhost*, *kameleoon*",
   );
 
   const downloadPromise = page.waitForEvent("download");
   await page.click("#export-config");
   const download = await downloadPromise;
   assert(download.suggestedFilename().startsWith("stealth-guard-config-"));
+  const exported = JSON.parse(readFileSync(await download.path(), "utf8"));
+  assert.equal(exported.version, "1.0");
+  assert.equal(exported.config.globalWhitelist, "*localhost*, *kameleoon*");
+  assert.equal(exported.config.canvas.whitelist, "*.imported.test");
+  assert(!JSON.stringify(exported).includes("proxy-secret"));
+
+  await page.setInputFiles("#import-file", {
+    name: "provider.ovpn",
+    mimeType: "text/plain",
+    buffer: Buffer.from("client\nremote vpn.example 1194"),
+  });
+  await page.waitForSelector(".toast.error.show");
+  assert(
+    (await page.textContent("#toast")).includes("Tunnel configs are unsupported"),
+  );
+  await page.setInputFiles("#import-file", {
+    name: "invalid.json",
+    mimeType: "application/json",
+    buffer: Buffer.from("not json"),
+  });
+  await page.waitForSelector(".toast.error.show");
+  await page.setInputFiles("#import-file", {
+    name: "wrong-shape.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({ config: [] })),
+  });
+  await page.waitForSelector(".toast.error.show");
+  await page.setInputFiles("#import-file", {
+    name: "oversized.json",
+    mimeType: "application/json",
+    buffer: Buffer.alloc(1024 * 1024 + 1, 32),
+  });
+  await page.waitForSelector(".toast.error.show");
 
   await page.click("#reset-settings");
   await page.waitForFunction(
@@ -585,7 +1453,83 @@ async function testOptions(browser) {
   await page.check("#proxy-enabled");
   await page.click("#save-settings");
   await page.waitForSelector(".toast.error.show");
+
+  await page.uncheck("#proxy-enabled");
+  await page.evaluate(() => {
+    window.__chromeState.failMessages["update-config"] = "Save denied";
+  });
+  await page.fill("#global-whitelist", "failed.test");
+  await page.waitForTimeout(1100);
+  assert.equal(
+    await page.evaluate(() => window.__chromeState.config.globalWhitelist),
+    DEFAULT_CONFIG.globalWhitelist,
+  );
+  await page.evaluate(() => {
+    delete window.__chromeState.failMessages["update-config"];
+    window.__chromeState.failReload = true;
+  });
+  await page.click("#save-settings");
+  await page.waitForSelector(".toast.success.show");
   await context.close();
+}
+
+async function testUiInitializationFailures(browser) {
+  const initScript = uiMockInitScript(DEFAULT_CONFIG, {
+    failMessages: { "get-config": "Background unavailable" },
+  });
+
+  const popupContext = await browser.newContext();
+  await popupContext.addInitScript({ content: initScript });
+  const popup = await popupContext.newPage();
+  await popup.goto(pathToFileURL(join(root, "popup/popup.html")).href);
+  await popup.waitForFunction(() =>
+    document.body.textContent.includes("Failed to load settings"),
+  );
+  await popupContext.close();
+
+  const optionsContext = await browser.newContext();
+  await optionsContext.addInitScript({ content: initScript });
+  const optionsPage = await optionsContext.newPage();
+  await optionsPage.goto(pathToFileURL(join(root, "options/options.html")).href);
+  await optionsPage.waitForSelector(".toast.error.show");
+  assert(
+    (await optionsPage.textContent("#toast")).includes("Failed to load settings"),
+  );
+  await optionsContext.close();
+}
+
+async function testAuxiliaryVpnApiFailures(browser) {
+  const initScript = uiMockInitScript(DEFAULT_CONFIG, {
+    failMessages: {
+      "get-proxy-runtime-status": "Handler unavailable",
+      "get-proxy-credential-status": "Handler unavailable",
+      "get-proxy-diagnostics": "Handler unavailable",
+    },
+  });
+
+  const popupContext = await browser.newContext();
+  await popupContext.addInitScript({ content: initScript });
+  const popup = await popupContext.newPage();
+  await popup.goto(pathToFileURL(join(root, "popup/popup.html")).href);
+  await popup.waitForSelector("#current-url:text-is('example.com')");
+  assert(
+    !(await popup.textContent("body")).includes("Failed to load settings"),
+  );
+  await popupContext.close();
+
+  const optionsContext = await browser.newContext();
+  await optionsContext.addInitScript({ content: initScript });
+  const optionsPage = await optionsContext.newPage();
+  await optionsPage.goto(pathToFileURL(join(root, "options/options.html")).href);
+  await optionsPage.waitForSelector("#canvas-whitelist");
+  assert.equal(
+    await optionsPage.inputValue("#global-whitelist"),
+    DEFAULT_CONFIG.globalWhitelist,
+  );
+  assert(
+    !(await optionsPage.textContent("body")).includes("Failed to load settings"),
+  );
+  await optionsContext.close();
 }
 
 async function main() {
@@ -605,6 +1549,8 @@ async function main() {
     await testAllowlistAndChallengeFrames(browser, server.port);
     await testPopup(browser);
     await testOptions(browser);
+    await testUiInitializationFailures(browser);
+    await testAuxiliaryVpnApiFailures(browser);
     console.log("End-to-end browser checks passed");
   } finally {
     await browser.close();

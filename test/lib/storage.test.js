@@ -1,5 +1,8 @@
 import { afterEach, expect, test } from "vitest";
-import { storage } from "../../lib/storage.js";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { storage } = require("../../lib/storage.js");
 
 function installChromeStorageMock(result = { ok: true }) {
   const calls = [];
@@ -8,65 +11,58 @@ function installChromeStorageMock(result = { ok: true }) {
     storage: {
       local: {
         get(keys, callback) {
+          if (this !== chrome.storage.local) {
+            throw new TypeError("Illegal invocation");
+          }
           calls.push(["get", keys]);
           callback(result);
         },
         set(items, callback) {
+          if (this !== chrome.storage.local) {
+            throw new TypeError("Illegal invocation");
+          }
           calls.push(["set", items]);
           callback();
         },
-        remove(keys, callback) {
-          calls.push(["remove", keys]);
-          callback();
-        },
-        clear(callback) {
-          calls.push(["clear"]);
-          callback();
-        }
-      }
-    }
+      },
+    },
   };
   return calls;
 }
 
 afterEach(() => {
   delete globalThis.chrome;
+  delete globalThis.callChromeApi;
 });
 
-test("read write remove and clear resolve through chrome.storage.local", async () => {
-  // Arrange
+test("storage uses the shared browser API caller when scripts are bundled", async () => {
+  installChromeStorageMock();
+  globalThis.callChromeApi = (api, methodName, ...args) =>
+    new Promise((resolve) => api[methodName](...args, resolve));
+
+  await expect(storage.read("key")).resolves.toEqual({ ok: true });
+});
+
+test("read and write resolve through chrome.storage.local", async () => {
   const calls = installChromeStorageMock({ key: "value" });
 
-  // Act
   const readResult = await storage.read("key");
   await storage.write({ key: "value" });
-  await storage.remove("key");
-  await storage.clear();
 
-  // Assert
   expect(readResult).toEqual({ key: "value" });
   expect(calls).toEqual([
     ["get", "key"],
     ["set", { key: "value" }],
-    ["remove", "key"],
-    ["clear"]
   ]);
 });
 
 test("storage methods reject when chrome reports lastError", async () => {
-  // Arrange
   installChromeStorageMock();
   chrome.runtime.lastError = new Error("storage failed");
 
-  // Act
   const read = storage.read("key");
   const write = storage.write({ key: "value" });
-  const remove = storage.remove("key");
-  const clear = storage.clear();
 
-  // Assert
   await expect(read).rejects.toThrow("storage failed");
   await expect(write).rejects.toThrow("storage failed");
-  await expect(remove).rejects.toThrow("storage failed");
-  await expect(clear).rejects.toThrow("storage failed");
 });

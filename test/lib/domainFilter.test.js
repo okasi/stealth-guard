@@ -4,12 +4,16 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const {
   createDomainPatternTools,
-  DomainFilter,
+  addDomainToAllowlist,
   getDomainPatternParts,
+  isCloudflareChallengeHostname,
+  isDomainAllowlisted,
+  isFeatureActiveForHostname,
   matchesDomainPattern,
   normalizeDomainPattern,
   normalizeHostname,
   parseDomainPatterns,
+  removeDomainFromAllowlist,
 } = require("../../lib/domainFilter.js");
 
 test("normalizes hostnames and accepts only supported domain pattern shapes", () => {
@@ -96,65 +100,55 @@ test("isolated pattern tool instances maintain their own caches", () => {
   expect(firstTools.matches("www.example.com", "example.com")).toBe(true);
 });
 
-test("DomainFilter applies global and per-feature allowlists", () => {
+test("feature activation applies global and per-feature allowlists", () => {
   const config = {
     enabled: true,
     globalWhitelist: "*.trusted.test",
     canvas: { enabled: true, whitelist: "*.canvas.test" },
     webgl: { enabled: false, whitelist: "" },
   };
-  const filter = new DomainFilter(config);
 
-  expect(filter.shouldActivateFeature("https://site.test", "canvas")).toBe(
-    true,
-  );
+  expect(isFeatureActiveForHostname(config, "canvas", "site.test")).toBe(true);
   expect(
-    filter.shouldActivateFeature("https://app.trusted.test", "canvas"),
+    isFeatureActiveForHostname(config, "canvas", "app.trusted.test"),
   ).toBe(false);
   expect(
-    filter.shouldActivateFeature("https://app.canvas.test", "canvas"),
+    isFeatureActiveForHostname(config, "canvas", "app.canvas.test"),
   ).toBe(false);
-  expect(filter.shouldActivateFeature("not a url", "canvas")).toBe(false);
-  expect(filter.shouldActivateFeature("https://site.test", "webgl")).toBe(
-    false,
-  );
-  expect(filter.shouldActivateFeature("https://site.test", "missing")).toBe(
-    false,
-  );
+  expect(isFeatureActiveForHostname(config, "webgl", "site.test")).toBe(false);
+  expect(isFeatureActiveForHostname(config, "missing", "site.test")).toBe(false);
+  expect(isFeatureActiveForHostname(config, "canvas", "")).toBe(false);
+  expect(isFeatureActiveForHostname(null, "canvas", "site.test")).toBe(false);
   expect(
-    new DomainFilter({ ...config, enabled: false }).shouldActivateFeature(
-      "https://site.test",
-      "canvas",
-    ),
+    isFeatureActiveForHostname({ ...config, enabled: false }, "canvas", "site.test"),
   ).toBe(false);
 
-  expect(filter.isAllowlisted(" WWW.TRUSTED.TEST ", "*.trusted.test")).toBe(
-    true,
-  );
-  expect(filter.isAllowlisted("", "*.trusted.test")).toBe(false);
-  expect(filter.isAllowlisted("site.test", null)).toBe(false);
-  expect(filter.matchesPattern("webmail.site.test", "webmail.*")).toBe(true);
-  expect(filter.extractHostname("https://Example.com/path")).toBe(
-    "example.com",
-  );
-  expect(filter.extractHostname("bad url")).toBeNull();
+  expect(isDomainAllowlisted(" WWW.TRUSTED.TEST ", "*.trusted.test")).toBe(true);
+  expect(isDomainAllowlisted("", "*.trusted.test")).toBe(false);
+  expect(isDomainAllowlisted("site.test", null)).toBe(false);
 });
 
 test("allowlist helpers add covered domains once and remove every covering rule", () => {
-  const filter = new DomainFilter();
-  const added = filter.addDomainToAllowlist("Example.com", "test.com");
+  const added = addDomainToAllowlist("Example.com", "test.com");
 
   expect(added).toBe("test.com, *.example.com");
-  expect(filter.addDomainToAllowlist("www.example.com", added)).toBe(added);
-  expect(filter.addDomainToAllowlist("*bad*", added)).toBe(added);
-  expect(filter.addDomainToAllowlist("", added)).toBe(added);
-  expect(filter.addDomainToAllowlist("solo.test", "")).toBe("*.solo.test");
+  expect(addDomainToAllowlist("www.example.com", added)).toBe(added);
+  expect(addDomainToAllowlist("*bad*", added)).toBe(added);
+  expect(addDomainToAllowlist("", added)).toBe(added);
+  expect(addDomainToAllowlist("solo.test", "")).toBe("*.solo.test");
   expect(
-    filter.removeDomainFromAllowlist(
+    removeDomainFromAllowlist(
       "app.example.com",
       "*.example.com, other.test",
     ),
   ).toBe("other.test");
-  expect(filter.removeDomainFromAllowlist("", added)).toBe(added);
-  expect(filter.removeDomainFromAllowlist("example.com", null)).toBeNull();
+  expect(removeDomainFromAllowlist("", added)).toBe(added);
+  expect(removeDomainFromAllowlist("example.com", null)).toBeNull();
+});
+
+test("Cloudflare challenge detection accepts only the owned challenge domain", () => {
+  expect(isCloudflareChallengeHostname("challenges.cloudflare.com")).toBe(true);
+  expect(isCloudflareChallengeHostname("nested.challenges.cloudflare.com.")).toBe(true);
+  expect(isCloudflareChallengeHostname("cloudflare.com")).toBe(false);
+  expect(isCloudflareChallengeHostname(null)).toBe(false);
 });

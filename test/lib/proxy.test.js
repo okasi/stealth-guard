@@ -2,6 +2,9 @@ import { afterEach, expect, test, vi } from "vitest";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
+const domainPatterns = require("../../lib/domainFilter.js");
+globalThis.normalizeDomainPattern = domainPatterns.normalizeDomainPattern;
+globalThis.getDomainPatternParts = domainPatterns.getDomainPatternParts;
 const {
   applyProxySettings,
   buildPacCondition,
@@ -22,7 +25,8 @@ const {
   normalizeProxyProfile,
   normalizeProxyScheme,
   prepareProxyProfile,
-  sanitizePacComment,
+  PROXY_VERIFICATION_HOST,
+  PROXY_VERIFICATION_URL,
   setProxySettingsValue,
   setSystemProxySettings,
 } = require("../../lib/proxy.js");
@@ -43,12 +47,27 @@ function installChromeMock() {
   return setCalls;
 }
 
+function runPacScript(script, hostname) {
+  const shExpMatch = (value, pattern) => {
+    const expression = pattern
+      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, ".*");
+    return new RegExp(`^${expression}$`).test(value);
+  };
+  const findProxy = new Function(
+    "shExpMatch",
+    `${script}; return FindProxyForURL;`,
+  )(shExpMatch);
+  return findProxy(`https://${hostname}/`, hostname);
+}
+
 afterEach(() => {
   delete globalThis.chrome;
   delete globalThis.fetch;
   delete globalThis.loadConfig;
   delete globalThis.normalizeDomainPattern;
   delete globalThis.getDomainPatternParts;
+  delete globalThis.callChromeApi;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -66,7 +85,9 @@ test("normalizes proxy values and strips unsupported profile fields", () => {
   expect(normalizeProxyScheme(" HTTPS ")).toBe("https");
   expect(normalizeProxyScheme("ftp")).toBeNull();
   expect(normalizeProxyPort("65535")).toBe(65535);
+  expect(normalizeProxyPort(null)).toBeNull();
   expect(normalizeProxyPort(0)).toBeNull();
+  expect(normalizeProxyPort("1080junk")).toBeNull();
   expect(normalizeProxyHost("proxy.test")).toBe("proxy.test");
   expect(normalizeProxyHost("bad host")).toBeNull();
   expect(normalizeProxyName("  Main  ")).toBe("Main");
@@ -190,7 +211,7 @@ test("fetchProxyLocation tries providers in order and tolerates failures", async
     .mockRejectedValueOnce(new Error("ipapi down"));
 
   expect(
-    await fetchProxyLocation("proxy example", "token value"),
+    await fetchProxyLocation("proxy example"),
   ).toMatchObject({
     city: "Paris",
     source: "ipinfo.io",
@@ -205,7 +226,7 @@ test("fetchProxyLocation tries providers in order and tolerates failures", async
   expect(await fetchProxyLocation("")).toEqual(createUnknownProxyLocation());
   expect(fetch).toHaveBeenNthCalledWith(
     1,
-    "https://ipinfo.io/proxy%20example?token=token%20value",
+    "https://ipinfo.io/proxy%20example/json",
     expect.objectContaining({ signal: expect.any(AbortSignal) }),
   );
 });
@@ -232,7 +253,16 @@ test("prepareProxyProfile validates and auto-names unnamed profiles", async () =
     host: "proxy.test",
     port: 8080,
     scheme: "http",
-    location: { city: "Saved" },
+    location: {
+      city: "Saved",
+      region: "",
+      country: "FR",
+      countryCode: "FR",
+      loc: "",
+      org: "",
+      timezone: "",
+      source: "ipinfo.io",
+    },
   });
   expect(
     await prepareProxyProfile({
@@ -244,6 +274,21 @@ test("prepareProxyProfile validates and auto-names unnamed profiles", async () =
     name: "Paris, FR",
     location: { city: "Paris" },
   });
+  globalThis.fetch.mockClear();
+  expect(
+    await prepareProxyProfile({
+      name: "Complete",
+      host: "complete.proxy.test",
+      port: 443,
+      scheme: "https",
+      location: {
+        city: "Tokyo",
+        timezone: "Asia/Tokyo",
+        loc: "35.68,139.65",
+      },
+    }),
+  ).toMatchObject({ name: "Complete", location: { city: "Tokyo" } });
+  expect(globalThis.fetch).not.toHaveBeenCalled();
 });
 
 test("normalizes domain patterns and bypass lists", () => {
@@ -284,18 +329,6 @@ test("normalizes domain patterns and bypass lists", () => {
   expect(normalizeBypassList(null)).toEqual([]);
 });
 
-test("uses globally supplied domain helpers in browser-style bundles", () => {
-  globalThis.normalizeDomainPattern = vi.fn(() => "browser.test");
-  globalThis.getDomainPatternParts = vi.fn(() => ({
-    pattern: "browser.test",
-    type: "plain",
-    value: "browser.test",
-  }));
-
-  expect(normalizeProxyPattern("anything")).toBe("browser.test");
-  expect(buildPacCondition("anything")).toContain("browser.test");
-});
-
 test("builds PAC conditions and scripts for every pattern type", () => {
   expect(buildPacCondition("webmail.*")).toBe('shExpMatch(host, "webmail.*")');
   expect(buildPacCondition("*.example.com")).toContain(
@@ -312,6 +345,8 @@ test("builds PAC conditions and scripts for every pattern type", () => {
 
   const profiles = [
     { name: "Main", scheme: "socks5", host: "proxy.test", port: 1080 },
+    { name: "Backup", scheme: "https", host: "backup.test", port: 443 },
+    { name: "Duplicate", scheme: "socks5", host: "proxy.test", port: 1080 },
     { name: "Invalid", scheme: "ftp", host: "bad host", port: 0 },
   ];
   const pac = generatePACScript(
@@ -324,6 +359,7 @@ test("builds PAC conditions and scripts for every pattern type", () => {
     "Main",
     "trusted.test",
     ["localhost", "trusted.test"],
+    ["Backup", "Duplicate", "Invalid", "Missing"],
   );
   const directPac = generatePACScript([], [], null, "", []);
   const emptyPac = generatePACScript(undefined, undefined, null, null, null);
@@ -334,23 +370,76 @@ test("builds PAC conditions and scripts for every pattern type", () => {
     "",
     [],
   );
+  const forcedVerificationPac = generatePACScript(
+    profiles,
+    [],
+    "Main",
+    "*.org",
+    [],
+    ["Backup"],
+  );
+  const protectSelectedPac = generatePACScript(
+    profiles,
+    [{ pattern: "*.route.test", profile: "Backup" }],
+    "Main",
+    "",
+    ["ignored-bypass.test"],
+    [],
+    "protect-selected",
+  );
+  const protectAllPac = generatePACScript(
+    profiles,
+    [],
+    "Main",
+    "",
+    ["ignored-bypass.test"],
+    [],
+    "protect-all",
+  );
 
   expect(pac).toContain('return "DIRECT"');
   expect(pac).toContain('return "SOCKS5 proxy.test:1080"');
+  expect(pac).toContain(
+    'return "SOCKS5 proxy.test:1080; HTTPS backup.test:443"',
+  );
   expect(pac.match(/trusted\.test/g)).toHaveLength(2);
-  expect(pac).toContain("Route *.route.test -> Main");
   expect(pac).not.toContain("missing.test");
+  expect(runPacScript(pac, "trusted.test")).toBe("DIRECT");
+  expect(runPacScript(pac, "api.route.test")).toBe(
+    "SOCKS5 proxy.test:1080",
+  );
+  expect(runPacScript(pac, "unrelated.test")).toBe(
+    "SOCKS5 proxy.test:1080; HTTPS backup.test:443",
+  );
+  expect(runPacScript(directPac, "unrelated.test")).toBe("DIRECT");
   expect(directPac).toContain('return "DIRECT"');
   expect(emptyPac).toContain('return "DIRECT"');
   expect(skippedPac).toContain('return "DIRECT"');
-  expect(sanitizePacComment("Line 1\nLine 2\t☃")).toBe("Line 1 Line 2??");
+  expect(PROXY_VERIFICATION_URL).toContain(PROXY_VERIFICATION_HOST);
+  expect(runPacScript(forcedVerificationPac, "example.org")).toBe("DIRECT");
+  expect(runPacScript(forcedVerificationPac, PROXY_VERIFICATION_HOST)).toBe(
+    "SOCKS5 proxy.test:1080; HTTPS backup.test:443",
+  );
+  expect(runPacScript(protectSelectedPac, "cdn.route.test")).toBe(
+    "HTTPS backup.test:443",
+  );
+  expect(runPacScript(protectSelectedPac, "unmatched.test")).toBe("DIRECT");
+  expect(runPacScript(protectAllPac, "ignored-bypass.test")).toBe(
+    "SOCKS5 proxy.test:1080",
+  );
 });
 
 test("proxy settings helpers resolve and reject browser errors", async () => {
   const calls = installChromeMock();
   await setProxySettingsValue({ mode: "system" });
   await setSystemProxySettings();
-  expect(calls.map((call) => call.value.mode)).toEqual(["system", "system"]);
+  globalThis.callChromeApi = require("../../lib/runtime.js").callChromeApi;
+  await setSystemProxySettings();
+  expect(calls.map((call) => call.value.mode)).toEqual([
+    "system",
+    "system",
+    "system",
+  ]);
 
   chrome.runtime.lastError = { message: "denied" };
   await expect(setSystemProxySettings()).rejects.toThrow("denied");
@@ -380,6 +469,20 @@ test("applyProxySettings selects system fixed and PAC modes", async () => {
     globalWhitelist: "",
     proxy: {
       enabled: true,
+      routingMode: "protect-all",
+      activeProfile: "Main",
+      profiles: [
+        { name: "Main", host: "proxy.test", port: 443, scheme: "https" },
+      ],
+      domainRoutes: [{ pattern: "*.secure.test", profile: "Main" }],
+      bypassList: ["ignored.test"],
+    },
+  });
+  await applyProxySettings({
+    enabled: true,
+    globalWhitelist: "",
+    proxy: {
+      enabled: true,
       activeProfile: "Main",
       profiles: [
         { name: "Main", host: "proxy.test", port: 1080, scheme: "socks5" },
@@ -399,7 +502,26 @@ test("applyProxySettings selects system fixed and PAC modes", async () => {
       profiles: [
         { name: "Main", host: "proxy.test", port: 8080, scheme: "http" },
       ],
-      domainRoutes: [{ pattern: "*.route.test", profile: "Main" }],
+      domainRoutes: [
+        null,
+        { pattern: null, profile: "Main" },
+        { pattern: "*.route.test", profile: "Main" },
+      ],
+      bypassList: [],
+    },
+  });
+  await applyProxySettings({
+    enabled: true,
+    globalWhitelist: "",
+    proxy: {
+      enabled: true,
+      activeProfile: "Main",
+      fallbackProfiles: ["Backup", "Main", "Backup"],
+      profiles: [
+        { name: "Main", host: "proxy.test", port: 443, scheme: "https" },
+        { name: "Backup", host: "backup.test", port: 443, scheme: "https" },
+      ],
+      domainRoutes: [],
       bypassList: [],
     },
   });
@@ -408,11 +530,17 @@ test("applyProxySettings selects system fixed and PAC modes", async () => {
     "system",
     "system",
     "fixed_servers",
+    "pac_script",
     "fixed_servers",
+    "pac_script",
     "pac_script",
   ]);
   expect(calls[2].value.rules.bypassList).toContain("*.example.com");
-  expect(calls[4].value.pacScript.data).toContain("*.trusted.test");
+  expect(calls[5].value.pacScript.data).toContain("*.trusted.test");
+  expect(calls[6].value.pacScript.data).toContain(
+    "HTTPS proxy.test:443; HTTPS backup.test:443",
+  );
+  expect(calls[3].value.pacScript.data).not.toContain("ignored.test");
 });
 
 test("applyProxySettings loads config and rejects every invalid enabled state", async () => {
@@ -470,7 +598,24 @@ test("applyProxySettings loads config and rejects every invalid enabled state", 
       ...base,
       proxy: { ...base.proxy, activeProfile: null },
     }),
-  ).rejects.toThrow("no valid active profile or domain route");
+  ).rejects.toThrow("no valid active profile");
+  await expect(
+    applyProxySettings({
+      ...base,
+      proxy: {
+        ...base.proxy,
+        routingMode: "protect-selected",
+        activeProfile: null,
+        domainRoutes: [],
+      },
+    }),
+  ).rejects.toThrow("requires at least one domain route");
+  await expect(
+    applyProxySettings({
+      ...base,
+      proxy: { ...base.proxy, fallbackProfiles: ["Missing"] },
+    }),
+  ).rejects.toThrow("Fallback profile not found");
   await expect(
     applyProxySettings({
       ...base,
@@ -482,5 +627,5 @@ test("applyProxySettings loads config and rejects every invalid enabled state", 
         bypassList: [],
       },
     }),
-  ).rejects.toThrow("no valid active profile or domain route");
+  ).rejects.toThrow("no valid active profile");
 });
