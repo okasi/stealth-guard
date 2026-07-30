@@ -30,15 +30,15 @@ Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts
 | Protection          | Description                                                                           |
 | ------------------- | ------------------------------------------------------------------------------------- |
 | **🌍 Proxy**        | Masks your IP address by routing traffic through SOCKS4/5 or HTTP/HTTPS proxy servers |
-| **🌐 User-Agent**   | Spoofs browser User-Agent string in both HTTP headers and JavaScript                  |
+| **🌐 User-Agent**   | Keeps HTTP/JavaScript UA, client hints, touch, CPU, and memory claims aligned          |
 | **🕐 Timezone**     | Spoofs timezone information (configurable, default: UTC+1)                            |
 | **📍 Geolocation**  | Replaces permitted HTML geolocation results with coarse proxy-location coordinates   |
 | **📡 WebRTC**       | Prevents IP address leaks through WebRTC connections                                  |
-| **🎨 Canvas**       | Adds imperceptible noise to canvas data exports, preventing canvas fingerprinting     |
+| **🎨 Canvas**       | Adds imperceptible noise to HTML and OffscreenCanvas reads and exports                 |
 | **📐 ClientRects**  | Adds noise to element bounding rectangle measurements                                 |
 | **🔤 Font**         | Randomizes font measurement values to prevent font enumeration                        |
-| **🔊 AudioContext** | Injects noise into audio frequency data to prevent audio fingerprinting               |
-| **🕹️ WebGL**        | Hides specific GPU models and rotates report/image fingerprints per page load           |
+| **🔊 AudioContext** | Injects noise into buffer copies and float/byte analyser readouts                      |
+| **🕹️ WebGL**       | Hides GPU identity and protects extension, capability, pixel, and export probes        |
 | **🎮 WebGPU**       | Spoofs WebGPU adapter limits and buffer operations                                    |
 
 ### 🚀 Additional Features
@@ -144,6 +144,10 @@ Visit these sites to verify your fingerprinting protection:
 - <https://amiunique.org/> - Browser uniqueness analysis
 - <https://dnscheck.tools/> - WebRTC and DNS leak testing
 
+For the repeatable manual detector suite and result template, see
+[Browser Privacy Benchmarks](BENCHMARKS.md). CreepJS Checker is the recurring
+reference benchmark.
+
 ## 🧑‍💻 Development Checks
 
 Use Node.js 20.19+ or 22.12+ and install Chrome/Chromium for the browser harness. Set `CHROME_PATH` when it is not in a standard location. Install the dev dependencies once:
@@ -243,4 +247,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🙏 Acknowledgments
 
 - Inspired by the need for better privacy tools in an increasingly tracked web
+- Fingerprinting surface coverage was informed by the public detector definitions in [Scrapfly Anti-bot Detector](https://github.com/scrapfly/Antibot-Detector); Stealth Guard's implementation is independent to preserve this project's MIT licensing.
 - Thanks to the browser fingerprinting research community for documenting these techniques

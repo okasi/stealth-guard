@@ -80,6 +80,7 @@
     JSON.stringify(bridge),
     createDomainPatternTools.toString(),
     JSON.stringify(USER_AGENT_STRINGS),
+    JSON.stringify(USER_AGENT_CLIENT_HINTS),
   ].join(", ");
   script.textContent =
     `(${installMainWorldProtections.toString()})(${serializedArguments});`;

@@ -362,6 +362,58 @@ test("background initializes policies and applies config changes atomically", as
   expect((await sendMessage({ type: "get-config" })).config.enabled).toBe(true);
 });
 
+test("User-Agent policy keeps existing client-hint headers consistent", async () => {
+  const windowsConfig = structuredClone(DEFAULT_CONFIG);
+  windowsConfig.useragent.preset = "windows";
+  const { events, sendMessage, tab } = await installBackground(windowsConfig);
+  const current = (await sendMessage({ type: "get-config" })).config;
+  expect(current.useragent.preset).toBe("windows");
+
+  const chromiumHeaders = [
+    { name: "User-Agent", value: "native" },
+    { name: "Sec-CH-UA", value: '"Chromium";v="999"' },
+    { name: "Sec-CH-UA-Mobile", value: "?1" },
+    { name: "Sec-CH-UA-Platform", value: '"Linux"' },
+    { name: "Sec-CH-UA-Arch", value: '"arm"' },
+    { name: "Sec-CH-UA-Full-Version", value: '"999.0.0.0"' },
+    { name: "Sec-CH-UA-Unknown", value: '"native"' },
+  ];
+  const rewritten = events.onBeforeSendHeaders.listeners[0]({
+    url: tab.url,
+    requestHeaders: chromiumHeaders,
+  }).requestHeaders;
+  const values = Object.fromEntries(
+    rewritten.map((header) => [header.name.toLowerCase(), header.value]),
+  );
+  expect(values["user-agent"]).toContain("Edg/125.0.0.0");
+  expect(values["sec-ch-ua"]).toContain('"Microsoft Edge";v="125"');
+  expect(values["sec-ch-ua-mobile"]).toBe("?0");
+  expect(values["sec-ch-ua-platform"]).toBe('"Windows"');
+  expect(values["sec-ch-ua-arch"]).toBe('"x86"');
+  expect(values["sec-ch-ua-full-version"]).toBe('"125.0.0.0"');
+  expect(values["sec-ch-ua-unknown"]).toBeUndefined();
+
+  const safariConfig = structuredClone(current);
+  safariConfig.useragent.preset = "macos";
+  expect(
+    await sendMessage({ type: "update-config", config: safariConfig }),
+  ).toEqual({ success: true });
+  const safariHeaders = events.onBeforeSendHeaders.listeners[0]({
+    url: tab.url,
+    requestHeaders: [
+      { name: "User-Agent", value: "native" },
+      { name: "Sec-CH-UA", value: '"Chromium";v="999"' },
+      { name: "Sec-CH-UA-Platform", value: '"Linux"' },
+    ],
+  }).requestHeaders;
+  expect(safariHeaders).toEqual([
+    {
+      name: "User-Agent",
+      value: expect.stringContaining("Version/17.6 Safari/605.1.15"),
+    },
+  ]);
+});
+
 test("background tracks fingerprint access and manages global allowlists", async () => {
   const { events, sendMessage, state, tab } = await installBackground();
   const current = (await sendMessage({ type: "get-config" })).config;

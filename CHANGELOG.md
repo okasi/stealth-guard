@@ -6,6 +6,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Added
 
+- OffscreenCanvas read/export protection, WebGL debug-extension monitoring, expanded Web Audio readout noise, and coherent Navigator hardware/client-hint profiles informed by public anti-bot detector coverage.
 - Explicit protect-all, bypass-selected, and protect-selected split-tunneling modes with per-site PAC routing.
 - Proxy-location synchronized timezone and permission-preserving coarse HTML geolocation protection.
 - Local proxy diagnostics with effective-setting details and a bounded, exportable, clearable 100-event connection history.
@@ -15,6 +16,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Changed
 
+- Method hooks now install from their property descriptors so writable, enumerable, and configurable flags remain intact across the expanded protection surface.
 - Split isolated-world injection from a directly testable MAIN-world protection runtime.
 - Replaced permissive deep merging with explicit-schema config normalization.
 - Consolidated browser callback errors, allowlist operations, proxy profile indexing, and the serialized session lifecycle.

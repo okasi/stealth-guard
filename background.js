@@ -437,6 +437,54 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
 let uaListener = null;
 
+function quoteClientHint(value) {
+  return `"${String(value).replace(/(["\\])/g, "\\$1")}"`;
+}
+
+function getUserAgentClientHintHeaders(preset, userAgent) {
+  const hints = USER_AGENT_CLIENT_HINTS[preset];
+  if (!hints) return null;
+  const versionToken = hints.brand === "Microsoft Edge" ? "Edg" : "Chrome";
+  const versionMatch = userAgent.match(
+    new RegExp(`${versionToken}\\/([\\d.]+)`),
+  );
+  const fullVersion = versionMatch ? versionMatch[1] : "0.0.0.0";
+  const majorVersion = fullVersion.split(".")[0];
+  const brands = [
+    ["Not_A Brand", "99"],
+    ["Chromium", majorVersion],
+    [hints.brand, majorVersion],
+  ];
+  const fullVersionList = [
+    ["Not_A Brand", "99.0.0.0"],
+    ["Chromium", fullVersion],
+    [hints.brand, fullVersion],
+  ];
+  const formatBrands = (values) =>
+    values
+      .map(
+        ([brand, version]) =>
+          `${quoteClientHint(brand)};v=${quoteClientHint(version)}`,
+      )
+      .join(", ");
+
+  return {
+    "sec-ch-ua": formatBrands(brands),
+    "sec-ch-ua-arch": quoteClientHint(hints.architecture),
+    "sec-ch-ua-bitness": quoteClientHint(hints.bitness),
+    "sec-ch-ua-form-factors": hints.formFactors
+      .map(quoteClientHint)
+      .join(", "),
+    "sec-ch-ua-full-version": quoteClientHint(fullVersion),
+    "sec-ch-ua-full-version-list": formatBrands(fullVersionList),
+    "sec-ch-ua-mobile": hints.mobile ? "?1" : "?0",
+    "sec-ch-ua-model": quoteClientHint(hints.model),
+    "sec-ch-ua-platform": quoteClientHint(hints.platform),
+    "sec-ch-ua-platform-version": quoteClientHint(hints.platformVersion),
+    "sec-ch-ua-wow64": hints.wow64 ? "?1" : "?0",
+  };
+}
+
 async function applyUserAgentSpoofing(configOverride) {
   const config = configOverride || (await getConfig());
 
@@ -453,6 +501,10 @@ async function applyUserAgentSpoofing(configOverride) {
   if (!userAgent) {
     throw new Error(`Invalid User-Agent preset: ${config.useragent.preset}`);
   }
+  const clientHintHeaders = getUserAgentClientHintHeaders(
+    config.useragent.preset,
+    userAgent,
+  );
 
   uaListener = function (details) {
     const requestHeaders = details.requestHeaders || [];
@@ -472,6 +524,17 @@ async function applyUserAgentSpoofing(configOverride) {
       header.value = userAgent;
     } else {
       requestHeaders.push({ name: "User-Agent", value: userAgent });
+    }
+    for (let index = requestHeaders.length - 1; index >= 0; index--) {
+      const requestHeader = requestHeaders[index];
+      const name = requestHeader.name.toLowerCase();
+      if (!name.startsWith("sec-ch-ua")) continue;
+      const spoofedValue = clientHintHeaders && clientHintHeaders[name];
+      if (spoofedValue === undefined || spoofedValue === null) {
+        requestHeaders.splice(index, 1);
+      } else {
+        requestHeader.value = spoofedValue;
+      }
     }
     return { requestHeaders };
   };

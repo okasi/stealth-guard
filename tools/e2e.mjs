@@ -66,7 +66,16 @@ function protectionInitScript(config) {
       window.__sgNativeCanvasToDataURL = HTMLCanvasElement.prototype.toDataURL;
       window.__sgNativeGetImageData = CanvasRenderingContext2D.prototype.getImageData;
       window.__sgNativeMeasureText = CanvasRenderingContext2D.prototype.measureText;
+      window.__sgNativeOffscreen =
+        typeof OffscreenCanvas === "undefined"
+          ? null
+          : {
+              convertToBlob: OffscreenCanvas.prototype.convertToBlob,
+              getImageData:
+                OffscreenCanvasRenderingContext2D.prototype.getImageData,
+            };
       window.__sgNativeWebGL = {
+        getExtension: WebGLRenderingContext.prototype.getExtension,
         getParameter: WebGLRenderingContext.prototype.getParameter,
         getSupportedExtensions:
           WebGLRenderingContext.prototype.getSupportedExtensions,
@@ -79,12 +88,24 @@ function protectionInitScript(config) {
         HTMLElement.prototype,
         "offsetWidth",
       ).get;
+      window.__sgNativeAudio = {
+        copyFromChannel: AudioBuffer.prototype.copyFromChannel,
+        getByteTimeDomainData: AnalyserNode.prototype.getByteTimeDomainData,
+      };
       window.__sgNativeDescriptors = {
         userAgent: Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent"),
+        hardwareConcurrency: Object.getOwnPropertyDescriptor(
+          Navigator.prototype,
+          "hardwareConcurrency",
+        ),
         offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth"),
         webglGetParameter: Object.getOwnPropertyDescriptor(
           WebGLRenderingContext.prototype,
           "getParameter",
+        ),
+        webglGetExtension: Object.getOwnPropertyDescriptor(
+          WebGLRenderingContext.prototype,
+          "getExtension",
         ),
         webglReadPixels: Object.getOwnPropertyDescriptor(
           WebGLRenderingContext.prototype,
@@ -523,6 +544,42 @@ async function exerciseProtections(page) {
       const nativeBlob = await readBlob(window.__sgNativeCanvasToBlob);
       const protectedBlob = await readBlob(canvas.toBlob);
 
+      let offscreenResult = null;
+      if (window.__sgNativeOffscreen) {
+        const offscreen = new OffscreenCanvas(2, 2);
+        const offscreenContext = offscreen.getContext("2d");
+        offscreenContext.fillStyle = "rgb(10, 20, 30)";
+        offscreenContext.fillRect(0, 0, 2, 2);
+        const nativeOffscreenData = Array.from(
+          window.__sgNativeOffscreen.getImageData.call(
+            offscreenContext,
+            0,
+            0,
+            1,
+            1,
+          ).data,
+        );
+        const offscreenData = Array.from(
+          offscreenContext.getImageData(0, 0, 1, 1).data,
+        );
+        const nativeOffscreenBlob = Array.from(
+          new Uint8Array(
+            await (
+              await window.__sgNativeOffscreen.convertToBlob.call(offscreen)
+            ).arrayBuffer(),
+          ),
+        );
+        const protectedOffscreenBlob = Array.from(
+          new Uint8Array(await (await offscreen.convertToBlob()).arrayBuffer()),
+        );
+        offscreenResult = {
+          nativeData: nativeOffscreenData,
+          protectedData: offscreenData,
+          nativeBlob: nativeOffscreenBlob,
+          protectedBlob: protectedOffscreenBlob,
+        };
+      }
+
       const webglCanvas = document.createElement("canvas");
       webglCanvas.width = 16;
       webglCanvas.height = 16;
@@ -534,6 +591,10 @@ async function exerciseProtections(page) {
       const webglVersion = gl.getParameter(7938);
       const webglShadingLanguage = gl.getParameter(35724);
       const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+      const nativeDebugInfo = window.__sgNativeWebGL.getExtension.call(
+        gl,
+        "WEBGL_debug_renderer_info",
+      );
       const nativeWebglExtensions =
         window.__sgNativeWebGL.getSupportedExtensions.call(gl);
       const webglExtensions = gl.getSupportedExtensions();
@@ -672,12 +733,33 @@ async function exerciseProtections(page) {
       const audioData = audioBuffer.getChannelData(0);
       const audioSample = audioData[0];
       const repeatedAudioSample = audioBuffer.getChannelData(0)[0];
+      const copyBuffer = offline.createBuffer(1, 128, 44100);
+      copyBuffer.copyToChannel(new Float32Array(128).fill(0.25), 0);
+      const nativeCopiedAudio = new Float32Array(128);
+      const copiedAudio = new Float32Array(128);
+      window.__sgNativeAudio.copyFromChannel.call(
+        copyBuffer,
+        nativeCopiedAudio,
+        0,
+      );
+      copyBuffer.copyFromChannel(copiedAudio, 0);
+      const analyser = offline.createAnalyser();
+      const nativeByteTimeDomain = new Uint8Array(analyser.frequencyBinCount);
+      const byteTimeDomain = new Uint8Array(analyser.frequencyBinCount);
+      window.__sgNativeAudio.getByteTimeDomainData.call(
+        analyser,
+        nativeByteTimeDomain,
+      );
+      analyser.getByteTimeDomainData(byteTimeDomain);
 
       const userAgent = navigator.userAgent;
       const navigatorValues = {
         platform: navigator.platform,
         appVersion: navigator.appVersion,
         vendor: navigator.vendor,
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        deviceMemory: navigator.deviceMemory,
+        maxTouchPoints: navigator.maxTouchPoints,
       };
       const peer = new RTCPeerConnection();
       peer.close();
@@ -701,6 +783,7 @@ async function exerciseProtections(page) {
         protectedDataUrl,
         nativeBlob,
         protectedBlob,
+        offscreenResult,
         webglVendor,
         repeatedWebglVendor,
         webglRenderer,
@@ -708,6 +791,7 @@ async function exerciseProtections(page) {
         webglShadingLanguage,
         unmaskedVendor,
         unmaskedRenderer,
+        debugExtensionPreserved: Boolean(debugInfo) === Boolean(nativeDebugInfo),
         nativeWebglExtensions,
         webglExtensions,
         repeatedWebglExtensions,
@@ -750,14 +834,24 @@ async function exerciseProtections(page) {
         receivedGpuInput: Array.from(window.__sgWriteBufferArgs[2]),
         audioSample,
         repeatedAudioSample,
+        nativeCopiedAudio: Array.from(nativeCopiedAudio.slice(0, 2)),
+        copiedAudio: Array.from(copiedAudio.slice(0, 2)),
+        nativeByteTimeDomain: Array.from(nativeByteTimeDomain.slice(0, 2)),
+        byteTimeDomain: Array.from(byteTimeDomain.slice(0, 2)),
         userAgent,
         navigatorValues,
         nativeUserAgent: window.__sgNativeUserAgent,
         derivedPeerWorks,
         descriptorsPreserved: [
           ["userAgent", Navigator.prototype, "userAgent"],
+          [
+            "hardwareConcurrency",
+            Navigator.prototype,
+            "hardwareConcurrency",
+          ],
           ["offsetWidth", HTMLElement.prototype, "offsetWidth"],
           ["webglGetParameter", WebGLRenderingContext.prototype, "getParameter"],
+          ["webglGetExtension", WebGLRenderingContext.prototype, "getExtension"],
           ["webglReadPixels", WebGLRenderingContext.prototype, "readPixels"],
         ].every(([name, owner, property]) => {
           const before = window.__sgNativeDescriptors[name];
@@ -811,6 +905,17 @@ async function testProtectionRuntime(browser, port) {
   assert.deepEqual(result.canvasData, [11, 21, 31, 255]);
   assert.notEqual(result.protectedDataUrl, result.nativeDataUrl);
   assert.notDeepEqual(result.protectedBlob, result.nativeBlob);
+  if (result.offscreenResult) {
+    assert.deepEqual(result.offscreenResult.nativeData, [10, 20, 30, 255]);
+    assert.notDeepEqual(
+      result.offscreenResult.protectedData,
+      result.offscreenResult.nativeData,
+    );
+    assert.notDeepEqual(
+      result.offscreenResult.protectedBlob,
+      result.offscreenResult.nativeBlob,
+    );
+  }
   assert.equal(result.webglVendor, "WebKit");
   assert.equal(result.webglVendor, result.repeatedWebglVendor);
   assert.equal(result.webglRenderer, "WebKit WebGL");
@@ -821,6 +926,7 @@ async function testProtectionRuntime(browser, port) {
   assert(result.unmaskedVendor.length > 0);
   assert(result.unmaskedRenderer.length > 0);
   assert(!result.unmaskedRenderer.includes("Apple M2"));
+  assert(result.debugExtensionPreserved);
   assert.deepEqual(result.webglExtensions, result.repeatedWebglExtensions);
   assert.deepEqual(
     result.webglExtensions.slice().sort(),
@@ -858,17 +964,35 @@ async function testProtectionRuntime(browser, port) {
   assert.deepEqual(result.receivedGpuInput, [11, 20, 30, 40]);
   assert(result.audioSample > 0);
   assert.equal(result.repeatedAudioSample, result.audioSample);
+  assert.equal(result.nativeCopiedAudio[0], 0.25);
+  assert(result.copiedAudio[0] > result.nativeCopiedAudio[0]);
+  assert.equal(result.copiedAudio[1], result.nativeCopiedAudio[1]);
+  assert.notEqual(result.byteTimeDomain[0], result.nativeByteTimeDomain[0]);
+  assert.equal(result.byteTimeDomain[1], result.nativeByteTimeDomain[1]);
   const expectedNavigator = {
-    macos: ["MacIntel", "Apple Computer, Inc."],
-    macos_chrome: ["MacIntel", "Google Inc."],
-    windows: ["Win32", "Google Inc."],
-    iphone: ["iPhone", "Apple Computer, Inc."],
-    android: ["Linux armv8l", "Google Inc."],
+    macos: ["MacIntel", "Apple Computer, Inc.", 8, 0],
+    macos_chrome: ["MacIntel", "Google Inc.", 8, 0],
+    windows: ["Win32", "Google Inc.", 8, 0],
+    iphone: ["iPhone", "Apple Computer, Inc.", 6, 5],
+    android: ["Linux armv8l", "Google Inc.", 8, 5],
   }[DEFAULT_CONFIG.useragent.preset];
   assert.deepEqual(
-    [result.navigatorValues.platform, result.navigatorValues.vendor],
+    [
+      result.navigatorValues.platform,
+      result.navigatorValues.vendor,
+      result.navigatorValues.hardwareConcurrency,
+      result.navigatorValues.maxTouchPoints,
+    ],
     expectedNavigator,
   );
+  const expectedDeviceMemory = ["macos_chrome", "windows", "android"].includes(
+    DEFAULT_CONFIG.useragent.preset,
+  )
+    ? 8
+    : undefined;
+  if (result.navigatorValues.deviceMemory !== undefined) {
+    assert.equal(result.navigatorValues.deviceMemory, expectedDeviceMemory);
+  }
   assert(result.navigatorValues.appVersion.length > 10);
   assert(result.derivedPeerWorks);
   assert(result.descriptorsPreserved);
@@ -898,8 +1022,37 @@ async function testProtectionRuntime(browser, port) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
     const gl = document.createElement("canvas").getContext("webgl");
     const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+    const userAgentData = navigator.userAgentData;
+    const highEntropyValues = userAgentData
+      ? await userAgentData.getHighEntropyValues([
+          "architecture",
+          "bitness",
+          "formFactors",
+          "fullVersionList",
+          "model",
+          "platformVersion",
+          "uaFullVersion",
+          "wow64",
+        ])
+      : null;
     return {
       userAgent: navigator.userAgent,
+      oscpu: navigator.oscpu,
+      hardwareConcurrency: navigator.hardwareConcurrency,
+      deviceMemory: navigator.deviceMemory,
+      maxTouchPoints: navigator.maxTouchPoints,
+      userAgentData: userAgentData
+        ? {
+            lowEntropyValues: userAgentData.toJSON(),
+            highEntropyValues,
+            brandsAreStable: userAgentData.brands === userAgentData.brands,
+            brandsAreFrozen: Object.isFrozen(userAgentData.brands),
+            highEntropyMethodIsStable:
+              userAgentData.getHighEntropyValues ===
+              userAgentData.getHighEntropyValues,
+            toJSONMethodIsStable: userAgentData.toJSON === userAgentData.toJSON,
+          }
+        : null,
       offset: new Date("2026-01-15T12:00:00Z").getTimezoneOffset(),
       timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
       webglRenderer: gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL),
@@ -915,6 +1068,48 @@ async function testProtectionRuntime(browser, port) {
     },
   });
   assert(updatedRuntime.userAgent.includes("Android 13; Pixel 4"));
+  if (updatedRuntime.oscpu !== undefined) {
+    assert(updatedRuntime.oscpu.includes("Android 13"));
+  }
+  assert.equal(updatedRuntime.hardwareConcurrency, 8);
+  if (updatedRuntime.deviceMemory !== undefined) {
+    assert.equal(updatedRuntime.deviceMemory, 8);
+  }
+  assert.equal(updatedRuntime.maxTouchPoints, 5);
+  if (updatedRuntime.userAgentData) {
+    const {
+      brandsAreFrozen,
+      brandsAreStable,
+      highEntropyMethodIsStable,
+      highEntropyValues,
+      lowEntropyValues,
+      toJSONMethodIsStable,
+    } = updatedRuntime.userAgentData;
+    assert(brandsAreFrozen);
+    assert(brandsAreStable);
+    assert(highEntropyMethodIsStable);
+    assert(toJSONMethodIsStable);
+    assert.equal(lowEntropyValues.mobile, true);
+    assert.equal(lowEntropyValues.platform, "Android");
+    assert(
+      lowEntropyValues.brands.some(
+        (entry) => entry.brand === "Google Chrome" && entry.version === "125",
+      ),
+    );
+    assert.equal(highEntropyValues.architecture, "arm");
+    assert.equal(highEntropyValues.bitness, "64");
+    assert.deepEqual(highEntropyValues.formFactors, ["Mobile"]);
+    assert.equal(highEntropyValues.model, "Pixel 4");
+    assert.equal(highEntropyValues.platformVersion, "13.0.0");
+    assert.equal(highEntropyValues.uaFullVersion, "125.0.0.0");
+    assert.equal(highEntropyValues.wow64, false);
+    assert(
+      highEntropyValues.fullVersionList.some(
+        (entry) =>
+          entry.brand === "Google Chrome" && entry.version === "125.0.0.0",
+      ),
+    );
+  }
   assert.equal(updatedRuntime.offset, -540);
   assert.equal(updatedRuntime.timezone, "Asia/Tokyo");
   assert(updatedRuntime.webglRenderer.includes("Adreno (TM) 640"));

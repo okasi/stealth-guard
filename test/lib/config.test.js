@@ -61,6 +61,7 @@ test("getDefaultUserAgentPreset maps platform and browser combinations", () => {
 test("User-Agent and content config helpers expose only trusted runtime data", () => {
   const {
     PROTECTION_FEATURES,
+    USER_AGENT_CLIENT_HINTS,
     USER_AGENT_STRINGS,
     cloneConfig,
     createContentConfig,
@@ -87,6 +88,12 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
   expect(PROTECTION_FEATURES).toContain("geolocation");
   expect(getUserAgentString("macos")).toBe(USER_AGENT_STRINGS.macos);
   expect(getUserAgentString("missing")).toBeNull();
+  expect(USER_AGENT_CLIENT_HINTS.android).toMatchObject({
+    platform: "Android",
+    model: "Pixel 4",
+    mobile: true,
+  });
+  expect(USER_AGENT_CLIENT_HINTS.macos).toBeUndefined();
   expect(contentConfig.enabled).toBe(false);
   expect(contentConfig.canvas.enabled).toBe(false);
   expect(contentConfig.proxy).toBeUndefined();

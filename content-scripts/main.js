@@ -3,6 +3,7 @@ function installMainWorldProtections(
   bridge,
   createPatternTools,
   userAgentStrings,
+  userAgentClientHints,
 ) {
   "use strict";
 
@@ -10,6 +11,7 @@ function installMainWorldProtections(
   const configUpdateEvent = bridge.configEvent;
   const configUpdateToken = bridge.configToken;
   const domainPatterns = createPatternTools();
+  const clientHintProfiles = userAgentClientHints || {};
 
   const replaceConfig = function (nextConfig) {
     if (!nextConfig || typeof nextConfig !== "object") return;
@@ -77,10 +79,17 @@ function installMainWorldProtections(
 
   const protectMethod = function (prototype, method, apply, label) {
     try {
-      if (!prototype || typeof prototype[method] !== "function") {
+      if (!prototype) {
         return false;
       }
-      prototype[method] = new Proxy(prototype[method], { apply });
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, method);
+      if (!descriptor || typeof descriptor.value !== "function") {
+        return false;
+      }
+      Object.defineProperty(prototype, method, {
+        ...descriptor,
+        value: new Proxy(descriptor.value, { apply }),
+      });
       return true;
     } catch (error) {
       debugWarn(`[Stealth Guard] Failed to protect ${label || method}:`, error);
@@ -109,6 +118,33 @@ function installMainWorldProtections(
 
   if (config.canvas) {
     const getImageData = CanvasRenderingContext2D.prototype.getImageData;
+    const getOffscreenImageData =
+      typeof OffscreenCanvasRenderingContext2D === "undefined"
+        ? null
+        : OffscreenCanvasRenderingContext2D.prototype.getImageData;
+
+    const readCanvasImageData = function (context, width, height) {
+      const reader =
+        getOffscreenImageData &&
+        typeof OffscreenCanvasRenderingContext2D !== "undefined" &&
+        context instanceof OffscreenCanvasRenderingContext2D
+          ? getOffscreenImageData
+          : getImageData;
+      return Reflect.apply(reader, context, [0, 0, width, height]);
+    };
+
+    const createCanvasLike = function (source) {
+      if (
+        typeof OffscreenCanvas !== "undefined" &&
+        source instanceof OffscreenCanvas
+      ) {
+        return new OffscreenCanvas(source.width, source.height);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = source.width;
+      canvas.height = source.height;
+      return canvas;
+    };
 
     const addCanvasNoise = function (imageData) {
       const spreadByLevel = { low: 3, medium: 10, high: 21 };
@@ -182,15 +218,11 @@ function installMainWorldProtections(
 
       let imageData;
       if (isWebGLCanvas) {
-        const snapshot = document.createElement("canvas");
-        snapshot.width = canvas.width;
-        snapshot.height = canvas.height;
+        const snapshot = createCanvasLike(canvas);
         const snapshotContext = snapshot.getContext("2d");
         snapshotContext.drawImage(canvas, 0, 0);
-        imageData = getImageData.call(
+        imageData = readCanvasImageData(
           snapshotContext,
-          0,
-          0,
           canvas.width,
           canvas.height,
         );
@@ -198,19 +230,15 @@ function installMainWorldProtections(
       } else {
         const context = canvas.getContext("2d");
         if (!context) return originalMethod.apply(canvas, args);
-        imageData = getImageData.call(
+        imageData = readCanvasImageData(
           context,
-          0,
-          0,
           canvas.width,
           canvas.height,
         );
         addCanvasNoise(imageData);
       }
 
-      const tempCanvas = document.createElement("canvas");
-      tempCanvas.width = canvas.width;
-      tempCanvas.height = canvas.height;
+      const tempCanvas = createCanvasLike(canvas);
       tempCanvas.getContext("2d").putImageData(imageData, 0, 0);
       sendFingerprintAlert(feature);
       return originalMethod.apply(tempCanvas, args);
@@ -224,18 +252,39 @@ function installMainWorldProtections(
         `HTMLCanvasElement.${method}`,
       );
     }
-    protectMethod(
-      CanvasRenderingContext2D.prototype,
-      "getImageData",
-      (target, self, args) => {
-        const imageData = Reflect.apply(target, self, args);
-        if (isFeatureActive("canvas")) {
-          addCanvasNoise(imageData);
-          sendFingerprintAlert("canvas");
-        }
-        return imageData;
-      },
-      "CanvasRenderingContext2D.getImageData",
+    if (typeof OffscreenCanvas !== "undefined") {
+      protectMethod(
+        OffscreenCanvas.prototype,
+        "convertToBlob",
+        (target, self, args) => exportNoisedCanvas(self, target, args),
+        "OffscreenCanvas.convertToBlob",
+      );
+    }
+    const protectImageDataReader = function (Constructor, label) {
+      if (typeof Constructor === "undefined") return;
+      protectMethod(
+        Constructor.prototype,
+        "getImageData",
+        (target, self, args) => {
+          const imageData = Reflect.apply(target, self, args);
+          if (isFeatureActive("canvas")) {
+            addCanvasNoise(imageData);
+            sendFingerprintAlert("canvas");
+          }
+          return imageData;
+        },
+        `${label}.getImageData`,
+      );
+    };
+    protectImageDataReader(
+      CanvasRenderingContext2D,
+      "CanvasRenderingContext2D",
+    );
+    protectImageDataReader(
+      typeof OffscreenCanvasRenderingContext2D === "undefined"
+        ? undefined
+        : OffscreenCanvasRenderingContext2D,
+      "OffscreenCanvasRenderingContext2D",
     );
 
     debugLog("[Stealth Guard] Canvas protection activated");
@@ -299,21 +348,32 @@ function installMainWorldProtections(
     webglNoiseSeed = crypto.getRandomValues(new Uint32Array(1))[0];
     const notifyWebGLAccess = createOneTimeAlert("webgl");
 
-    protectMethod(
-      HTMLCanvasElement.prototype,
-      "getContext",
-      (target, self, args) => {
-        const context = Reflect.apply(target, self, args);
-        const type = typeof args[0] === "string" ? args[0].toLowerCase() : "";
-        if (
-          context &&
-          (type === "webgl" || type === "webgl2" || type === "experimental-webgl")
-        ) {
-          webglCanvases.add(self);
-        }
-        return context;
-      },
-      "HTMLCanvasElement.getContext",
+    const protectCanvasContext = function (Constructor, label) {
+      if (typeof Constructor === "undefined") return;
+      protectMethod(
+        Constructor.prototype,
+        "getContext",
+        (target, self, args) => {
+          const context = Reflect.apply(target, self, args);
+          const type = typeof args[0] === "string" ? args[0].toLowerCase() : "";
+          if (
+            context &&
+            (type === "webgl" ||
+              type === "webgl2" ||
+              type === "experimental-webgl")
+          ) {
+            webglCanvases.add(self);
+          }
+          return context;
+        },
+        `${label}.getContext`,
+      );
+    };
+
+    protectCanvasContext(HTMLCanvasElement, "HTMLCanvasElement");
+    protectCanvasContext(
+      typeof OffscreenCanvas === "undefined" ? undefined : OffscreenCanvas,
+      "OffscreenCanvas",
     );
 
     const getWebGLPreset = function () {
@@ -461,6 +521,22 @@ function installMainWorldProtections(
           return shuffled;
         },
         `${label}.getSupportedExtensions`,
+      );
+      protectMethod(
+        Constructor.prototype,
+        "getExtension",
+        (target, self, args) => {
+          const extension = Reflect.apply(target, self, args);
+          if (
+            isFeatureActive("webgl") &&
+            typeof args[0] === "string" &&
+            args[0].toLowerCase() === "webgl_debug_renderer_info"
+          ) {
+            notifyWebGLAccess();
+          }
+          return extension;
+        },
+        `${label}.getExtension`,
       );
       protectMethod(
         Constructor.prototype,
@@ -1061,6 +1137,20 @@ function installMainWorldProtections(
   if (config.audiocontext) {
     const notifyAudioAccess = createOneTimeAlert("audiocontext");
     const protectedBuffers = new WeakSet();
+    const addFloatNoise = function (values, scale) {
+      if (!values || typeof values.length !== "number") return;
+      for (let index = 0; index < values.length; index += 100) {
+        values[index] += Math.random() * scale;
+      }
+    };
+
+    const addByteNoise = function (values) {
+      if (!values || typeof values.length !== "number") return;
+      for (let index = 0; index < values.length; index += 100) {
+        const value = values[index];
+        values[index] = value >= 255 ? value - 1 : value + 1;
+      }
+    };
 
     if (typeof AudioBuffer !== "undefined") {
       protectMethod(
@@ -1073,33 +1163,52 @@ function installMainWorldProtections(
             !protectedBuffers.has(data)
           ) {
             protectedBuffers.add(data);
-            for (let index = 0; index < data.length; index += 100) {
-              data[index] += Math.random() * 0.0000001;
-            }
+            addFloatNoise(data, 0.0000001);
             notifyAudioAccess();
           }
           return data;
         },
         "AudioBuffer.getChannelData",
       );
-    }
-
-    if (typeof AnalyserNode !== "undefined") {
       protectMethod(
-        AnalyserNode.prototype,
-        "getFloatFrequencyData",
+        AudioBuffer.prototype,
+        "copyFromChannel",
         (target, self, args) => {
           const result = Reflect.apply(target, self, args);
           if (isFeatureActive("audiocontext") && args[0]) {
-            for (let index = 0; index < args[0].length; index += 100) {
-              args[0][index] += Math.random() * 0.1;
-            }
+            addFloatNoise(args[0], 0.0000001);
             notifyAudioAccess();
           }
           return result;
         },
-        "AnalyserNode.getFloatFrequencyData",
+        "AudioBuffer.copyFromChannel",
       );
+    }
+
+    if (typeof AnalyserNode !== "undefined") {
+      const protectAnalyserReadout = function (method, addNoise) {
+        protectMethod(
+          AnalyserNode.prototype,
+          method,
+          (target, self, args) => {
+            const result = Reflect.apply(target, self, args);
+            if (isFeatureActive("audiocontext") && args[0]) {
+              addNoise(args[0]);
+              notifyAudioAccess();
+            }
+            return result;
+          },
+          `AnalyserNode.${method}`,
+        );
+      };
+      protectAnalyserReadout("getFloatFrequencyData", (values) =>
+        addFloatNoise(values, 0.1),
+      );
+      protectAnalyserReadout("getFloatTimeDomainData", (values) =>
+        addFloatNoise(values, 0.0000001),
+      );
+      protectAnalyserReadout("getByteFrequencyData", addByteNoise);
+      protectAnalyserReadout("getByteTimeDomainData", addByteNoise);
     }
   }
 
@@ -1112,26 +1221,46 @@ function installMainWorldProtections(
         platform: "MacIntel",
         oscpu: "Intel Mac OS X 10.15.7",
         vendor: "Apple Computer, Inc.",
+        hardwareConcurrency: 8,
+        deviceMemory: undefined,
+        maxTouchPoints: 0,
+        clientHints: null,
       },
       macos_chrome: {
         platform: "MacIntel",
         oscpu: "Intel Mac OS X 10.15.7",
         vendor: "Google Inc.",
+        hardwareConcurrency: 8,
+        deviceMemory: 8,
+        maxTouchPoints: 0,
+        clientHints: clientHintProfiles.macos_chrome,
       },
       windows: {
         platform: "Win32",
         oscpu: "Windows NT 10.0; Win64; x64",
         vendor: "Google Inc.",
+        hardwareConcurrency: 8,
+        deviceMemory: 8,
+        maxTouchPoints: 0,
+        clientHints: clientHintProfiles.windows,
       },
       iphone: {
         platform: "iPhone",
         oscpu: "iPhone OS 17.4.1",
         vendor: "Apple Computer, Inc.",
+        hardwareConcurrency: 6,
+        deviceMemory: undefined,
+        maxTouchPoints: 5,
+        clientHints: null,
       },
       android: {
         platform: "Linux armv8l",
-        oscpu: "Linux; Android 14",
+        oscpu: "Linux; Android 13",
         vendor: "Google Inc.",
+        hardwareConcurrency: 8,
+        deviceMemory: 8,
+        maxTouchPoints: 5,
+        clientHints: clientHintProfiles.android,
       },
     };
     let cachedPreset = null;
@@ -1142,11 +1271,19 @@ function installMainWorldProtections(
       const userAgent = userAgentStrings[preset] || userAgentStrings.macos;
       const metadata = metadataByPreset[preset] || metadataByPreset.macos;
       const slash = userAgent.indexOf("/");
+      const versionPattern =
+        metadata.clientHints && metadata.clientHints.brand === "Microsoft Edge"
+          ? /Edg\/([\d.]+)/
+          : /Chrome\/([\d.]+)/;
+      const versionMatch = userAgent.match(versionPattern);
+      const fullVersion = versionMatch ? versionMatch[1] : "0.0.0.0";
       cachedPreset = preset;
       cachedProfile = {
         ...metadata,
         userAgent,
         appVersion: slash === -1 ? "5.0" : userAgent.slice(slash + 1),
+        fullVersion,
+        majorVersion: fullVersion.split(".")[0],
       };
       return cachedProfile;
     };
@@ -1160,19 +1297,167 @@ function installMainWorldProtections(
           if (!isFeatureActive("useragent")) {
             return Reflect.apply(target, self, args);
           }
-          if (property === "userAgent") notifyUserAgentAccess();
-          return getSpoofedValue(getUserAgentProfile());
+          notifyUserAgentAccess();
+          return getSpoofedValue(getUserAgentProfile(), target, self, args);
         },
         `Navigator.${property}`,
       );
+    };
+
+    let cachedClientHintProfile = null;
+    let cachedClientHintValues = null;
+    const getClientHintValues = function (profile) {
+      if (profile === cachedClientHintProfile) return cachedClientHintValues;
+      const hints = profile.clientHints;
+      if (!hints) return null;
+      const freezeBrands = (brands) =>
+        Object.freeze(brands.map((entry) => Object.freeze(entry)));
+      cachedClientHintProfile = profile;
+      cachedClientHintValues = {
+        brands: freezeBrands([
+          { brand: "Not_A Brand", version: "99" },
+          { brand: "Chromium", version: profile.majorVersion },
+          { brand: hints.brand, version: profile.majorVersion },
+        ]),
+        mobile: hints.mobile,
+        platform: hints.platform,
+        architecture: hints.architecture,
+        bitness: hints.bitness,
+        formFactors: hints.formFactors.slice(),
+        fullVersionList: freezeBrands([
+          { brand: "Not_A Brand", version: "99.0.0.0" },
+          { brand: "Chromium", version: profile.fullVersion },
+          { brand: hints.brand, version: profile.fullVersion },
+        ]),
+        model: hints.model,
+        platformVersion: hints.platformVersion,
+        uaFullVersion: profile.fullVersion,
+        wow64: hints.wow64,
+      };
+      return cachedClientHintValues;
+    };
+
+    const cloneClientHintValue = function (value) {
+      if (Array.isArray(value)) {
+        return value.map((entry) =>
+          entry && typeof entry === "object" ? { ...entry } : entry,
+        );
+      }
+      return value;
+    };
+
+    const createClientHintResult = function (requested, profile) {
+      const values = getClientHintValues(profile);
+      const result = {};
+      if (!values) return result;
+      for (const name of ["brands", "mobile", "platform"]) {
+        result[name] = cloneClientHintValue(values[name]);
+      }
+      for (const name of requested) {
+        if (Object.prototype.hasOwnProperty.call(values, name)) {
+          result[name] = cloneClientHintValue(values[name]);
+        }
+      }
+      return result;
+    };
+
+    let cachedClientHintsSource = null;
+    let cachedClientHintsFacade = null;
+    const createClientHintsFacade = function (nativeValue) {
+      const profile = getUserAgentProfile();
+      if (!profile.clientHints) return undefined;
+      if (cachedClientHintsSource === nativeValue && cachedClientHintsFacade) {
+        return cachedClientHintsFacade;
+      }
+
+      const source =
+        nativeValue && typeof nativeValue === "object"
+          ? nativeValue
+          : typeof NavigatorUAData !== "undefined"
+            ? Object.create(NavigatorUAData.prototype)
+            : {};
+      const nativeHighEntropyMethod =
+        nativeValue && typeof nativeValue.getHighEntropyValues === "function"
+          ? nativeValue.getHighEntropyValues
+          : null;
+      const readHighEntropyValues = function (hints) {
+        notifyUserAgentAccess();
+        const requested = Array.from(hints || []);
+        if (!nativeHighEntropyMethod) {
+          return Promise.resolve(
+            createClientHintResult(requested, getUserAgentProfile()),
+          );
+        }
+        return Reflect.apply(nativeHighEntropyMethod, nativeValue, [
+          hints,
+        ]).then(() =>
+          createClientHintResult(requested, getUserAgentProfile()),
+        );
+      };
+      const highEntropyMethod = nativeHighEntropyMethod
+        ? new Proxy(nativeHighEntropyMethod, {
+            apply(targetMethod, self, args) {
+              return readHighEntropyValues(args[0]);
+            },
+          })
+        : readHighEntropyValues;
+      const nativeToJSONMethod =
+        nativeValue && typeof nativeValue.toJSON === "function"
+          ? nativeValue.toJSON
+          : function () {};
+      const toJSONMethod = new Proxy(nativeToJSONMethod, {
+        apply() {
+          notifyUserAgentAccess();
+          return createClientHintResult([], getUserAgentProfile());
+        },
+      });
+      cachedClientHintsSource = nativeValue;
+      cachedClientHintsFacade = new Proxy(source, {
+        get(target, property, receiver) {
+          const currentProfile = getUserAgentProfile();
+          const values = getClientHintValues(currentProfile);
+          if (!values) return undefined;
+          if (
+            property === "brands" ||
+            property === "mobile" ||
+            property === "platform"
+          ) {
+            notifyUserAgentAccess();
+            return property === "brands"
+              ? values.brands
+              : values[property];
+          }
+          if (property === "getHighEntropyValues") {
+            return highEntropyMethod;
+          }
+          if (property === "toJSON") {
+            return toJSONMethod;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      return cachedClientHintsFacade;
     };
 
     protectNavigatorValue("userAgent", (profile) => profile.userAgent);
     protectNavigatorValue("platform", (profile) => profile.platform);
     protectNavigatorValue("appVersion", (profile) => profile.appVersion);
     protectNavigatorValue("vendor", (profile) => profile.vendor);
+    protectNavigatorValue(
+      "hardwareConcurrency",
+      (profile) => profile.hardwareConcurrency,
+    );
+    protectNavigatorValue("deviceMemory", (profile) => profile.deviceMemory);
+    protectNavigatorValue(
+      "maxTouchPoints",
+      (profile) => profile.maxTouchPoints,
+    );
     if (Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgentData")) {
-      protectNavigatorValue("userAgentData", () => undefined);
+      protectNavigatorValue(
+        "userAgentData",
+        (profile, target, self, args) =>
+          createClientHintsFacade(Reflect.apply(target, self, args)),
+      );
     }
     if (Object.getOwnPropertyDescriptor(Navigator.prototype, "oscpu")) {
       protectNavigatorValue("oscpu", (profile) => profile.oscpu);
