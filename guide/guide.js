@@ -106,7 +106,13 @@ async function runSelfTest() {
       "The selected page did not answer the self-test",
     );
     const result = renderResults(policy, pageResult.snapshot);
-    if (result.failures) {
+    if (!policy.protectionEnabled) {
+      summary.textContent = `Protection is disabled; live values were read for ${hostname}`;
+      summary.dataset.state = "warning";
+    } else if (policy.globallyAllowlisted) {
+      summary.textContent = `${hostname} is globally allowlisted; live values are expected to remain native`;
+      summary.dataset.state = "warning";
+    } else if (result.failures) {
       summary.textContent = `${result.failures} identity mismatch${result.failures === 1 ? "" : "es"} found for ${hostname}`;
       summary.dataset.state = "error";
     } else {

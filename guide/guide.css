@@ -202,6 +202,10 @@ a:focus-visible {
   color: var(--success);
 }
 
+#test-summary[data-state="warning"] {
+  color: #9a6700;
+}
+
 #test-summary[data-state="error"] {
   color: #b42318;
 }
