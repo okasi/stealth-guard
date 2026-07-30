@@ -16,7 +16,7 @@
     "<all_urls>"
   ],
   "homepage_url": "https://github.com/okasi/stealth-guard",
-  "description": "Fingerprinting protection: Canvas, WebGL, Font, Audio, Timezone, User-Agent spoofing, WebRTC leak prevention & proxy",
+  "description": "Local fingerprinting protection, identity alignment, tracker blocking, WebRTC privacy, and proxy controls",
   "background": {
     "scripts": [
       "lib/runtime.js",

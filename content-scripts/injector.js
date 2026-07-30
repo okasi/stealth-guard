@@ -17,6 +17,9 @@
     configToken: createPrivateToken(),
     alertChannel: `stealth-guard-alert-${createPrivateToken()}`,
     alertToken: createPrivateToken(),
+    diagnosticRequestEvent: `stealth-guard-diagnostic-request-${createPrivateToken()}`,
+    diagnosticResultEvent: `stealth-guard-diagnostic-result-${createPrivateToken()}`,
+    diagnosticToken: createPrivateToken(),
   };
 
   function createPrivateToken() {
@@ -89,9 +92,59 @@
 
   loadStoredContentConfig().then(applyTrustedContentConfig);
 
-  chrome.runtime.onMessage.addListener((request) => {
+  function requestMainWorldDiagnostics() {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (snapshot) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        window.removeEventListener(
+          bridge.diagnosticResultEvent,
+          receiveDiagnostics,
+          true,
+        );
+        resolve(snapshot);
+      };
+      const receiveDiagnostics = (event) => {
+        if (
+          !event ||
+          !event.detail ||
+          event.detail.token !== bridge.diagnosticToken ||
+          !event.detail.snapshot ||
+          typeof event.detail.snapshot !== "object"
+        ) {
+          return;
+        }
+        finish(event.detail.snapshot);
+      };
+      const timeout = setTimeout(() => finish(null), 1000);
+      window.addEventListener(
+        bridge.diagnosticResultEvent,
+        receiveDiagnostics,
+        true,
+      );
+      window.dispatchEvent(
+        new CustomEvent(bridge.diagnosticRequestEvent, {
+          detail: { token: bridge.diagnosticToken },
+        }),
+      );
+    });
+  }
+
+  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request && request.type === "config-updated") {
       applyTrustedContentConfig(request.config);
+    }
+    if (request && request.type === "run-self-test") {
+      requestMainWorldDiagnostics().then((snapshot) => {
+        sendResponse(
+          snapshot
+            ? { success: true, snapshot }
+            : { success: false, error: "MAIN-world diagnostics timed out" },
+        );
+      });
+      return true;
     }
   });
 

@@ -6,6 +6,7 @@ const { Script } = require("node:vm");
 const roots = [
   "background.js",
   "content-scripts",
+  "guide",
   "lib",
   "options",
   "popup",
@@ -48,3 +49,4 @@ const compileExtensionPageScripts = (htmlFile) => {
 
 compileExtensionPageScripts(manifest.browser_action.default_popup);
 compileExtensionPageScripts(manifest.options_ui.page);
+compileExtensionPageScripts("guide/guide.html");

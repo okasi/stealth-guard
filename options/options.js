@@ -67,7 +67,17 @@ function populateForm() {
     `${currentConfig.timezone.name}|${currentConfig.timezone.offset}`;
   document.getElementById("useragent-preset").value =
     currentConfig.useragent.preset;
+  document.getElementById("language-preset").value =
+    currentConfig.language.preset;
   document.getElementById("webrtc-policy").value = currentConfig.webrtc.policy;
+  document.getElementById("tracker-enabled").checked =
+    currentConfig.tracker.enabled;
+  document.getElementById("tracker-whitelist").value =
+    currentConfig.tracker.whitelist;
+  document.getElementById("tracker-use-built-in").checked =
+    currentConfig.tracker.useBuiltIn;
+  document.getElementById("tracker-custom-domains").value =
+    currentConfig.tracker.customDomains;
   document.getElementById("proxy-enabled").checked =
     currentConfig.proxy.enabled;
   document.getElementById("proxy-routing-mode").value =
@@ -78,6 +88,8 @@ function populateForm() {
     currentConfig.proxy.syncTimezone;
   document.getElementById("proxy-sync-geolocation").checked =
     currentConfig.proxy.syncGeolocation;
+  document.getElementById("proxy-sync-language").checked =
+    currentConfig.proxy.syncLanguage;
 
   updateUserAgentString();
   populateProxyProfiles();
@@ -277,7 +289,19 @@ function collectForm(options = {}) {
   currentConfig.timezone.offset = Number.parseInt(timezoneOffset, 10);
   currentConfig.useragent.preset =
     document.getElementById("useragent-preset").value;
+  currentConfig.language.preset =
+    document.getElementById("language-preset").value;
   currentConfig.webrtc.policy = document.getElementById("webrtc-policy").value;
+  currentConfig.tracker.enabled =
+    document.getElementById("tracker-enabled").checked;
+  currentConfig.tracker.whitelist =
+    document.getElementById("tracker-whitelist").value;
+  currentConfig.tracker.useBuiltIn = document.getElementById(
+    "tracker-use-built-in",
+  ).checked;
+  currentConfig.tracker.customDomains = document.getElementById(
+    "tracker-custom-domains",
+  ).value;
 
   currentConfig.proxy.enabled =
     document.getElementById("proxy-enabled").checked;
@@ -299,6 +323,8 @@ function collectForm(options = {}) {
   currentConfig.proxy.syncGeolocation = document.getElementById(
     "proxy-sync-geolocation",
   ).checked;
+  currentConfig.proxy.syncLanguage =
+    document.getElementById("proxy-sync-language").checked;
 
   if (
     currentConfig.proxy.enabled &&

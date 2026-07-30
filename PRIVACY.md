@@ -26,6 +26,8 @@ Extension settings and configurations are stored locally in your browser using t
 
 - Your protection preferences (enabled/disabled features)
 - Custom allowlists (domains you've allowlisted)
+- Optional tracker-domain rules stored with your local configuration
+- Per-tab blocked-domain counts kept only in memory
 - Proxy configurations (if configured)
 - Up to 100 recent proxy connection state changes, including timestamps, profile names, verified exit IPs, ownership state, and connection errors
 - Saved per-site session snapshots (cookies, localStorage, and sessionStorage) only when you use the Session Switcher feature
@@ -47,7 +49,7 @@ When using the proxy feature, the extension may query `ipinfo.io` or `ipapi.co` 
 
 When a proxy is enabled or you click Verify Connection, Stealth Guard may request `api.ipify.org` through the effective proxy. The returned exit IP is used to distinguish an applied browser setting from a verified connection and may appear in the local diagnostics history. It is never sent to a Stealth Guard server.
 
-Proxy-synchronized HTML geolocation keeps the website's normal permission flow. After permission succeeds, Stealth Guard replaces the returned coordinates with locally stored, coarse coordinates associated with the effective proxy profile. Proxy endpoints, route tables, and credentials are not exposed to page scripts.
+Proxy-synchronized HTML geolocation keeps the website's normal permission flow. After permission succeeds, Stealth Guard replaces the returned coordinates with locally stored, coarse coordinates associated with the effective proxy profile. Language synchronization uses the locally stored proxy country to choose a matching preset. Proxy endpoints, route tables, and credentials are not exposed to page scripts.
 
 ## Permissions
 
@@ -59,7 +61,7 @@ The extension requests certain browser permissions to function. Here's why each 
 | `cookies`                           | Save and restore per-site sessions locally       |
 | `privacy`                           | Control WebRTC IP handling                       |
 | `proxy`                             | Configure proxy settings                         |
-| `webRequest` / `webRequestBlocking` | Modify HTTP headers for User-Agent spoofing      |
+| `webRequest` / `webRequestBlocking` | Align identity headers and apply optional local tracker rules |
 | `tabs`                              | Validate session targets, broadcast settings, and reload changed tabs |
 | `contextMenus`                      | Provide right-click menu options                 |
 | `notifications`                     | Show optional fingerprint detection alerts       |

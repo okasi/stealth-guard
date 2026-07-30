@@ -1215,6 +1215,101 @@ function installMainWorldProtections(
   const currentHostname = window.location.hostname;
   const isEmptyHostnameFrame = !currentHostname;
 
+  if (config.language && !isEmptyHostnameFrame) {
+    try {
+      const notifyLanguageAccess = createOneTimeAlert("language");
+      let cachedLanguageKey = null;
+      let cachedLanguages = null;
+      const getLanguageIdentity = function () {
+        const identity = config.language.identity || {};
+        const locale = identity.locale || config.language.preset || "en-US";
+        const languages = Array.isArray(identity.languages)
+          ? identity.languages
+          : [locale, locale.split("-")[0]];
+        const cacheKey = `${locale}:${languages.join(",")}`;
+        if (cachedLanguageKey !== cacheKey) {
+          cachedLanguageKey = cacheKey;
+          cachedLanguages = Object.freeze(languages.slice());
+        }
+        return { locale, languages: cachedLanguages };
+      };
+
+      protectGetter(
+        Navigator.prototype,
+        "language",
+        (target, self, args) => {
+          if (!isFeatureActive("language")) {
+            return Reflect.apply(target, self, args);
+          }
+          notifyLanguageAccess();
+          return getLanguageIdentity().locale;
+        },
+        "Navigator.language",
+      );
+      protectGetter(
+        Navigator.prototype,
+        "languages",
+        (target, self, args) => {
+          if (!isFeatureActive("language")) {
+            return Reflect.apply(target, self, args);
+          }
+          notifyLanguageAccess();
+          return getLanguageIdentity().languages;
+        },
+        "Navigator.languages",
+      );
+
+      for (const constructorName of [
+        "Collator",
+        "DateTimeFormat",
+        "DisplayNames",
+        "ListFormat",
+        "NumberFormat",
+        "PluralRules",
+        "RelativeTimeFormat",
+        "Segmenter",
+      ]) {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          Intl,
+          constructorName,
+        );
+        if (!descriptor || typeof descriptor.value !== "function") {
+          continue;
+        }
+        const NativeIntlConstructor = descriptor.value;
+        const withDefaultLanguage = function (args) {
+          if (
+            !isFeatureActive("language") ||
+            (args.length > 0 && args[0] !== undefined)
+          ) {
+            return args;
+          }
+          notifyLanguageAccess();
+          const nextArgs = Array.prototype.slice.call(args);
+          nextArgs[0] = getLanguageIdentity().locale;
+          return nextArgs;
+        };
+        Object.defineProperty(Intl, constructorName, {
+          ...descriptor,
+          value: new Proxy(NativeIntlConstructor, {
+            apply(target, self, args) {
+              return Reflect.apply(target, self, withDefaultLanguage(args));
+            },
+            construct(target, args, newTarget) {
+              return Reflect.construct(
+                target,
+                withDefaultLanguage(args),
+                newTarget,
+              );
+            },
+          }),
+        });
+      }
+    } catch (error) {
+      debugWarn("[Stealth Guard] Language protection failed:", error);
+    }
+  }
+
   if (config.useragent && !isEmptyHostnameFrame) {
     const metadataByPreset = {
       macos: {
@@ -1492,6 +1587,45 @@ function installMainWorldProtections(
     } catch (error) {
       debugWarn("[Stealth Guard] Could not setup WebRTC detection:", error);
     }
+  }
+
+  if (
+    bridge.diagnosticRequestEvent &&
+    bridge.diagnosticResultEvent &&
+    bridge.diagnosticToken
+  ) {
+    window.addEventListener(
+      bridge.diagnosticRequestEvent,
+      function (event) {
+        if (!event || !event.detail || event.detail.token !== bridge.diagnosticToken) {
+          return;
+        }
+        let timeZone = null;
+        let intlLocale = null;
+        try {
+          const resolved = new Intl.DateTimeFormat().resolvedOptions();
+          timeZone = resolved.timeZone || null;
+          intlLocale = resolved.locale || null;
+        } catch (error) {}
+        window.dispatchEvent(
+          new CustomEvent(bridge.diagnosticResultEvent, {
+            detail: {
+              token: bridge.diagnosticToken,
+              snapshot: {
+                hostname: window.location.hostname,
+                userAgent: navigator.userAgent,
+                language: navigator.language,
+                languages: Array.from(navigator.languages || []),
+                intlLocale,
+                timeZone,
+                timezoneOffset: new Date().getTimezoneOffset(),
+              },
+            },
+          }),
+        );
+      },
+      true,
+    );
   }
 }
 

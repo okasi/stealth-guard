@@ -5,6 +5,7 @@ let currentSessions = [];
 let activeSessionId = null;
 let pendingReloadTimeout = null;
 let currentProxyRuntimeStatus = null;
+let currentIdentityDiagnostics = null;
 
 const POPUP_RELOAD_DEBOUNCE_MS = 250;
 
@@ -20,7 +21,11 @@ async function initializePopup() {
     currentSessionHostname = getTabHostname(currentTab);
     renderPopup();
     setupEventListeners();
-    await Promise.all([updateTriggeredFeatures(), refreshSessionList()]);
+    await Promise.all([
+      updateIdentityDiagnostics(),
+      updateTriggeredFeatures(),
+      refreshSessionList(),
+    ]);
   } catch (error) {
     console.error("Failed to initialize popup:", error);
     document.body.textContent =
@@ -39,6 +44,26 @@ async function loadProxyRuntimeStatus() {
     console.warn("Proxy runtime status is unavailable:", error);
     return null;
   }
+}
+
+async function loadIdentityDiagnostics() {
+  try {
+    const response = await sendRuntimeMessage({
+      type: "get-identity-diagnostics",
+      hostname: getTabHostname(currentTab),
+      tabId: currentTab && currentTab.id,
+    });
+    assertRuntimeResponse(response, "Failed to load identity diagnostics");
+    return response.diagnostics;
+  } catch (error) {
+    console.warn("Identity diagnostics are unavailable:", error);
+    return null;
+  }
+}
+
+async function updateIdentityDiagnostics() {
+  currentIdentityDiagnostics = await loadIdentityDiagnostics();
+  renderIdentityDiagnostics();
 }
 
 function queryCurrentTab() {
@@ -97,12 +122,61 @@ function renderPopup() {
     document.getElementById("useragent-quick-select"),
     currentConfig.useragent.preset,
   );
+  setSelectValue(
+    document.getElementById("language-quick-select"),
+    currentConfig.language.preset,
+  );
 
   renderProxyStatus();
+  renderIdentityDiagnostics();
   renderCurrentSite();
   renderAllowlistHighlighting();
   renderSessionDomain();
   renderSessionList();
+}
+
+function renderIdentityDiagnostics() {
+  const diagnostics = currentIdentityDiagnostics;
+  const summary = document.getElementById("identity-summary");
+  const trackerStatus = document.getElementById("tracker-status");
+  if (!diagnostics) {
+    summary.textContent = "Unavailable";
+    trackerStatus.textContent = currentConfig.tracker.enabled
+      ? "Enabled"
+      : "Off";
+    return;
+  }
+
+  summary.textContent = !diagnostics.protectionEnabled
+    ? "Disabled"
+    : diagnostics.globallyAllowlisted
+      ? "Allowlisted"
+      : "Active";
+  document.getElementById("identity-useragent").textContent =
+    diagnostics.userAgent.enabled
+      ? diagnostics.userAgent.preset
+      : "Native";
+  document.getElementById("identity-language").textContent =
+    diagnostics.language.enabled
+      ? `${diagnostics.language.locale} · ${diagnostics.language.source}`
+      : "Native";
+  document.getElementById("identity-timezone").textContent =
+    diagnostics.timezone.enabled
+      ? `${diagnostics.timezone.name} · ${diagnostics.timezone.source}`
+      : "Native";
+  document.getElementById("identity-webrtc").textContent =
+    diagnostics.webrtc.effectivePolicy;
+  document.getElementById("identity-proxy").textContent =
+    diagnostics.proxy.enabled
+      ? `${diagnostics.proxy.state}${diagnostics.proxy.profile ? ` · ${diagnostics.proxy.profile}` : ""}`
+      : "Direct";
+  document.getElementById("identity-tracker").textContent =
+    diagnostics.tracker.enabled
+      ? `${diagnostics.tracker.blockedCount} blocked`
+      : "Off";
+  trackerStatus.textContent = diagnostics.tracker.enabled
+    ? `${diagnostics.tracker.blockedCount} blocked`
+    : "Off";
 }
 
 function renderProxyStatus() {
@@ -333,7 +407,9 @@ async function saveCurrentConfig() {
     });
     assertRuntimeResponse(response, "Failed to save settings");
     currentProxyRuntimeStatus = await loadProxyRuntimeStatus();
+    currentIdentityDiagnostics = await loadIdentityDiagnostics();
     renderProxyStatus();
+    renderIdentityDiagnostics();
     scheduleCurrentTabReload();
   } catch (error) {
     console.error("Failed to save settings:", error);
@@ -398,6 +474,13 @@ function setupEventListeners() {
     });
 
   document
+    .getElementById("language-quick-select")
+    .addEventListener("change", async (event) => {
+      currentConfig.language.preset = event.target.value;
+      await saveCurrentConfig();
+    });
+
+  document
     .getElementById("timezone-quick-select")
     .addEventListener("change", async (event) => {
       const [name, offset] = event.target.value.split("|");
@@ -425,6 +508,15 @@ function setupEventListeners() {
 
   document.getElementById("open-options").addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
+  });
+  document.getElementById("open-guide").addEventListener("click", () => {
+    const guideUrl = chrome.runtime.getURL("guide/guide.html");
+    chrome.tabs.create({
+      url:
+        currentTab && Number.isInteger(currentTab.id)
+          ? `${guideUrl}?tabId=${currentTab.id}`
+          : guideUrl,
+    });
   });
   document.getElementById("test-webrtc").addEventListener("click", () => {
     chrome.tabs.create({ url: "https://dnscheck.tools/" });

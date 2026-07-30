@@ -2,6 +2,7 @@ let currentConfig = null;
 let initializationPromise = null;
 const lastNotificationTime = new Map();
 const triggeredFeaturesPerTab = new Map();
+const trackerActivityPerTab = new Map();
 let lastAppliedWebRTCPolicy = null;
 let webRTCPolicyQueue = Promise.resolve();
 let configMutationQueue = Promise.resolve();
@@ -21,6 +22,7 @@ const MAX_PROXY_CONNECTION_HISTORY = 100;
 let proxyConnectionHistory = [];
 let proxyHistoryInitialized = false;
 let proxyHistoryWriteQueue = Promise.resolve();
+let trackerListener = null;
 
 const NOTIFICATION_THROTTLE_MS = 3770;
 const REPORTED_FEATURES = new Set([
@@ -336,6 +338,111 @@ function markTriggeredFeatureForTab(tabId, hostname, feature) {
   triggeredFeaturesPerTab.get(tabId).features.add(feature);
 }
 
+function getRequestContextHostname(details) {
+  for (const candidate of [
+    details && details.initiator,
+    details && details.documentUrl,
+    details && details.originUrl,
+  ]) {
+    const hostname = getHostnameFromUrl(candidate);
+    if (hostname) {
+      return hostname;
+    }
+  }
+  return null;
+}
+
+function isSameSiteHostname(left, right) {
+  const first = normalizeHostname(left);
+  const second = normalizeHostname(right);
+  return Boolean(
+    first &&
+      second &&
+      (first === second ||
+        first.endsWith(`.${second}`) ||
+        second.endsWith(`.${first}`)),
+  );
+}
+
+function markTrackerBlocked(tabId, pageHostname, requestHostname) {
+  if (typeof tabId !== "number" || tabId < 0 || !pageHostname) {
+    return;
+  }
+  const current = trackerActivityPerTab.get(tabId);
+  if (!current || current.hostname !== pageHostname) {
+    trackerActivityPerTab.set(tabId, {
+      hostname: pageHostname,
+      count: 0,
+      domains: new Set(),
+    });
+  }
+  const activity = trackerActivityPerTab.get(tabId);
+  activity.count += 1;
+  if (activity.domains.size < 50) {
+    activity.domains.add(requestHostname);
+  }
+  markTriggeredFeatureForTab(tabId, pageHostname, "tracker");
+}
+
+function applyTrackerBlocking(config) {
+  if (trackerListener) {
+    chrome.webRequest.onBeforeRequest.removeListener(trackerListener);
+    trackerListener = null;
+  }
+
+  if (!config.enabled || !config.tracker.enabled) {
+    return;
+  }
+  if (!chrome.webRequest.onBeforeRequest) {
+    throw new Error("Tracker blocking is unavailable in this browser");
+  }
+
+  const patterns = [
+    ...(config.tracker.useBuiltIn ? BUILTIN_TRACKER_DOMAINS : []),
+    ...parseDomainPatterns(config.tracker.customDomains),
+  ].join(",");
+  if (!patterns) {
+    return;
+  }
+
+  trackerListener = function (details) {
+    const requestHostname = getHostnameFromUrl(details && details.url);
+    const pageHostname = getRequestContextHostname(details);
+    if (
+      !requestHostname ||
+      !pageHostname ||
+      isSameSiteHostname(requestHostname, pageHostname) ||
+      !isFeatureActiveForHostname(config, "tracker", pageHostname) ||
+      !isDomainAllowlisted(requestHostname, patterns)
+    ) {
+      return {};
+    }
+
+    markTrackerBlocked(details.tabId, pageHostname, requestHostname);
+    return { cancel: true };
+  };
+
+  chrome.webRequest.onBeforeRequest.addListener(
+    trackerListener,
+    {
+      urls: ["<all_urls>"],
+      types: [
+        "font",
+        "image",
+        "media",
+        "object",
+        "other",
+        "ping",
+        "script",
+        "stylesheet",
+        "sub_frame",
+        "xmlhttprequest",
+      ],
+    },
+    ["blocking"],
+  );
+}
+
 function queryTabs(queryInfo) {
   return new Promise((resolve) => {
     chrome.tabs.query(queryInfo, (tabs) => {
@@ -397,6 +504,7 @@ async function broadcastConfigUpdated(config) {
 
 async function applyCurrentConfig(config) {
   await applyUserAgentSpoofing(config);
+  applyTrackerBlocking(config);
   await applyWebRTCPolicy(config);
   await applyProxyPolicy(config);
   currentConfig = config;
@@ -493,47 +601,81 @@ async function applyUserAgentSpoofing(configOverride) {
     uaListener = null;
   }
 
-  if (!config.enabled || !config.useragent.enabled) {
+  if (
+    !config.enabled ||
+    (!config.useragent.enabled && !config.language.enabled)
+  ) {
     return;
   }
 
-  const userAgent = getUserAgentString(config.useragent.preset);
-  if (!userAgent) {
+  const userAgent = config.useragent.enabled
+    ? getUserAgentString(config.useragent.preset)
+    : null;
+  if (config.useragent.enabled && !userAgent) {
     throw new Error(`Invalid User-Agent preset: ${config.useragent.preset}`);
   }
-  const clientHintHeaders = getUserAgentClientHintHeaders(
-    config.useragent.preset,
-    userAgent,
-  );
+  const clientHintHeaders = userAgent
+    ? getUserAgentClientHintHeaders(config.useragent.preset, userAgent)
+    : null;
+  const languageCache = new Map();
 
   uaListener = function (details) {
     const requestHeaders = details.requestHeaders || [];
     const hostname = getHostnameFromUrl(details.url);
+    const userAgentActive = Boolean(
+      hostname && isFeatureActiveForHostname(config, "useragent", hostname),
+    );
+    const languageActive = Boolean(
+      hostname && isFeatureActiveForHostname(config, "language", hostname),
+    );
     if (
       !hostname ||
       isCloudflareChallengeHostname(hostname) ||
-      !isFeatureActiveForHostname(config, "useragent", hostname)
+      (!userAgentActive && !languageActive)
     ) {
       return { requestHeaders };
     }
 
-    const header = requestHeaders.find(
-      (entry) => entry.name.toLowerCase() === "user-agent",
-    );
-    if (header) {
-      header.value = userAgent;
-    } else {
-      requestHeaders.push({ name: "User-Agent", value: userAgent });
-    }
-    for (let index = requestHeaders.length - 1; index >= 0; index--) {
-      const requestHeader = requestHeaders[index];
-      const name = requestHeader.name.toLowerCase();
-      if (!name.startsWith("sec-ch-ua")) continue;
-      const spoofedValue = clientHintHeaders && clientHintHeaders[name];
-      if (spoofedValue === undefined || spoofedValue === null) {
-        requestHeaders.splice(index, 1);
+    if (userAgentActive) {
+      const header = requestHeaders.find(
+        (entry) => entry.name.toLowerCase() === "user-agent",
+      );
+      if (header) {
+        header.value = userAgent;
       } else {
-        requestHeader.value = spoofedValue;
+        requestHeaders.push({ name: "User-Agent", value: userAgent });
+      }
+      for (let index = requestHeaders.length - 1; index >= 0; index--) {
+        const requestHeader = requestHeaders[index];
+        const name = requestHeader.name.toLowerCase();
+        if (!name.startsWith("sec-ch-ua")) continue;
+        const spoofedValue = clientHintHeaders && clientHintHeaders[name];
+        if (spoofedValue === undefined || spoofedValue === null) {
+          requestHeaders.splice(index, 1);
+        } else {
+          requestHeader.value = spoofedValue;
+        }
+      }
+    }
+
+    if (languageActive) {
+      if (!languageCache.has(hostname)) {
+        if (languageCache.size >= 256) {
+          languageCache.delete(languageCache.keys().next().value);
+        }
+        languageCache.set(hostname, resolveLanguageIdentity(config, hostname));
+      }
+      const identity = languageCache.get(hostname);
+      const header = requestHeaders.find(
+        (entry) => entry.name.toLowerCase() === "accept-language",
+      );
+      if (header) {
+        header.value = identity.acceptLanguage;
+      } else {
+        requestHeaders.push({
+          name: "Accept-Language",
+          value: identity.acceptLanguage,
+        });
       }
     }
     return { requestHeaders };
@@ -601,17 +743,25 @@ async function applyWebRTCPolicy(configOverride) {
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "loading") {
+    trackerActivityPerTab.delete(tabId);
+  }
   if (changeInfo.url) {
     const newHostname = getHostnameFromUrl(changeInfo.url);
     const tabData = triggeredFeaturesPerTab.get(tabId);
     if (!newHostname || (tabData && tabData.hostname !== newHostname)) {
       triggeredFeaturesPerTab.delete(tabId);
     }
+    const trackerData = trackerActivityPerTab.get(tabId);
+    if (!newHostname || (trackerData && trackerData.hostname !== newHostname)) {
+      trackerActivityPerTab.delete(tabId);
+    }
   }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   triggeredFeaturesPerTab.delete(tabId);
+  trackerActivityPerTab.delete(tabId);
 });
 
 function handleFingerprintDetectedMessage(request, sender) {
@@ -642,7 +792,7 @@ function handleFingerprintDetectedMessage(request, sender) {
 }
 
 async function handleGetConfigMessage() {
-  return { config: await getConfig() };
+  return { config: cloneConfig(await getConfig()) };
 }
 
 function serializeConfigValue(value) {
@@ -671,6 +821,12 @@ function getConfigChangeFlags(previousConfig, nextConfig) {
   return {
     userAgentChanged:
       didConfigSectionChange(previousConfig, nextConfig, "useragent") ||
+      didConfigSectionChange(previousConfig, nextConfig, "language") ||
+      didConfigSectionChange(previousConfig, nextConfig, "proxy") ||
+      globalWhitelistChanged ||
+      globalEnabledChanged,
+    trackerChanged:
+      didConfigSectionChange(previousConfig, nextConfig, "tracker") ||
       globalWhitelistChanged ||
       globalEnabledChanged,
     webrtcChanged:
@@ -686,6 +842,10 @@ function getConfigChangeFlags(previousConfig, nextConfig) {
 async function applyConfigChanges(changeFlags, config) {
   if (changeFlags.userAgentChanged) {
     await applyUserAgentSpoofing(config);
+  }
+
+  if (changeFlags.trackerChanged) {
+    applyTrackerBlocking(config);
   }
 
   if (changeFlags.webrtcChanged) {
@@ -806,8 +966,13 @@ function handleResetConfigMessage() {
 
 function handleGetTriggeredFeaturesMessage(request) {
   const tabData = triggeredFeaturesPerTab.get(request.tabId);
+  const trackerData = trackerActivityPerTab.get(request.tabId);
   return {
     features: tabData && tabData.features ? Array.from(tabData.features) : [],
+    tracker: {
+      count: trackerData ? trackerData.count : 0,
+      domains: trackerData ? Array.from(trackerData.domains) : [],
+    },
   };
 }
 
@@ -819,8 +984,9 @@ async function handlePrepareProxyProfileMessage(request) {
 }
 
 function assertExtensionPageSender(sender) {
-  if (sender && sender.tab) {
-    throw new Error("Proxy credentials are available only to extension pages");
+  const senderUrl = sender && typeof sender.url === "string" ? sender.url : "";
+  if (sender && sender.tab && !senderUrl.startsWith(chrome.runtime.getURL(""))) {
+    throw new Error("This request is available only to extension pages");
   }
 }
 
@@ -861,6 +1027,121 @@ async function handleClearProxyCredentialsMessage(request, sender) {
 function handleGetProxyRuntimeStatusMessage(request, sender) {
   assertExtensionPageSender(sender);
   return { success: true, status: { ...proxyRuntimeStatus } };
+}
+
+async function handleGetIdentityDiagnosticsMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  const config = await getConfig();
+  const hostname = normalizeHostname(request && request.hostname);
+  const tabId = Number(request && request.tabId);
+  const vpnLocation = resolveContentVpnLocation(config, hostname);
+  const languageIdentity = resolveLanguageIdentity(config, hostname);
+  const trackerData = Number.isInteger(tabId)
+    ? trackerActivityPerTab.get(tabId)
+    : null;
+  const triggeredData = Number.isInteger(tabId)
+    ? triggeredFeaturesPerTab.get(tabId)
+    : null;
+  const activeForSite = (featureName) =>
+    hostname
+      ? isFeatureActiveForHostname(config, featureName, hostname)
+      : Boolean(config.enabled && config[featureName].enabled);
+  const effectiveWebRtc = await getWebRTCPolicySetting();
+  const timezoneFromProxy = Boolean(
+    vpnLocation && vpnLocation.syncTimezone && vpnLocation.timezone,
+  );
+  const geolocationFromProxy = Boolean(
+    vpnLocation &&
+      vpnLocation.syncGeolocation &&
+      Number.isFinite(vpnLocation.latitude) &&
+      Number.isFinite(vpnLocation.longitude),
+  );
+
+  return {
+    success: true,
+    diagnostics: {
+      generatedAt: Date.now(),
+      hostname: hostname || null,
+      protectionEnabled: config.enabled,
+      globallyAllowlisted: Boolean(
+        hostname && isDomainAllowlisted(hostname, config.globalWhitelist),
+      ),
+      userAgent: {
+        enabled: activeForSite("useragent"),
+        preset: config.useragent.preset,
+        value: getUserAgentString(config.useragent.preset),
+      },
+      language: {
+        enabled: activeForSite("language"),
+        preset: config.language.preset,
+        ...languageIdentity,
+      },
+      timezone: {
+        enabled: activeForSite("timezone"),
+        name: timezoneFromProxy
+          ? vpnLocation.timezone
+          : config.timezone.name,
+        offset: config.timezone.offset,
+        source: timezoneFromProxy ? "proxy" : "preset",
+      },
+      geolocation: {
+        enabled: activeForSite("geolocation"),
+        synchronized: geolocationFromProxy,
+        coordinates: geolocationFromProxy
+          ? {
+              latitude: vpnLocation.latitude,
+              longitude: vpnLocation.longitude,
+            }
+          : null,
+      },
+      webrtc: {
+        enabled: Boolean(config.enabled && config.webrtc.enabled),
+        requestedPolicy:
+          config.enabled && config.webrtc.enabled
+            ? config.webrtc.policy
+            : "default",
+        effectivePolicy: effectiveWebRtc.value || "unknown",
+        controlLevel: effectiveWebRtc.levelOfControl || "unknown",
+      },
+      proxy: {
+        enabled: Boolean(config.enabled && config.proxy.enabled),
+        state: proxyRuntimeStatus.state,
+        profile: proxyRuntimeStatus.profile,
+        exitIp: proxyRuntimeStatus.exitIp,
+        location: vpnLocation
+          ? {
+              city: vpnLocation.city,
+              country: vpnLocation.country,
+              countryCode: vpnLocation.countryCode,
+            }
+          : null,
+      },
+      tracker: {
+        enabled: activeForSite("tracker"),
+        builtInRules: config.tracker.useBuiltIn
+          ? BUILTIN_TRACKER_DOMAINS.length
+          : 0,
+        customRules: parseDomainPatterns(
+          config.tracker.customDomains,
+        ).length,
+        blockedCount:
+          trackerData &&
+          (!hostname || isSameSiteHostname(trackerData.hostname, hostname))
+            ? trackerData.count
+            : 0,
+        blockedDomains:
+          trackerData &&
+          (!hostname || isSameSiteHostname(trackerData.hostname, hostname))
+            ? Array.from(trackerData.domains)
+            : [],
+      },
+      triggeredFeatures:
+        triggeredData &&
+        (!hostname || isSameSiteHostname(triggeredData.hostname, hostname))
+          ? Array.from(triggeredData.features)
+          : [],
+    },
+  };
 }
 
 async function handleVerifyProxyConnectionMessage(request, sender) {
@@ -941,6 +1222,7 @@ const messageHandlers = {
   "set-proxy-credentials": handleSetProxyCredentialsMessage,
   "clear-proxy-credentials": handleClearProxyCredentialsMessage,
   "get-proxy-runtime-status": handleGetProxyRuntimeStatusMessage,
+  "get-identity-diagnostics": handleGetIdentityDiagnosticsMessage,
   "verify-proxy-connection": handleVerifyProxyConnectionMessage,
   "get-proxy-diagnostics": handleGetProxyDiagnosticsMessage,
   "clear-proxy-history": handleClearProxyHistoryMessage,
@@ -1097,7 +1379,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       );
       reloadTabAfterAllowlistChange(tab.id);
     } else if (info.menuItemId === "test-protection") {
-      chrome.tabs.create({ url: "https://browserleaks.com/" });
+      chrome.tabs.create({
+        url: `${chrome.runtime.getURL("guide/guide.html")}?tabId=${tab.id}`,
+      });
     }
   } catch (e) {
     debugError("Context menu error:", e);

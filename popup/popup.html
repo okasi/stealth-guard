@@ -55,6 +55,21 @@
         </button>
       </div>
 
+      <details class="identity-diagnostics" open>
+        <summary>
+          <span>Identity diagnostics</span>
+          <span id="identity-summary">Loading…</span>
+        </summary>
+        <div class="identity-grid">
+          <div><strong>User-Agent</strong><span id="identity-useragent">—</span></div>
+          <div><strong>Language</strong><span id="identity-language">—</span></div>
+          <div><strong>Timezone</strong><span id="identity-timezone">—</span></div>
+          <div><strong>WebRTC</strong><span id="identity-webrtc">—</span></div>
+          <div><strong>Proxy</strong><span id="identity-proxy">—</span></div>
+          <div><strong>Trackers</strong><span id="identity-tracker">—</span></div>
+        </div>
+      </details>
+
       <div class="features">
         <div
           class="feature-row"
@@ -72,6 +87,27 @@
               id="proxy-enabled"
               data-feature-toggle="proxy"
               aria-label="Enable proxy protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="tracker"
+          data-section="tracker-section"
+        >
+          <div class="feature-icon">🛑</div>
+          <div class="feature-name">Trackers</div>
+          <div class="proxy-info">
+            <span id="tracker-status">Off</span>
+          </div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="tracker-enabled"
+              data-feature-toggle="tracker"
+              aria-label="Enable tracker blocking"
             />
             <span class="slider"></span>
           </label>
@@ -101,6 +137,44 @@
               id="useragent-enabled"
               data-feature-toggle="useragent"
               aria-label="Enable User-Agent protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="language"
+          data-section="language-section"
+        >
+          <div class="feature-icon">🗣️</div>
+          <div class="feature-name">Language</div>
+          <select
+            id="language-quick-select"
+            class="feature-select"
+            aria-label="Language and locale preset"
+          >
+            <option value="en-US">English (United States)</option>
+            <option value="en-GB">English (United Kingdom)</option>
+            <option value="fr-FR">Français (France)</option>
+            <option value="de-DE">Deutsch (Deutschland)</option>
+            <option value="es-ES">Español (España)</option>
+            <option value="it-IT">Italiano (Italia)</option>
+            <option value="pt-BR">Português (Brasil)</option>
+            <option value="sv-SE">Svenska (Sverige)</option>
+            <option value="tr-TR">Türkçe (Türkiye)</option>
+            <option value="ar-AE">العربية (الإمارات)</option>
+            <option value="id-ID">Bahasa Indonesia</option>
+            <option value="zh-CN">中文（中国）</option>
+            <option value="ja-JP">日本語（日本）</option>
+            <option value="ko-KR">한국어 (대한민국)</option>
+          </select>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="language-enabled"
+              data-feature-toggle="language"
+              aria-label="Enable language and locale protection"
             />
             <span class="slider"></span>
           </label>
@@ -311,6 +385,10 @@
         <button id="open-options" class="btn-secondary">
           <span class="btn-icon-inline" aria-hidden="true">⚙️</span>
           <span>Advanced Settings</span>
+        </button>
+        <button id="open-guide" class="btn-secondary">
+          <span class="btn-icon-inline" aria-hidden="true">🧭</span>
+          <span>Guide &amp; Self-Test</span>
         </button>
         <button id="test-webrtc" class="btn-secondary">
           <span class="btn-icon-inline" aria-hidden="true">🧪</span>

@@ -12,6 +12,7 @@ const { DEFAULT_CONFIG } = require("../lib/config.js");
 const root = resolve(import.meta.dirname, "..");
 const chromeCandidates = [
   process.env.CHROME_PATH,
+  chromium.executablePath(),
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/usr/bin/google-chrome",
   "/usr/bin/google-chrome-stable",
@@ -23,7 +24,7 @@ function findChrome() {
   const executablePath = chromeCandidates.find(existsSync);
   if (!executablePath) {
     throw new Error(
-      "Chrome or Chromium was not found. Set CHROME_PATH to run end-to-end tests.",
+      "Chrome or Chromium was not found. Install Playwright Chromium or set CHROME_PATH.",
     );
   }
   return executablePath;
@@ -62,6 +63,18 @@ function protectionInitScript(config) {
         "userAgent",
       ).get;
       window.__sgNativeUserAgent = nativeUserAgentGetter.call(navigator);
+      const nativeLanguageDescriptor = Object.getOwnPropertyDescriptor(
+        Navigator.prototype,
+        "language",
+      );
+      const nativeLanguagesDescriptor = Object.getOwnPropertyDescriptor(
+        Navigator.prototype,
+        "languages",
+      );
+      window.__sgNativeLanguage = nativeLanguageDescriptor.get.call(navigator);
+      window.__sgNativeLanguages = Array.from(
+        nativeLanguagesDescriptor.get.call(navigator),
+      );
       window.__sgNativeCanvasToBlob = HTMLCanvasElement.prototype.toBlob;
       window.__sgNativeCanvasToDataURL = HTMLCanvasElement.prototype.toDataURL;
       window.__sgNativeGetImageData = CanvasRenderingContext2D.prototype.getImageData;
@@ -94,6 +107,8 @@ function protectionInitScript(config) {
       };
       window.__sgNativeDescriptors = {
         userAgent: Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent"),
+        language: nativeLanguageDescriptor,
+        languages: nativeLanguagesDescriptor,
         hardwareConcurrency: Object.getOwnPropertyDescriptor(
           Navigator.prototype,
           "hardwareConcurrency",
@@ -346,7 +361,63 @@ function uiMockInitScript(config, options = {}) {
           return { success: true };
         }
         if (message.type === "get-triggered-features") {
-          return { features: ["canvas", "user-agent"] };
+          return {
+            features: ["canvas", "user-agent"],
+            tracker: { count: 0, domains: [] },
+          };
+        }
+        if (message.type === "get-identity-diagnostics") {
+          return {
+            success: true,
+            diagnostics: {
+              protectionEnabled: state.config.enabled,
+              globallyAllowlisted: false,
+              userAgent: {
+                enabled: state.config.useragent.enabled,
+                preset: state.config.useragent.preset,
+                value: "Protected test agent",
+              },
+              language: {
+                enabled: state.config.language.enabled,
+                preset: state.config.language.preset,
+                locale: state.config.language.preset,
+                languages: [state.config.language.preset, "en"],
+                acceptLanguage: state.config.language.preset + ",en;q=0.8",
+                source: "preset",
+              },
+              timezone: {
+                enabled: state.config.timezone.enabled,
+                name: state.config.timezone.name,
+                source: "preset",
+              },
+              geolocation: {
+                enabled: state.config.geolocation.enabled,
+                synchronized: false,
+                coordinates: null,
+              },
+              webrtc: {
+                enabled: state.config.webrtc.enabled,
+                requestedPolicy: state.config.webrtc.policy,
+                effectivePolicy: state.config.webrtc.policy,
+                controlLevel: "controlled_by_this_extension",
+              },
+              proxy: {
+                enabled: state.config.proxy.enabled,
+                state: state.proxyStatus.state,
+                profile: state.proxyStatus.profile,
+                exitIp: state.proxyStatus.exitIp,
+                location: null,
+              },
+              tracker: {
+                enabled: state.config.tracker.enabled,
+                builtInRules: state.config.tracker.useBuiltIn ? 15 : 0,
+                customRules: state.config.tracker.customDomains ? 1 : 0,
+                blockedCount: 0,
+                blockedDomains: [],
+              },
+              triggeredFeatures: ["canvas", "user-agent"],
+            },
+          };
         }
         if (message.type === "add-to-whitelist") {
           state.config.globalWhitelist = "*." + message.domain;
@@ -459,6 +530,13 @@ function uiMockInitScript(config, options = {}) {
                 : [],
             );
           },
+          get(tabId, callback) {
+            callback(
+              mockOptions.tabUrl
+                ? { id: tabId, url: mockOptions.tabUrl, active: true }
+                : null,
+            );
+          },
           reload(tabId, options, callback) {
             if (typeof options === "function") callback = options;
             state.reloads++;
@@ -470,6 +548,25 @@ function uiMockInitScript(config, options = {}) {
           },
           create(details) {
             state.createdTabs.push(details);
+          },
+          sendMessage(tabId, message, options, callback) {
+            if (typeof options === "function") callback = options;
+            callback(
+              message.type === "run-self-test"
+                ? {
+                    success: true,
+                    snapshot: {
+                      hostname: "www.example.com",
+                      userAgent: "Protected test agent",
+                      language: state.config.language.preset,
+                      languages: [state.config.language.preset, "en"],
+                      intlLocale: state.config.language.preset,
+                      timeZone: state.config.timezone.name,
+                      timezoneOffset: state.config.timezone.offset,
+                    },
+                  }
+                : { success: false, error: "Unsupported tab message" },
+            );
           },
         },
       };
@@ -753,6 +850,12 @@ async function exerciseProtections(page) {
       analyser.getByteTimeDomainData(byteTimeDomain);
 
       const userAgent = navigator.userAgent;
+      const language = navigator.language;
+      const languages = Array.from(navigator.languages);
+      const intlLocale = new Intl.NumberFormat().resolvedOptions().locale;
+      const explicitIntlLocale = new Intl.NumberFormat("de-DE")
+        .resolvedOptions()
+        .locale;
       const navigatorValues = {
         platform: navigator.platform,
         appVersion: navigator.appVersion,
@@ -839,11 +942,17 @@ async function exerciseProtections(page) {
         nativeByteTimeDomain: Array.from(nativeByteTimeDomain.slice(0, 2)),
         byteTimeDomain: Array.from(byteTimeDomain.slice(0, 2)),
         userAgent,
+        language,
+        languages,
+        intlLocale,
+        explicitIntlLocale,
         navigatorValues,
         nativeUserAgent: window.__sgNativeUserAgent,
         derivedPeerWorks,
         descriptorsPreserved: [
           ["userAgent", Navigator.prototype, "userAgent"],
+          ["language", Navigator.prototype, "language"],
+          ["languages", Navigator.prototype, "languages"],
           [
             "hardwareConcurrency",
             Navigator.prototype,
@@ -892,15 +1001,23 @@ async function testProtectionRuntime(browser, port) {
     "webgl",
     "font",
     "timezone",
+    "language",
     "clientrects",
     "webgpu",
     "audiocontext",
     "user-agent",
     "webrtc",
   ]) {
-    assert(features.has(feature), `Missing browser-level ${feature} alert`);
+    assert(
+      features.has(feature),
+      `Missing browser-level ${feature} alert; received: ${[...features].join(", ")}`,
+    );
   }
   assert.notEqual(result.userAgent, result.nativeUserAgent);
+  assert.equal(result.language, DEFAULT_CONFIG.language.preset);
+  assert.deepEqual(result.languages, [DEFAULT_CONFIG.language.preset, "en"]);
+  assert.equal(result.intlLocale, DEFAULT_CONFIG.language.preset);
+  assert.equal(result.explicitIntlLocale, "de-DE");
   assert.deepEqual(result.nativeCanvasData, [10, 20, 30, 255]);
   assert.deepEqual(result.canvasData, [11, 21, 31, 255]);
   assert.notEqual(result.protectedDataUrl, result.nativeDataUrl);
@@ -998,6 +1115,34 @@ async function testProtectionRuntime(browser, port) {
   assert(result.descriptorsPreserved);
   assert(!features.has("forged"));
 
+  const selfTest = await page.evaluate(
+    () =>
+      new Promise((resolvePromise, rejectPromise) => {
+        const listener = window.__sgRuntimeListeners.at(-1);
+        const timeout = setTimeout(
+          () => rejectPromise(new Error("Self-test response timed out")),
+          1500,
+        );
+        const keepOpen = listener(
+          { type: "run-self-test" },
+          {},
+          (response) => {
+            clearTimeout(timeout);
+            resolvePromise(response);
+          },
+        );
+        if (keepOpen !== true) {
+          clearTimeout(timeout);
+          rejectPromise(new Error("Self-test message channel closed"));
+        }
+      }),
+  );
+  assert.equal(selfTest.success, true);
+  assert.equal(selfTest.snapshot.hostname, "site.test");
+  assert.equal(selfTest.snapshot.language, DEFAULT_CONFIG.language.preset);
+  assert.equal(selfTest.snapshot.intlLocale, DEFAULT_CONFIG.language.preset);
+  assert.equal(selfTest.snapshot.timeZone, "Europe/Paris");
+
   const secondPage = await context.newPage();
   await secondPage.goto(`http://site.test:${port}/`);
   await secondPage.waitForFunction(() => window.__sgHarnessReady === true);
@@ -1055,12 +1200,16 @@ async function testProtectionRuntime(browser, port) {
         : null,
       offset: new Date("2026-01-15T12:00:00Z").getTimezoneOffset(),
       timezone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
+      language: navigator.language,
+      languages: Array.from(navigator.languages),
+      intlLocale: new Intl.NumberFormat().resolvedOptions().locale,
       webglRenderer: gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL),
       webglVersion: gl.getParameter(gl.VERSION),
     };
   }, {
     ...DEFAULT_CONFIG,
     useragent: { ...DEFAULT_CONFIG.useragent, preset: "android" },
+    language: { ...DEFAULT_CONFIG.language, preset: "ja-JP" },
     timezone: {
       ...DEFAULT_CONFIG.timezone,
       name: "Asia/Tokyo",
@@ -1112,6 +1261,9 @@ async function testProtectionRuntime(browser, port) {
   }
   assert.equal(updatedRuntime.offset, -540);
   assert.equal(updatedRuntime.timezone, "Asia/Tokyo");
+  assert.equal(updatedRuntime.language, "ja-JP");
+  assert.deepEqual(updatedRuntime.languages, ["ja-JP", "ja", "en"]);
+  assert.equal(updatedRuntime.intlLocale, "ja-JP");
   assert(updatedRuntime.webglRenderer.includes("Adreno (TM) 640"));
   assert(updatedRuntime.webglVersion.includes("Chromium"));
 
@@ -1129,6 +1281,10 @@ async function testProtectionRuntime(browser, port) {
       return {
         userAgent: navigator.userAgent,
         nativeUserAgent: window.__sgNativeUserAgent,
+        language: navigator.language,
+        nativeLanguage: window.__sgNativeLanguage,
+        languages: Array.from(navigator.languages),
+        nativeLanguages: window.__sgNativeLanguages,
         webglVendor: gl.getParameter(gl.VENDOR),
         nativeWebglVendor: window.__sgNativeWebGL.getParameter.call(
           gl,
@@ -1140,6 +1296,8 @@ async function testProtectionRuntime(browser, port) {
     { ...DEFAULT_CONFIG, enabled: false },
   );
   assert.equal(disabledState.userAgent, disabledState.nativeUserAgent);
+  assert.equal(disabledState.language, disabledState.nativeLanguage);
+  assert.deepEqual(disabledState.languages, disabledState.nativeLanguages);
   assert.equal(disabledState.webglVendor, disabledState.nativeWebglVendor);
   assert.equal(disabledState.reportCount, beforeDisable);
 
@@ -1295,11 +1453,17 @@ async function testAllowlistAndChallengeFrames(browser, port) {
   await challengeContext.addInitScript({
     content: protectionInitScript(DEFAULT_CONFIG),
   });
+  await challengeContext.route("https://challenges.cloudflare.com/**", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>`,
+    }),
+  );
   const challengePage = await challengeContext.newPage();
   challengePage.on("pageerror", (error) =>
     console.error("Challenge page error:", error),
   );
-  await challengePage.goto(`http://challenges.cloudflare.com:${port}/`);
+  await challengePage.goto("https://challenges.cloudflare.com/");
   await challengePage.waitForTimeout(25);
   const challenge = await challengePage.evaluate(() => ({
     userAgent: navigator.userAgent,
@@ -1317,6 +1481,7 @@ async function testPopup(browser) {
   const page = await context.newPage();
   await page.goto(pathToFileURL(join(root, "popup/popup.html")).href);
   await page.waitForSelector("#current-url:text-is('example.com')");
+  await page.waitForSelector("#identity-summary:text-is('Active')");
   await page.screenshot({ path: join(tmpdir(), "stealth-guard-popup.png") });
 
   await page.evaluate(() => {
@@ -1345,7 +1510,9 @@ async function testPopup(browser) {
     await page.evaluate(() =>
       [
         "proxy",
+        "tracker",
         "useragent",
+        "language",
         "timezone",
         "geolocation",
         "webrtc",
@@ -1362,11 +1529,13 @@ async function testPopup(browser) {
 
   await page.selectOption("#webgl-quick-select", "apple");
   await page.selectOption("#useragent-quick-select", "android");
+  await page.selectOption("#language-quick-select", "sv-SE");
   await page.selectOption("#timezone-quick-select", "Asia/Tokyo|540");
   await page.waitForFunction(
     () =>
       window.__chromeState.config.webgl.preset === "apple" &&
       window.__chromeState.config.useragent.preset === "android" &&
+      window.__chromeState.config.language.preset === "sv-SE" &&
       window.__chromeState.config.timezone.name === "Asia/Tokyo",
   );
 
@@ -1383,6 +1552,7 @@ async function testPopup(browser) {
 
   await page.click('[data-feature="canvas"] .feature-name');
   await page.click("#open-options");
+  await page.click("#open-guide");
   await page.click("#test-webrtc");
   assert.equal(
     await page.evaluate(() => window.__chromeState.openedOptions),
@@ -1390,7 +1560,14 @@ async function testPopup(browser) {
   );
   assert.equal(
     await page.evaluate(() => window.__chromeState.createdTabs.length),
-    2,
+    3,
+  );
+  assert(
+    await page.evaluate(() =>
+      window.__chromeState.createdTabs.some(
+        (entry) => entry.url === "guide/guide.html?tabId=1",
+      ),
+    ),
   );
 
   await page.fill("#session-name-input", "Work");
@@ -1440,14 +1617,22 @@ async function testOptions(browser) {
   await page.uncheck("#global-enabled");
   await page.fill("#canvas-whitelist", "*.custom.test");
   await page.selectOption("#canvas-noise-level", "high");
+  await page.selectOption("#language-preset", "sv-SE");
+  await page.check("#tracker-enabled");
+  await page.uncheck("#tracker-use-built-in");
+  await page.fill("#tracker-custom-domains", "*.metrics.test");
   await page.waitForTimeout(1100);
   assert.deepEqual(
     await page.evaluate(() => [
       window.__chromeState.config.enabled,
       window.__chromeState.config.canvas.whitelist,
       window.__chromeState.config.canvas.noiseLevel,
+      window.__chromeState.config.language.preset,
+      window.__chromeState.config.tracker.enabled,
+      window.__chromeState.config.tracker.useBuiltIn,
+      window.__chromeState.config.tracker.customDomains,
     ]),
-    [false, "*.custom.test", "high"],
+    [false, "*.custom.test", "high", "sv-SE", true, false, "*.metrics.test"],
   );
   await page.check("#global-enabled");
 
@@ -1531,6 +1716,7 @@ async function testOptions(browser) {
   assert(await page.isDisabled("#proxy-bypass-list"));
   await page.uncheck("#proxy-sync-timezone");
   await page.uncheck("#proxy-sync-geolocation");
+  await page.uncheck("#proxy-sync-language");
   await page.click("#save-settings");
   assert.deepEqual(
     await page.evaluate(() => window.__chromeState.config.proxy.fallbackProfiles),
@@ -1545,8 +1731,9 @@ async function testOptions(browser) {
       window.__chromeState.config.proxy.routingMode,
       window.__chromeState.config.proxy.syncTimezone,
       window.__chromeState.config.proxy.syncGeolocation,
+      window.__chromeState.config.proxy.syncLanguage,
     ]),
-    ["protect-selected", false, false],
+    ["protect-selected", false, false, false],
   );
   await backupCard.getByRole("button", { name: "Remove" }).click();
   await page.waitForFunction(
@@ -1565,6 +1752,7 @@ async function testOptions(browser) {
   await page.selectOption("#proxy-routing-mode", "bypass-selected");
   await page.check("#proxy-sync-timezone");
   await page.check("#proxy-sync-geolocation");
+  await page.check("#proxy-sync-language");
   await page.check("#proxy-enabled");
   await page.click("#save-settings");
   assert(await page.evaluate(() => window.__chromeState.reloads > 0));
@@ -1668,6 +1856,28 @@ async function testOptions(browser) {
   await context.close();
 }
 
+async function testGuide(browser) {
+  const context = await browser.newContext();
+  await context.addInitScript({ content: uiMockInitScript(DEFAULT_CONFIG) });
+  const page = await context.newPage();
+  const guideUrl = pathToFileURL(join(root, "guide/guide.html"));
+  guideUrl.searchParams.set("tabId", "1");
+  await page.goto(guideUrl.href);
+  await page.waitForSelector("#test-summary[data-state='success']");
+  assert.match(await page.textContent("#test-summary"), /passed/i);
+  assert.equal(await page.textContent("#result-language"), "en-US · en-US, en");
+  assert.equal(
+    await page.textContent("#result-webrtc"),
+    `${DEFAULT_CONFIG.webrtc.policy} · controlled_by_this_extension`,
+  );
+  assert.equal(
+    await page.getAttribute("a.reference", "href"),
+    "https://creepjs.org/checker#scan",
+  );
+  assert.equal(await page.locator(".benchmark-grid > a").count(), 7);
+  await context.close();
+}
+
 async function testUiInitializationFailures(browser) {
   const initScript = uiMockInitScript(DEFAULT_CONFIG, {
     failMessages: { "get-config": "Background unavailable" },
@@ -1735,6 +1945,7 @@ async function main() {
     args: [
       `--host-resolver-rules=MAP site.test 127.0.0.1, MAP challenges.cloudflare.com 127.0.0.1`,
       "--enable-webgl",
+      "--enable-unsafe-swiftshader",
       "--use-angle=swiftshader",
     ],
   });
@@ -1744,6 +1955,7 @@ async function main() {
     await testAllowlistAndChallengeFrames(browser, server.port);
     await testPopup(browser);
     await testOptions(browser);
+    await testGuide(browser);
     await testUiInitializationFailures(browser);
     await testAuxiliaryVpnApiFailures(browser);
     console.log("End-to-end browser checks passed");
@@ -1755,5 +1967,12 @@ async function main() {
 
 main().catch((error) => {
   console.error(error);
+  if (process.env.GITHUB_ACTIONS === "true") {
+    const message = String((error && (error.stack || error.message)) || error)
+      .replace(/%/g, "%25")
+      .replace(/\r/g, "%0D")
+      .replace(/\n/g, "%0A");
+    console.error(`::error title=End-to-end browser checks failed::${message}`);
+  }
   process.exitCode = 1;
 });

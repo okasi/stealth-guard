@@ -62,6 +62,7 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
     onMessage: createEvent(),
     onUpdated: createEvent(),
     onRemoved: createEvent(),
+    onBeforeRequest: createEvent(),
     onBeforeSendHeaders: createEvent(),
     onAuthRequired: createEvent(),
     onCompleted: createEvent(),
@@ -91,6 +92,9 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
       lastError: null,
       onInstalled: events.onInstalled,
       onMessage: events.onMessage,
+      getURL(path) {
+        return `chrome-extension://test/${path}`;
+      },
     },
     storage: {
       local: {
@@ -123,6 +127,7 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
       },
     },
     webRequest: {
+      onBeforeRequest: events.onBeforeRequest,
       onBeforeSendHeaders: events.onBeforeSendHeaders,
       onAuthRequired: events.onAuthRequired,
       onCompleted: events.onCompleted,
@@ -323,10 +328,19 @@ test("background initializes policies and applies config changes atomically", as
     url: tab.url,
     requestHeaders: existingHeaders,
   });
-  expect(replaced.requestHeaders).toHaveLength(1);
-  expect(replaced.requestHeaders[0].value).toBe(
+  expect(replaced.requestHeaders).toHaveLength(2);
+  expect(
+    replaced.requestHeaders.find(
+      (header) => header.name.toLowerCase() === "user-agent",
+    ).value,
+  ).toBe(
     getUserAgentString(initial.config.useragent.preset),
   );
+  expect(
+    replaced.requestHeaders.find(
+      (header) => header.name.toLowerCase() === "accept-language",
+    ).value,
+  ).toBe("en-US,en;q=0.9");
   const challengeHeaders = [{ name: "Accept", value: "*/*" }];
   expect(
     events.onBeforeSendHeaders.listeners[0]({
@@ -395,6 +409,7 @@ test("User-Agent policy keeps existing client-hint headers consistent", async ()
 
   const safariConfig = structuredClone(current);
   safariConfig.useragent.preset = "macos";
+  safariConfig.language.preset = "sv-SE";
   expect(
     await sendMessage({ type: "update-config", config: safariConfig }),
   ).toEqual({ success: true });
@@ -404,6 +419,7 @@ test("User-Agent policy keeps existing client-hint headers consistent", async ()
       { name: "User-Agent", value: "native" },
       { name: "Sec-CH-UA", value: '"Chromium";v="999"' },
       { name: "Sec-CH-UA-Platform", value: '"Linux"' },
+      { name: "accept-language", value: "native" },
     ],
   }).requestHeaders;
   expect(safariHeaders).toEqual([
@@ -411,7 +427,129 @@ test("User-Agent policy keeps existing client-hint headers consistent", async ()
       name: "User-Agent",
       value: expect.stringContaining("Version/17.6 Safari/605.1.15"),
     },
+    { name: "accept-language", value: "sv-SE,sv;q=0.9,en;q=0.8" },
   ]);
+
+  safariConfig.useragent.enabled = false;
+  expect(
+    await sendMessage({ type: "update-config", config: safariConfig }),
+  ).toEqual({ success: true });
+  const languageOnly = events.onBeforeSendHeaders.listeners[0]({
+    url: tab.url,
+    requestHeaders: [{ name: "User-Agent", value: "native" }],
+  }).requestHeaders;
+  expect(languageOnly).toEqual([
+    { name: "User-Agent", value: "native" },
+    { name: "Accept-Language", value: "sv-SE,sv;q=0.9,en;q=0.8" },
+  ]);
+
+  safariConfig.language.enabled = false;
+  expect(
+    await sendMessage({ type: "update-config", config: safariConfig }),
+  ).toEqual({ success: true });
+  expect(events.onBeforeSendHeaders.listeners).toHaveLength(0);
+});
+
+test("background blocks configured third-party trackers and reports identity diagnostics", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.enabled = true;
+  config.tracker.customDomains = "metrics.test";
+  const { events, sendMessage, tab } = await installBackground(config);
+
+  expect(events.onBeforeRequest.listeners).toHaveLength(1);
+  const blockRequest = events.onBeforeRequest.listeners[0];
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      url: "https://www.google-analytics.com/collect",
+      initiator: tab.url,
+    }),
+  ).toEqual({ cancel: true });
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      url: "https://metrics.test/pixel",
+      documentUrl: tab.url,
+    }),
+  ).toEqual({ cancel: true });
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      url: "https://metrics.test/pixel",
+      originUrl: tab.url,
+    }),
+  ).toEqual({ cancel: true });
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      url: "https://example.com/app.js",
+      initiator: tab.url,
+    }),
+  ).toEqual({});
+  expect(blockRequest({ tabId: tab.id, url: "not a url" })).toEqual({});
+
+  const activity = await sendMessage({
+    type: "get-triggered-features",
+    tabId: tab.id,
+  });
+  expect(activity.features).toEqual(["tracker"]);
+  expect(activity.tracker).toEqual({
+    count: 3,
+    domains: ["www.google-analytics.com", "metrics.test"],
+  });
+
+  const diagnostics = await sendMessage({
+    type: "get-identity-diagnostics",
+    hostname: "example.com",
+    tabId: tab.id,
+  });
+  expect(diagnostics.diagnostics).toMatchObject({
+    hostname: "example.com",
+    protectionEnabled: true,
+    globallyAllowlisted: false,
+    userAgent: { enabled: true },
+    language: { enabled: true, locale: "en-US", source: "preset" },
+    timezone: { enabled: true, source: "preset" },
+    geolocation: { enabled: true, synchronized: false, coordinates: null },
+    webrtc: { effectivePolicy: "disable_non_proxied_udp" },
+    proxy: { enabled: false, state: "idle", location: null },
+    tracker: {
+      enabled: true,
+      customRules: 1,
+      blockedCount: 3,
+      blockedDomains: ["www.google-analytics.com", "metrics.test"],
+    },
+    triggeredFeatures: ["tracker"],
+  });
+  expect(
+    await sendMessage(
+      { type: "get-identity-diagnostics", hostname: "example.com" },
+      { tab },
+    ),
+  ).toMatchObject({ success: false });
+  expect(
+    await sendMessage(
+      { type: "get-identity-diagnostics", hostname: "example.com" },
+      {
+        tab: { id: 9, url: "chrome-extension://test/guide/guide.html" },
+        url: "chrome-extension://test/guide/guide.html",
+      },
+    ),
+  ).toMatchObject({ success: true });
+
+  events.onUpdated.listeners[0](tab.id, { status: "loading" });
+  expect(
+    (await sendMessage({ type: "get-triggered-features", tabId: tab.id }))
+      .tracker.count,
+  ).toBe(0);
+
+  const current = (await sendMessage({ type: "get-config" })).config;
+  current.tracker.useBuiltIn = false;
+  current.tracker.customDomains = "";
+  expect(
+    await sendMessage({ type: "update-config", config: current }),
+  ).toEqual({ success: true });
+  expect(events.onBeforeRequest.listeners).toHaveLength(0);
 });
 
 test("background tracks fingerprint access and manages global allowlists", async () => {
@@ -843,7 +981,9 @@ test("background handles install, context-menu, proxy, and unknown events", asyn
     "",
   );
   await clickContextMenu({ menuItemId: "test-protection" }, tab);
-  expect(state.createdTabs.at(-1).url).toBe("https://browserleaks.com/");
+  expect(state.createdTabs.at(-1).url).toBe(
+    "chrome-extension://test/guide/guide.html?tabId=7",
+  );
 
   const notificationCount = state.notifications.length;
   events.onProxyError.listeners[0]({ fatal: true, error: "offline" });

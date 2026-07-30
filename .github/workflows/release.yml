@@ -25,6 +25,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install Chromium
+        run: npx playwright-core install --with-deps chromium
+
       - name: Run quality gate
         run: npm run check
 
@@ -40,7 +43,7 @@ jobs:
 
       - name: Package extension
         run: |
-          zip -r stealth-guard.zip manifest.json background.js content-scripts icons lib options popup README.md LICENSE PRIVACY.md CHANGELOG.md
+          zip -r stealth-guard.zip manifest.json background.js content-scripts guide icons lib options popup README.md BENCHMARKS.md LICENSE PRIVACY.md CHANGELOG.md
 
       - name: Create Release
         uses: softprops/action-gh-release@v3

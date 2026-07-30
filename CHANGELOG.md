@@ -7,6 +7,9 @@ All notable changes are documented here. This project follows [Semantic Versioni
 ### Added
 
 - OffscreenCanvas read/export protection, WebGL debug-extension monitoring, expanded Web Audio readout noise, and coherent Navigator hardware/client-hint profiles informed by public anti-bot detector coverage.
+- Language and locale alignment across Navigator, default Intl constructors, Accept-Language, and optional proxy-country synchronization.
+- Optional local third-party tracker blocking with bundled and user-defined domain rules plus per-tab counts.
+- A local Guide & Self-Test page with live identity diagnostics and the repeatable detector suite; CreepJS remains the recurring reference benchmark.
 - Explicit protect-all, bypass-selected, and protect-selected split-tunneling modes with per-site PAC routing.
 - Proxy-location synchronized timezone and permission-preserving coarse HTML geolocation protection.
 - Local proxy diagnostics with effective-setting details and a bounded, exportable, clearable 100-event connection history.
@@ -26,6 +29,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - Expanded `npm run check` across startup recovery, rollback, browser hooks, every protection surface, and popup/options success and failure flows.
 - Configuration loads, saves, and imports now normalize malformed values to the safe schema.
 - Popup and options surfaces have improved focus visibility, responsive styling, and assistive-technology labels.
+- Popup diagnostics now summarize effective User-Agent, language, timezone, WebRTC, proxy, and tracker state for the current site.
 - Session operations verify the target tab before mutating cookies or web storage.
 
 ### Fixed

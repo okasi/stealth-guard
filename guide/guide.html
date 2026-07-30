@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stealth Guard Guide &amp; Self-Test</title>
+    <link rel="stylesheet" href="guide.css" />
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Stealth Guard</p>
+          <h1>Guide &amp; Self-Test</h1>
+          <p>
+            Compare the identity Stealth Guard intends to present with the live
+            values visible inside a protected page.
+          </p>
+        </div>
+        <img src="../icons/128.png" alt="" width="80" height="80" />
+      </header>
+
+      <section class="card" aria-labelledby="self-test-title">
+        <div class="section-heading">
+          <div>
+            <h2 id="self-test-title">Current-page self-test</h2>
+            <p id="test-summary" role="status">Choose a web page to begin.</p>
+          </div>
+          <button id="run-test" type="button">Run self-test</button>
+        </div>
+        <label for="target-tab">Protected page</label>
+        <select id="target-tab"></select>
+        <div class="identity-grid">
+          <div><strong>User-Agent</strong><span id="result-useragent">—</span></div>
+          <div><strong>Language</strong><span id="result-language">—</span></div>
+          <div><strong>Intl locale</strong><span id="result-intl">—</span></div>
+          <div><strong>Timezone</strong><span id="result-timezone">—</span></div>
+          <div><strong>WebRTC policy</strong><span id="result-webrtc">—</span></div>
+          <div><strong>Proxy</strong><span id="result-proxy">—</span></div>
+          <div><strong>Trackers</strong><span id="result-trackers">—</span></div>
+          <div><strong>Triggered</strong><span id="result-triggered">—</span></div>
+        </div>
+        <p class="note">
+          This test stays inside the extension and the selected tab. A mismatch
+          is a diagnostic signal, not proof that a site can identify you.
+        </p>
+      </section>
+
+      <section class="card" aria-labelledby="benchmarks-title">
+        <h2 id="benchmarks-title">Manual detector suite</h2>
+        <p>
+          Establish a disabled baseline in the same clean Opera profile, then
+          enable Stealth Guard, clear site data, and repeat. Record detailed
+          inconsistencies instead of relying on one pass/fail score.
+        </p>
+        <div class="benchmark-grid">
+          <a class="reference" href="https://creepjs.org/checker#scan" target="_blank" rel="noreferrer">
+            <strong>CreepJS Checker</strong>
+            <span>Recurring reference benchmark</span>
+          </a>
+          <a href="https://bot.sannysoft.com/" target="_blank" rel="noreferrer"><strong>Sannysoft</strong><span>Automation signals</span></a>
+          <a href="https://bot-detector.rebrowser.net/" target="_blank" rel="noreferrer"><strong>Rebrowser</strong><span>Bot detector</span></a>
+          <a href="https://scrapfly.io/web-scraping-tools/automation-detector" target="_blank" rel="noreferrer"><strong>Scrapfly</strong><span>Automation detector</span></a>
+          <a href="https://deviceandbrowserinfo.com/are_you_a_bot" target="_blank" rel="noreferrer"><strong>Device &amp; Browser Info</strong><span>Bot checks</span></a>
+          <a href="https://www.apivoid.com/tools/bot-detection-test/" target="_blank" rel="noreferrer"><strong>APIVoid</strong><span>Bot detection test</span></a>
+          <a href="https://infosimples.github.io/detect-headless/" target="_blank" rel="noreferrer"><strong>Infosimples</strong><span>Headless checks</span></a>
+        </div>
+        <p class="note">
+          The full procedure and result template are in
+          <a href="../BENCHMARKS.md" target="_blank">BENCHMARKS.md</a>.
+        </p>
+      </section>
+    </main>
+    <script src="../lib/runtime.js"></script>
+    <script src="guide.js"></script>
+  </body>
+</html>

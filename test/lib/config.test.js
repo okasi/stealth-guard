@@ -60,6 +60,8 @@ test("getDefaultUserAgentPreset maps platform and browser combinations", () => {
 
 test("User-Agent and content config helpers expose only trusted runtime data", () => {
   const {
+    BUILTIN_TRACKER_DOMAINS,
+    LANGUAGE_PRESETS,
     PROTECTION_FEATURES,
     USER_AGENT_CLIENT_HINTS,
     USER_AGENT_STRINGS,
@@ -86,6 +88,9 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
 
   expect(PROTECTION_FEATURES).toContain("canvas");
   expect(PROTECTION_FEATURES).toContain("geolocation");
+  expect(PROTECTION_FEATURES).toContain("language");
+  expect(BUILTIN_TRACKER_DOMAINS).toContain("*.google-analytics.com");
+  expect(LANGUAGE_PRESETS["en-US"].acceptLanguage).toBe("en-US,en;q=0.9");
   expect(getUserAgentString("macos")).toBe(USER_AGENT_STRINGS.macos);
   expect(getUserAgentString("missing")).toBeNull();
   expect(USER_AGENT_CLIENT_HINTS.android).toMatchObject({
@@ -98,6 +103,12 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
   expect(contentConfig.canvas.enabled).toBe(false);
   expect(contentConfig.proxy).toBeUndefined();
   expect(contentConfig.vpnLocation).toBeNull();
+  expect(contentConfig.language.identity).toEqual({
+    locale: "en-US",
+    languages: ["en-US", "en"],
+    acceptLanguage: "en-US,en;q=0.9",
+    source: "preset",
+  });
   expect(contentConfig.unknown).toBeUndefined();
   expect(cloned.canvas.enabled).toBe(true);
   expect(contentConfig.canvas.enabled).toBe(false);
@@ -123,6 +134,7 @@ test("content config resolves only coarse effective proxy location data", () => 
       domainRoutes: [{ pattern: "*.video.test", profile: "Video" }],
       syncTimezone: true,
       syncGeolocation: true,
+      syncLanguage: true,
       profiles: [
         {
           name: "Main",
@@ -162,6 +174,7 @@ test("content config resolves only coarse effective proxy location data", () => 
     timezone: "Europe/Paris",
     syncTimezone: true,
     syncGeolocation: true,
+    syncLanguage: true,
     latitude: 48.86,
     longitude: 2.35,
   });
@@ -215,12 +228,15 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
       routingMode: "invalid",
       syncTimezone: "yes",
       syncGeolocation: null,
+      syncLanguage: "yes",
       activeProfile: "  Main  ",
       profiles: {},
       domainRoutes: null,
       bypassList: "localhost",
     },
     useragent: { enabled: 1, whitelist: [], preset: "unknown" },
+    language: { enabled: 1, whitelist: [], preset: "unknown" },
+    tracker: { enabled: 1, whitelist: [], useBuiltIn: "yes", customDomains: [] },
     timezone: { enabled: null, whitelist: false, offset: 9999, name: "  " },
     webrtc: { policy: "invalid" },
     canvas: { noiseLevel: "extreme" },
@@ -274,6 +290,7 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
     routingMode: "bypass-selected",
     syncTimezone: true,
     syncGeolocation: true,
+    syncLanguage: true,
     activeProfile: "Main",
     profiles: [],
     domainRoutes: [],
@@ -284,6 +301,8 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
     whitelist: "",
     preset: DEFAULT_CONFIG.useragent.preset,
   });
+  expect(normalized.language).toEqual(DEFAULT_CONFIG.language);
+  expect(normalized.tracker).toEqual(DEFAULT_CONFIG.tracker);
   expect(normalized.timezone).toMatchObject({
     enabled: true,
     whitelist: DEFAULT_CONFIG.timezone.whitelist,
@@ -345,12 +364,20 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
     useragent: { preset: "iphone" },
     webgl: { preset: "apple" },
     canvas: { noiseLevel: "high" },
+    language: { preset: "sv-SE" },
+    tracker: {
+      enabled: true,
+      whitelist: "trusted.metrics.test",
+      useBuiltIn: false,
+      customDomains: `*.metrics.test,${"x".repeat(20000)}`,
+    },
     webrtc: { policy: "default_public_interface_only" },
     timezone: { offset: "-840", name: `  ${longValue}  ` },
     proxy: {
       routingMode: "protect-all",
       syncTimezone: false,
       syncGeolocation: false,
+      syncLanguage: false,
       activeProfile: `  ${longValue}  `,
       fallbackProfiles: [" Backup ", "", 7, ...Array(12).fill("Extra")],
       profiles: [],
@@ -364,6 +391,13 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
   expect(normalized.useragent.preset).toBe("iphone");
   expect(normalized.webgl.preset).toBe("apple");
   expect(normalized.canvas.noiseLevel).toBe("high");
+  expect(normalized.language.preset).toBe("sv-SE");
+  expect(normalized.tracker).toMatchObject({
+    enabled: true,
+    whitelist: "trusted.metrics.test",
+    useBuiltIn: false,
+  });
+  expect(normalized.tracker.customDomains).toHaveLength(16384);
   expect(normalized.webrtc.policy).toBe("default_public_interface_only");
   expect(normalized.timezone.offset).toBe(-840);
   expect(normalized.timezone.name).toBe(longValue.slice(0, 128));
@@ -371,10 +405,63 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
   expect(normalized.proxy.routingMode).toBe("protect-all");
   expect(normalized.proxy.syncTimezone).toBe(false);
   expect(normalized.proxy.syncGeolocation).toBe(false);
+  expect(normalized.proxy.syncLanguage).toBe(false);
   expect(normalized.proxy.fallbackProfiles).toEqual([
     "Backup",
     ...Array(9).fill("Extra"),
   ]);
+});
+
+test("language identities stay internally consistent and can follow proxy countries", () => {
+  const { getLanguagePreset, resolveLanguageIdentity } = loadConfigModule();
+  const preset = getLanguagePreset("fr-FR");
+  preset.languages.push("mutated");
+
+  expect(getLanguagePreset("fr-FR")).toEqual({
+    locale: "fr-FR",
+    languages: ["fr-FR", "fr", "en"],
+    acceptLanguage: "fr-FR,fr;q=0.9,en;q=0.8",
+  });
+  expect(getLanguagePreset("missing")).toBeNull();
+  expect(
+    resolveLanguageIdentity({ language: { preset: "sv-SE" } }),
+  ).toEqual({
+    locale: "sv-SE",
+    languages: ["sv-SE", "sv", "en"],
+    acceptLanguage: "sv-SE,sv;q=0.9,en;q=0.8",
+    source: "preset",
+  });
+
+  const routed = {
+    enabled: true,
+    language: { preset: "en-US" },
+    proxy: {
+      enabled: true,
+      routingMode: "protect-all",
+      activeProfile: "Paris",
+      profiles: [
+        {
+          name: "Paris",
+          host: "proxy.test",
+          port: 443,
+          scheme: "https",
+          location: { countryCode: "FR" },
+        },
+      ],
+      domainRoutes: [],
+      bypassList: [],
+      syncLanguage: true,
+    },
+  };
+  expect(resolveLanguageIdentity(routed, "site.test")).toMatchObject({
+    locale: "fr-FR",
+    source: "proxy",
+  });
+  routed.proxy.syncLanguage = false;
+  expect(resolveLanguageIdentity(routed, "site.test")).toMatchObject({
+    locale: "en-US",
+    source: "preset",
+  });
 });
 
 test("legacy route-only proxy settings migrate to protect-selected mode", () => {

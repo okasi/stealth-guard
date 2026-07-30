@@ -125,6 +125,63 @@ button {
   white-space: nowrap;
 }
 
+.identity-diagnostics {
+  border-bottom: 1px solid var(--border);
+  background: #fbfcfe;
+}
+
+.identity-diagnostics summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+#identity-summary {
+  color: var(--success);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.identity-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+
+.identity-grid > div {
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.identity-grid strong,
+.identity-grid span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identity-grid strong {
+  color: var(--muted);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.identity-grid span {
+  margin-top: 2px;
+  font-size: 10px;
+}
+
 .btn-site {
   flex: 0 0 auto;
   padding: 7px 10px;
@@ -220,6 +277,10 @@ button {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+#tracker-status {
+  color: var(--muted);
 }
 
 #proxy-status[data-state="active"] {

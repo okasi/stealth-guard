@@ -62,6 +62,9 @@
               <button id="import-config" class="btn-secondary">
                 📥 Import
               </button>
+              <a class="button-link btn-secondary" href="../guide/guide.html">
+                🧭 Guide &amp; Self-Test
+              </a>
               <input
                 type="file"
                 id="import-file"
@@ -155,6 +158,10 @@
             <label class="checkbox-inline">
               <input type="checkbox" id="proxy-sync-geolocation" />
               Match HTML geolocation to coarse proxy coordinates
+            </label>
+            <label class="checkbox-inline">
+              <input type="checkbox" id="proxy-sync-language" />
+              Match language and locale to the proxy country
             </label>
             <small
               >Synchronization is applied per site and only when its selected
@@ -348,6 +355,47 @@
           </div>
         </section>
 
+        <section class="card" id="tracker-section">
+          <h2><span>🛑 Tracker Blocking</span></h2>
+          <p class="section-desc">
+            Block third-party requests to locally configured tracker domains.
+            No blocklists are downloaded automatically.
+          </p>
+          <div class="field checkbox">
+            <label>
+              <input type="checkbox" id="tracker-enabled" />
+              Enable third-party tracker blocking
+            </label>
+          </div>
+          <div class="field">
+            <label for="tracker-whitelist"
+              >Per-Feature Allowlist (comma-separated domains)</label
+            >
+            <textarea id="tracker-whitelist" rows="2"></textarea>
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input type="checkbox" id="tracker-use-built-in" />
+              Use the bundled, locally stored tracker domain set
+            </label>
+          </div>
+          <div class="field">
+            <label for="tracker-custom-domains"
+              >Custom Tracker Domains (comma-separated patterns)</label
+            >
+            <textarea
+              id="tracker-custom-domains"
+              rows="4"
+              maxlength="16384"
+              placeholder="*.analytics.example, metrics.example"
+            ></textarea>
+            <small
+              >Uses the same wildcard semantics as Stealth Guard allowlists.
+              Invalid patterns are ignored and the value is capped at 16 KB.</small
+            >
+          </div>
+        </section>
+
         <section class="card" id="useragent-section">
           <h2>
             <span>🌐 User-Agent Spoofing</span
@@ -396,6 +444,49 @@
             <small
               >This is the user-agent string that will be used for the selected
               preset.</small
+            >
+          </div>
+        </section>
+
+        <section class="card" id="language-section">
+          <h2><span>🗣️ Language &amp; Locale Alignment</span></h2>
+          <p class="section-desc">
+            Keep navigator.language, navigator.languages, default Intl locale,
+            and the HTTP Accept-Language header consistent.
+          </p>
+          <div class="field checkbox">
+            <label>
+              <input type="checkbox" id="language-enabled" />
+              Enable language and locale alignment
+            </label>
+          </div>
+          <div class="field">
+            <label for="language-whitelist"
+              >Per-Feature Allowlist (comma-separated domains)</label
+            >
+            <textarea id="language-whitelist" rows="2"></textarea>
+          </div>
+          <div class="field">
+            <label for="language-preset">Language and Locale</label>
+            <select id="language-preset">
+              <option value="en-US">English (United States)</option>
+              <option value="en-GB">English (United Kingdom)</option>
+              <option value="fr-FR">Français (France)</option>
+              <option value="de-DE">Deutsch (Deutschland)</option>
+              <option value="es-ES">Español (España)</option>
+              <option value="it-IT">Italiano (Italia)</option>
+              <option value="pt-BR">Português (Brasil)</option>
+              <option value="sv-SE">Svenska (Sverige)</option>
+              <option value="tr-TR">Türkçe (Türkiye)</option>
+              <option value="ar-AE">العربية (الإمارات)</option>
+              <option value="id-ID">Bahasa Indonesia</option>
+              <option value="zh-CN">中文（中国）</option>
+              <option value="ja-JP">日本語（日本）</option>
+              <option value="ko-KR">한국어 (대한민국)</option>
+            </select>
+            <small
+              >When proxy-country synchronization is active, a supported proxy
+              country overrides this preset for routed sites.</small
             >
           </div>
         </section>

@@ -10,7 +10,7 @@
 
 </div>
 
-Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts, AudioContext, ClientRects, WebGPU, timezone, geolocation, User-Agent, and WebRTC surfaces. Settings, bounded proxy connection history, and optional saved site sessions stay in local extension storage; there is no telemetry or analytics.
+Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts, AudioContext, ClientRects, WebGPU, timezone, language, geolocation, User-Agent, and WebRTC surfaces. Settings, tracker rules, bounded proxy connection history, and optional saved site sessions stay in local extension storage; there is no telemetry or analytics.
 
 > [!IMPORTANT]
 > Stealth Guard currently uses Manifest V2. Standard Google Chrome releases have disabled MV2, and most Chromium forks followed upstream. Opera is the primary current target because it still supports existing MV2 extensions. See [Browser compatibility](#-browser-compatibility) before installing.
@@ -31,6 +31,7 @@ Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts
 | ------------------- | ------------------------------------------------------------------------------------- |
 | **🌍 Proxy**        | Masks your IP address by routing traffic through SOCKS4/5 or HTTP/HTTPS proxy servers |
 | **🌐 User-Agent**   | Keeps HTTP/JavaScript UA, client hints, touch, CPU, and memory claims aligned          |
+| **🗣️ Language**    | Aligns Navigator, default Intl locale, and the HTTP Accept-Language header             |
 | **🕐 Timezone**     | Spoofs timezone information (configurable, default: UTC+1)                            |
 | **📍 Geolocation**  | Replaces permitted HTML geolocation results with coarse proxy-location coordinates   |
 | **📡 WebRTC**       | Prevents IP address leaks through WebRTC connections                                  |
@@ -40,6 +41,7 @@ Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts
 | **🔊 AudioContext** | Injects noise into buffer copies and float/byte analyser readouts                      |
 | **🕹️ WebGL**       | Hides GPU identity and protects extension, capability, pixel, and export probes        |
 | **🎮 WebGPU**       | Spoofs WebGPU adapter limits and buffer operations                                    |
+| **🛑 Trackers**     | Optionally blocks third-party requests to bundled or custom local tracker rules       |
 
 ### 🚀 Additional Features
 
@@ -48,6 +50,7 @@ Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts
 - **🗺️ Split Tunneling** - Choose protect-all, bypass-selected, or protect-selected behavior with deterministic PAC-based per-site routes
 - **📍 Location Synchronization** - Match timezone and permission-approved HTML geolocation to each site's effective proxy profile
 - **📊 Local Diagnostics** - Inspect, export, or clear a bounded 100-event proxy connection history without exposing passwords
+- **🧭 Identity Self-Test** - Compare configured identity policy with live protected-page values and open the repeatable detector suite
 - **✅ Global & Per-Feature Allowlists** - Allow sites globally or per protection feature
 - **🎯 Wildcard Domain Patterns** - Support for `*.example.com` and `webmail.*` patterns
 - **☁️ Cloudflare Challenge Compatibility** - Leaves Cloudflare-owned challenge frames unmodified without granting the embedding page a UA bypass
@@ -74,6 +77,7 @@ Click the Stealth Guard icon in your browser toolbar to:
 - Toggle protection on/off globally
 - Enable/disable individual protection features
 - Select User-Agent presets (macOS Safari, Chrome, Windows Edge, iPhone, Android)
+- Select language/locale presets and view identity diagnostics
 - Choose timezone presets
 - View proxy status
 - See which protections were triggered on the current page
@@ -86,6 +90,7 @@ Open **Advanced Settings** from the popup to access:
 - Proxy profile management
 - Proxy profiles, credentials, fallback order, and split-tunneling modes
 - Proxy-location timezone/geolocation synchronization
+- Proxy-country language synchronization and local tracker rules
 - Connection diagnostics and local history
 - WebGL presets (Apple, Pixel 4, Surface Pro 7)
 - Export/import configuration
@@ -93,7 +98,7 @@ Open **Advanced Settings** from the popup to access:
 
 ### 🖱️ Context Menu
 
-Right-click on any webpage to quickly add or remove the current domain from the global allowlist.
+Right-click on any webpage to quickly add or remove the current domain from the global allowlist, or open the local Guide & Self-Test for that tab.
 
 ## 🔧 Configuration
 
@@ -171,10 +176,10 @@ The content script installs wrappers immediately at `document_start` with embedd
 ### 📁 Architecture
 
 ```
-background.js              → Runtime orchestrator (config, UA headers, WebRTC, proxy, messages)
+background.js              → Runtime orchestrator (config, headers, trackers, WebRTC, proxy, messages)
     ↓
 content-scripts/
-  injector.js              → Isolated bootstrap, trusted config updates, authenticated alerts
+  injector.js              → Isolated bootstrap, trusted config updates, alerts, diagnostics
   main.js                  → Testable MAIN-world browser API protections
     ↓
 lib/
@@ -201,7 +206,7 @@ This extension intentionally remains on **Manifest V2** because its persistent b
 | `cookies`                           | Save and restore per-site login sessions                                           |
 | `privacy`                           | Control WebRTC IP handling policy                                                  |
 | `proxy`                             | Configure SOCKS5/HTTP proxy                                                        |
-| `webRequest` / `webRequestBlocking` | Modify User-Agent headers                                                          |
+| `webRequest` / `webRequestBlocking` | Align identity headers and optionally block locally matched tracker requests        |
 | `tabs`                              | Identify active tabs, reload updated tabs, and track per-tab protection state      |
 | `contextMenus`                      | Right-click menu integration                                                       |
 | `notifications`                     | Fingerprint detection alerts                                                       |
