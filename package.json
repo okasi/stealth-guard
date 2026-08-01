@@ -32,7 +32,7 @@
   },
   "devDependencies": {
     "@vitest/coverage-v8": "4.1.10",
-    "playwright-core": "1.61.1",
+    "playwright-core": "1.62.0",
     "vitest": "4.1.10"
   }
 }
