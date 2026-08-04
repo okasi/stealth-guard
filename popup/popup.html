@@ -55,20 +55,17 @@
         </button>
       </div>
 
-      <details class="identity-diagnostics" open>
-        <summary>
-          <span>Identity diagnostics</span>
-          <span id="identity-summary">Loading…</span>
-        </summary>
-        <div class="identity-grid">
-          <div><strong>User-Agent</strong><span id="identity-useragent">—</span></div>
-          <div><strong>Language</strong><span id="identity-language">—</span></div>
-          <div><strong>Timezone</strong><span id="identity-timezone">—</span></div>
-          <div><strong>WebRTC</strong><span id="identity-webrtc">—</span></div>
-          <div><strong>Proxy</strong><span id="identity-proxy">—</span></div>
-          <div><strong>Trackers</strong><span id="identity-tracker">—</span></div>
-        </div>
-      </details>
+      <div class="adblock-site-actions" aria-label="Current site ad blocking controls">
+        <button id="toggle-adblock-site" class="btn-secondary" disabled>
+          Pause ads on this site
+        </button>
+        <button id="toggle-cosmetic-site" class="btn-secondary" disabled>
+          Show hidden items
+        </button>
+        <button id="block-element" class="btn-secondary" disabled>
+          Block an element
+        </button>
+      </div>
 
       <div class="features">
         <div
@@ -92,25 +89,52 @@
           </label>
         </div>
 
-        <div
-          class="feature-row"
-          data-feature="tracker"
-          data-section="tracker-section"
-        >
-          <div class="feature-icon">🛑</div>
-          <div class="feature-name">Trackers</div>
-          <div class="proxy-info">
-            <span id="tracker-status">Off</span>
+        <div class="tracker-feature">
+          <div
+            class="feature-row"
+            data-feature="tracker"
+            data-section="tracker-section"
+          >
+            <div class="feature-icon">🛑</div>
+            <div class="feature-name">Ads &amp; trackers</div>
+            <div class="proxy-info">
+              <span id="tracker-status">Off</span>
+            </div>
+            <button
+              type="button"
+              id="tracker-details-toggle"
+              class="tracker-details-toggle"
+              aria-expanded="false"
+              aria-controls="tracker-blocked-panel"
+              aria-label="Show blocked ads and trackers"
+            >
+              <span aria-hidden="true"></span>
+            </button>
+            <label class="switch">
+              <input
+                type="checkbox"
+                id="tracker-enabled"
+                data-feature-toggle="tracker"
+                aria-label="Enable tracker blocking"
+              />
+              <span class="slider"></span>
+            </label>
           </div>
-          <label class="switch">
-            <input
-              type="checkbox"
-              id="tracker-enabled"
-              data-feature-toggle="tracker"
-              aria-label="Enable tracker blocking"
-            />
-            <span class="slider"></span>
-          </label>
+          <div
+            id="tracker-blocked-panel"
+            class="tracker-blocked-panel"
+            aria-label="Blocked ads and trackers"
+            hidden
+          >
+            <div class="tracker-blocked-heading">
+              <strong>Blocked on this page</strong>
+              <span id="tracker-blocked-summary">0 requests</span>
+            </div>
+            <p id="tracker-blocked-empty" class="tracker-blocked-empty">
+              Nothing blocked on this page yet.
+            </p>
+            <ul id="tracker-blocked-list" class="tracker-blocked-list"></ul>
+          </div>
         </div>
 
         <div
@@ -192,18 +216,18 @@
             class="feature-select"
             aria-label="Timezone preset"
           >
-            <option value="America/Los_Angeles|-480">PST/Pacific (-8)</option>
-            <option value="America/Denver|-420">MST/Mountain (-7)</option>
-            <option value="America/Chicago|-360">CST/Central (-6)</option>
-            <option value="America/New_York|-300">EST/Eastern (-5)</option>
-            <option value="Europe/London|0">GMT/London (+0)</option>
-            <option value="Europe/Paris|60">CET/Paris (+1)</option>
-            <option value="Europe/Athens|120">EET/Athens (+2)</option>
-            <option value="Europe/Istanbul|180">TRT/Istanbul (+3)</option>
-            <option value="Asia/Dubai|240">GST/Dubai (+4)</option>
-            <option value="Asia/Jakarta|420">WIB/Jakarta (+7)</option>
-            <option value="Asia/Shanghai|480">China/Shanghai (+8)</option>
-            <option value="Asia/Tokyo|540">JST/Tokyo (+9)</option>
+            <option value="America/Los_Angeles">Pacific</option>
+            <option value="America/Denver">Mountain</option>
+            <option value="America/Chicago">Central</option>
+            <option value="America/New_York">Eastern</option>
+            <option value="Europe/London">London</option>
+            <option value="Europe/Paris">Paris</option>
+            <option value="Europe/Athens">Athens</option>
+            <option value="Europe/Istanbul" data-time-zone-abbreviation="TRT">Istanbul</option>
+            <option value="Asia/Dubai" data-time-zone-abbreviation="GST">Dubai</option>
+            <option value="Asia/Jakarta" data-time-zone-abbreviation="WIB">Jakarta</option>
+            <option value="Asia/Shanghai" data-time-zone-abbreviation="CST">Shanghai</option>
+            <option value="Asia/Tokyo" data-time-zone-abbreviation="JST">Tokyo</option>
           </select>
           <label class="switch">
             <input

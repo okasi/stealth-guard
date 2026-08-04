@@ -23,8 +23,36 @@ let proxyConnectionHistory = [];
 let proxyHistoryInitialized = false;
 let proxyHistoryWriteQueue = Promise.resolve();
 let trackerListener = null;
+let adblockCache = { version: ADBLOCK_CACHE_VERSION, lists: {} };
+const adblockCompiledById = new Map();
+let adblockEngine = createAdblockEngine(createEmptyCompiledRules());
+let adblockUpdatePromise = null;
+let adblockStatus = {
+  updating: false,
+  lastUpdate: null,
+  nextUpdate: null,
+  networkRules: 0,
+  cosmeticRules: 0,
+  error: null,
+};
 
 const NOTIFICATION_THROTTLE_MS = 3770;
+const ADBLOCK_UPDATE_ALARM = "stealth-guard-filter-update";
+const YOUTUBE_FILTER_MAX_AGE_MS = 45 * 60 * 1000;
+const PROXY_INDICATOR_COLORS = {
+  active: "#188038",
+  inactive: "#5F6368",
+  warning: "#B06000",
+  error: "#B3261E",
+};
+const BLOCKED_BADGE_COLORS = {
+  active: "#B3261E",
+  empty: "#5F6368",
+};
+const TOOLBAR_ICON_SIZES = [16, 32];
+const toolbarIconRenderVersions = new Map();
+const toolbarIconImageDataByColor = new Map();
+const toolbarHostnamePerTab = new Map();
 const REPORTED_FEATURES = new Set([
   ...PROTECTION_FEATURES.filter((feature) => feature !== "useragent"),
   "user-agent",
@@ -69,6 +97,7 @@ function setProxyRuntimeStatus(nextStatus) {
   }
   proxyRuntimeStatus = next;
   recordProxyConnectionEvent(next);
+  refreshToolbarIndicators();
 }
 
 function normalizeProxyHistoryEntry(value) {
@@ -313,16 +342,16 @@ async function ensureBackgroundInitialized() {
     return;
   }
 
-  try {
-    await initializationPromise;
-  } catch (error) {
-    debugError("[Background] Initial initialization failed:", error);
+  if (!initializationPromise) {
+    initializationPromise = (async () => {
+      try {
+        await initializeBackground();
+      } finally {
+        initializationPromise = null;
+      }
+    })();
   }
-
-  if (!currentConfig) {
-    initializationPromise = initializeBackground();
-    await initializationPromise;
-  }
+  await initializationPromise;
 }
 
 function markTriggeredFeatureForTab(tabId, hostname, feature) {
@@ -339,6 +368,9 @@ function markTriggeredFeatureForTab(tabId, hostname, feature) {
 }
 
 function getRequestContextHostname(details) {
+  if (details && details.type === "main_frame") {
+    return getHostnameFromUrl(details.url);
+  }
   for (const candidate of [
     details && details.initiator,
     details && details.documentUrl,
@@ -350,6 +382,13 @@ function getRequestContextHostname(details) {
     }
   }
   return null;
+}
+
+function isExtensionInitiatedRequest(details) {
+  const extensionRoot = chrome.runtime.getURL("");
+  return [details?.initiator, details?.documentUrl, details?.originUrl].some(
+    (value) => typeof value === "string" && value.startsWith(extensionRoot),
+  );
 }
 
 function isSameSiteHostname(left, right) {
@@ -374,14 +413,500 @@ function markTrackerBlocked(tabId, pageHostname, requestHostname) {
       hostname: pageHostname,
       count: 0,
       domains: new Set(),
+      domainCounts: new Map(),
     });
   }
   const activity = trackerActivityPerTab.get(tabId);
   activity.count += 1;
-  if (activity.domains.size < 50) {
+  if (activity.domains.has(requestHostname) || activity.domains.size < 50) {
     activity.domains.add(requestHostname);
+    activity.domainCounts.set(
+      requestHostname,
+      (activity.domainCounts.get(requestHostname) || 0) + 1,
+    );
   }
   markTriggeredFeatureForTab(tabId, pageHostname, "tracker");
+  updateToolbarIndicator(tabId, pageHostname);
+}
+
+function isProxyBypassedForHostname(config, hostname) {
+  if (
+    !config ||
+    !config.enabled ||
+    !config.proxy ||
+    !config.proxy.enabled ||
+    !hostname
+  ) {
+    return false;
+  }
+
+  const proxy = config.proxy;
+  if (
+    isDomainAllowlisted(hostname, config.globalWhitelist) ||
+    isDomainAllowlisted(hostname, PROXY_SAFETY_BYPASS_LIST.join(",")) ||
+    (proxy.routingMode === "bypass-selected" &&
+      isDomainAllowlisted(
+        hostname,
+        normalizeBypassList(proxy.bypassList || []).join(","),
+      ))
+  ) {
+    return true;
+  }
+
+  const matchingRoute = (proxy.domainRoutes || []).find((route) =>
+    isDomainAllowlisted(hostname, route.pattern),
+  );
+  return !matchingRoute && proxy.routingMode === "protect-selected";
+}
+
+function getToolbarProxyStatus(hostname = "") {
+  if (
+    proxyRuntimeStatus.state === "conflict" ||
+    proxyRuntimeStatus.state === "error"
+  ) {
+    return proxyRuntimeStatus.state === "conflict"
+      ? {
+          color: PROXY_INDICATOR_COLORS.error,
+          label: "inactive due to a settings conflict",
+        }
+      : {
+          color: PROXY_INDICATOR_COLORS.error,
+          label: "inactive due to an error",
+        };
+  }
+
+  if (isProxyBypassedForHostname(currentConfig, hostname)) {
+    return {
+      color: PROXY_INDICATOR_COLORS.warning,
+      label: "bypassed for this site",
+    };
+  }
+
+  switch (proxyRuntimeStatus.state) {
+    case "connected":
+    case "routing":
+      return {
+        color: PROXY_INDICATOR_COLORS.active,
+        label: proxyRuntimeStatus.profile
+          ? `active (${proxyRuntimeStatus.profile})`
+          : "active",
+      };
+    case "connecting":
+      return {
+        color: PROXY_INDICATOR_COLORS.warning,
+        label: "connecting",
+      };
+    case "degraded":
+      return {
+        color: PROXY_INDICATOR_COLORS.warning,
+        label: "active, but not verified",
+      };
+    default:
+      return {
+        color: PROXY_INDICATOR_COLORS.inactive,
+        label: "inactive",
+      };
+  }
+}
+
+function formatToolbarBlockedCount(count) {
+  return count > 99 ? "99+" : String(count);
+}
+
+function updateToolbarIndicator(tabId, hostname = "") {
+  if (
+    !chrome.browserAction ||
+    typeof chrome.browserAction.setBadgeText !== "function" ||
+    typeof tabId !== "number"
+  ) {
+    return;
+  }
+
+  const normalizedHostname = normalizeHostname(hostname);
+  if (normalizedHostname) {
+    toolbarHostnamePerTab.set(tabId, normalizedHostname);
+  }
+  const effectiveHostname =
+    normalizedHostname ||
+    toolbarHostnamePerTab.get(tabId) ||
+    trackerActivityPerTab.get(tabId)?.hostname ||
+    "";
+  const activity = trackerActivityPerTab.get(tabId);
+  const blockedCount = activity ? activity.count : 0;
+  const proxy = getToolbarProxyStatus(effectiveHostname);
+  const blockedLabel = `${blockedCount} ad/tracker request${
+    blockedCount === 1 ? "" : "s"
+  } blocked`;
+
+  try {
+    chrome.browserAction.setBadgeText({
+      tabId,
+      text: formatToolbarBlockedCount(blockedCount),
+    });
+    chrome.browserAction.setBadgeBackgroundColor({
+      tabId,
+      color:
+        blockedCount > 0
+          ? BLOCKED_BADGE_COLORS.active
+          : BLOCKED_BADGE_COLORS.empty,
+    });
+    chrome.browserAction.setTitle({
+      tabId,
+      title: `Stealth Guard — ${blockedLabel} — Proxy ${proxy.label}`,
+    });
+    refreshToolbarProxyIcon(tabId, proxy.color);
+  } catch (error) {
+    debugWarn("[Toolbar] Failed to update indicator:", error);
+  }
+}
+
+function refreshToolbarIndicators() {
+  if (!chrome.browserAction) {
+    return;
+  }
+  queryTabs({})
+    .then((tabs) => {
+      for (const tab of tabs) {
+        if (typeof tab.id === "number") {
+          updateToolbarIndicator(tab.id, getHostnameFromUrl(tab.url));
+        }
+      }
+    })
+    .catch((error) => {
+      debugWarn("[Toolbar] Failed to refresh indicators:", error);
+    });
+}
+
+function renderToolbarIconWithProxyIndicator(size, color) {
+  return new Promise((resolve, reject) => {
+    const image = document.createElement("img");
+    image.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const context = canvas.getContext("2d");
+        if (!context) {
+          throw new Error("Canvas rendering is unavailable");
+        }
+
+        context.drawImage(image, 0, 0, size, size);
+        const radius = Math.max(2, size * 0.15);
+        const centerX = size - radius - 1;
+        const centerY = radius + 1;
+        context.beginPath();
+        context.arc(
+          centerX,
+          centerY,
+          radius + Math.max(1, size * 0.04),
+          0,
+          Math.PI * 2,
+        );
+        context.fillStyle = "#FFFFFF";
+        context.fill();
+        context.beginPath();
+        context.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        context.fillStyle = color;
+        context.fill();
+        resolve(context.getImageData(0, 0, size, size));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    image.onerror = () =>
+      reject(new Error(`Could not load ${size}px toolbar icon`));
+    image.src = chrome.runtime.getURL(`icons/${size}.png`);
+  });
+}
+
+function getToolbarIconImageData(color) {
+  if (!toolbarIconImageDataByColor.has(color)) {
+    toolbarIconImageDataByColor.set(
+      color,
+      Promise.all(
+        TOOLBAR_ICON_SIZES.map(async (size) => [
+          size,
+          await renderToolbarIconWithProxyIndicator(size, color),
+        ]),
+      ).then((entries) => Object.fromEntries(entries)),
+    );
+  }
+  return toolbarIconImageDataByColor.get(color);
+}
+
+function refreshToolbarProxyIcon(tabId, color) {
+  if (
+    !chrome.browserAction ||
+    typeof chrome.browserAction.setIcon !== "function" ||
+    typeof document === "undefined" ||
+    typeof tabId !== "number"
+  ) {
+    return;
+  }
+
+  const renderVersion = (toolbarIconRenderVersions.get(tabId) || 0) + 1;
+  toolbarIconRenderVersions.set(tabId, renderVersion);
+  getToolbarIconImageData(color)
+    .then((imageData) => {
+      if (renderVersion === toolbarIconRenderVersions.get(tabId)) {
+        chrome.browserAction.setIcon({ tabId, imageData });
+      }
+    })
+    .catch((error) => {
+      debugWarn("[Toolbar] Failed to render proxy indicator:", error);
+    });
+}
+
+function normalizeAdblockCache(value) {
+  if (!value || value.version !== ADBLOCK_CACHE_VERSION || !value.lists) {
+    return { version: ADBLOCK_CACHE_VERSION, lists: {} };
+  }
+  adblockCompiledById.clear();
+  const lists = {};
+  for (const [id, entry] of Object.entries(value.lists)) {
+    if (
+      entry &&
+      typeof entry === "object" &&
+      typeof entry.text === "string" &&
+      entry.text.length <= MAX_FILTER_TEXT_LENGTH &&
+      typeof entry.url === "string"
+    ) {
+      const compiled = parseFilterList(entry.text);
+      adblockCompiledById.set(id, compiled);
+      lists[id] = {
+        name: typeof entry.name === "string" ? entry.name : id,
+        url: entry.url,
+        updatedAt: Number(entry.updatedAt) || 0,
+        stats: compiled.stats,
+      };
+    }
+  }
+  return { version: ADBLOCK_CACHE_VERSION, lists };
+}
+
+async function loadAdblockCache() {
+  const stored = await storage.read(ADBLOCK_CACHE_KEY);
+  adblockCache = normalizeAdblockCache(stored[ADBLOCK_CACHE_KEY]);
+}
+
+function createLocalAdblockRules(config) {
+  const sources = [];
+  if (config.tracker.useBuiltIn) {
+    sources.push(
+      parseFilterList(
+        BUILTIN_TRACKER_DOMAINS.map((domain) =>
+          `||${domain.replace(/^\*\./, "")}^$third-party`,
+        ).join("\n"),
+      ),
+    );
+  }
+  if (config.tracker.customDomains) {
+    sources.push(
+      parseFilterList(
+        parseDomainPatterns(config.tracker.customDomains)
+          .map((domain) => `||${domain.replace(/^\*\./, "")}^`)
+          .join("\n"),
+      ),
+    );
+  }
+  if (config.tracker.customFilters) {
+    sources.push(parseFilterList(config.tracker.customFilters));
+  }
+  return sources;
+}
+
+function rebuildAdblockEngine(config) {
+  const subscriptions = normalizeFilterSubscriptions(config.tracker.filterLists);
+  const compiled = [];
+  for (const subscription of subscriptions) {
+    const cached = adblockCache.lists[subscription.id];
+    if (
+      subscription.enabled &&
+      cached &&
+      cached.url === subscription.url &&
+      adblockCompiledById.has(subscription.id)
+    ) {
+      compiled.push(adblockCompiledById.get(subscription.id));
+    }
+  }
+  compiled.push(...createLocalAdblockRules(config));
+  const merged = mergeCompiledRules(compiled);
+  adblockEngine = createAdblockEngine(merged);
+  adblockStatus = {
+    ...adblockStatus,
+    networkRules: merged.stats.network,
+    cosmeticRules: merged.stats.cosmetic,
+  };
+}
+
+function getOldestEnabledFilterUpdate(config) {
+  const timestamps = normalizeFilterSubscriptions(config.tracker.filterLists)
+    .filter((entry) => entry.enabled)
+    .map((entry) => Number(adblockCache.lists[entry.id]?.updatedAt) || 0);
+  return timestamps.length ? Math.min(...timestamps) : Date.now();
+}
+
+function isYoutubeUrl(url) {
+  const hostname = getHostnameFromUrl(url);
+  return Boolean(
+    hostname &&
+      (hostname === "youtube.com" || hostname.endsWith(".youtube.com")),
+  );
+}
+
+function refreshStaleFiltersForYoutube(url) {
+  const config = currentConfig;
+  if (
+    !isYoutubeUrl(url) ||
+    !config ||
+    !config.enabled ||
+    !config.tracker.enabled ||
+    !config.tracker.autoUpdate
+  ) {
+    return;
+  }
+  const lastUpdate = getOldestEnabledFilterUpdate(config);
+  if (lastUpdate && Date.now() - lastUpdate < YOUTUBE_FILTER_MAX_AGE_MS) {
+    return;
+  }
+  refreshAdblockFilters(config, true).catch((error) => {
+    adblockStatus = { ...adblockStatus, updating: false, error: error.message };
+    debugWarn("[Adblock] YouTube freshness update failed:", error);
+  });
+}
+
+function scheduleAdblockUpdates(config) {
+  if (!chrome.alarms) return;
+  if (!config.enabled || !config.tracker.enabled || !config.tracker.autoUpdate) {
+    chrome.alarms.clear(ADBLOCK_UPDATE_ALARM);
+    adblockStatus.nextUpdate = null;
+    return;
+  }
+  const intervalMinutes = config.tracker.updateIntervalHours * 60;
+  chrome.alarms.create(ADBLOCK_UPDATE_ALARM, {
+    delayInMinutes: Math.min(5, intervalMinutes),
+    periodInMinutes: intervalMinutes,
+  });
+  adblockStatus.nextUpdate = Date.now() + Math.min(5, intervalMinutes) * 60000;
+}
+
+async function downloadFilterSubscription(subscription) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(subscription.url, {
+      cache: "no-cache",
+      credentials: "omit",
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status || "error"}`);
+    }
+    const declaredLength = Number(response.headers?.get?.("content-length"));
+    if (declaredLength > MAX_FILTER_TEXT_LENGTH) {
+      throw new Error("Filter list exceeds the 16 MB safety limit");
+    }
+    const text = await response.text();
+    if (text.length > MAX_FILTER_TEXT_LENGTH) {
+      throw new Error("Filter list exceeds the 16 MB safety limit");
+    }
+    const compiled = parseFilterList(text);
+    if (compiled.stats.network + compiled.stats.cosmetic === 0) {
+      throw new Error("Filter list contained no supported rules");
+    }
+    return {
+      name: subscription.name,
+      url: subscription.url,
+      updatedAt: Date.now(),
+      text,
+      compiled,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function refreshAdblockFilters(configOverride, force = false) {
+  if (adblockUpdatePromise) return adblockUpdatePromise;
+  adblockUpdatePromise = (async () => {
+    const config = configOverride || (await getConfig());
+    const enabled = normalizeFilterSubscriptions(config.tracker.filterLists).filter(
+      (entry) => entry.enabled,
+    );
+    if (!config.enabled || !config.tracker.enabled || !enabled.length) {
+      return { success: true, updated: 0 };
+    }
+    const maxAge = config.tracker.updateIntervalHours * 60 * 60 * 1000;
+    adblockStatus = { ...adblockStatus, updating: true, error: null };
+    let updated = 0;
+    const errors = [];
+    const persistentUpdates = {};
+    for (const subscription of enabled) {
+      const cached = adblockCache.lists[subscription.id];
+      if (
+        !force &&
+        cached &&
+        cached.url === subscription.url &&
+        Date.now() - Number(cached.updatedAt || 0) < maxAge
+      ) {
+        continue;
+      }
+      try {
+        const downloaded = await downloadFilterSubscription(subscription);
+        adblockCompiledById.set(subscription.id, downloaded.compiled);
+        adblockCache.lists[subscription.id] = {
+          name: downloaded.name,
+          url: downloaded.url,
+          updatedAt: downloaded.updatedAt,
+          stats: downloaded.compiled.stats,
+        };
+        persistentUpdates[subscription.id] = {
+          name: downloaded.name,
+          url: downloaded.url,
+          updatedAt: downloaded.updatedAt,
+          text: downloaded.text,
+        };
+        updated += 1;
+      } catch (error) {
+        errors.push(`${subscription.name}: ${error.message}`);
+      }
+    }
+    if (updated) {
+      const stored = await storage.read(ADBLOCK_CACHE_KEY);
+      const previous = stored[ADBLOCK_CACHE_KEY];
+      const persistentLists =
+        previous &&
+        previous.version === ADBLOCK_CACHE_VERSION &&
+        previous.lists &&
+        typeof previous.lists === "object"
+          ? previous.lists
+          : {};
+      await storage.write({
+        [ADBLOCK_CACHE_KEY]: {
+          version: ADBLOCK_CACHE_VERSION,
+          lists: { ...persistentLists, ...persistentUpdates },
+        },
+      });
+      rebuildAdblockEngine(config);
+      applyTrackerBlocking(config);
+      await broadcastCosmeticRulesUpdated();
+    }
+    const lastUpdate = getOldestEnabledFilterUpdate(config) || null;
+    adblockStatus = {
+      ...adblockStatus,
+      updating: false,
+      lastUpdate,
+      nextUpdate: config.tracker.autoUpdate
+        ? Date.now() + config.tracker.updateIntervalHours * 60 * 60 * 1000
+        : null,
+      error: errors.length ? errors.join("; ") : null,
+    };
+    return { success: errors.length === 0, updated, error: adblockStatus.error };
+  })().finally(() => {
+    adblockUpdatePromise = null;
+  });
+  return adblockUpdatePromise;
 }
 
 function applyTrackerBlocking(config) {
@@ -397,11 +922,8 @@ function applyTrackerBlocking(config) {
     throw new Error("Tracker blocking is unavailable in this browser");
   }
 
-  const patterns = [
-    ...(config.tracker.useBuiltIn ? BUILTIN_TRACKER_DOMAINS : []),
-    ...parseDomainPatterns(config.tracker.customDomains),
-  ].join(",");
-  if (!patterns) {
+  rebuildAdblockEngine(config);
+  if (!adblockStatus.networkRules) {
     return;
   }
 
@@ -409,11 +931,16 @@ function applyTrackerBlocking(config) {
     const requestHostname = getHostnameFromUrl(details && details.url);
     const pageHostname = getRequestContextHostname(details);
     if (
+      isExtensionInitiatedRequest(details) ||
       !requestHostname ||
       !pageHostname ||
-      isSameSiteHostname(requestHostname, pageHostname) ||
       !isFeatureActiveForHostname(config, "tracker", pageHostname) ||
-      !isDomainAllowlisted(requestHostname, patterns)
+      !shouldBlockRequest(
+        adblockEngine,
+        details,
+        pageHostname,
+        requestHostname,
+      )
     ) {
       return {};
     }
@@ -427,6 +954,7 @@ function applyTrackerBlocking(config) {
     {
       urls: ["<all_urls>"],
       types: [
+        "main_frame",
         "font",
         "image",
         "media",
@@ -436,10 +964,24 @@ function applyTrackerBlocking(config) {
         "script",
         "stylesheet",
         "sub_frame",
+        "websocket",
         "xmlhttprequest",
       ],
     },
     ["blocking"],
+  );
+}
+
+async function broadcastCosmeticRulesUpdated() {
+  const tabs = await queryTabs({ url: ["http://*/*", "https://*/*"] });
+  await Promise.all(
+    tabs
+      .filter((tab) => typeof tab.id === "number")
+      .map((tab) =>
+        sendMessageToTabIgnoringErrors(tab.id, {
+          type: "adblock-rules-updated",
+        }),
+      ),
   );
 }
 
@@ -508,6 +1050,7 @@ async function applyCurrentConfig(config) {
   await applyWebRTCPolicy(config);
   await applyProxyPolicy(config);
   currentConfig = config;
+  refreshToolbarIndicators();
 }
 
 async function initializeBackground() {
@@ -523,12 +1066,24 @@ async function initializeBackground() {
     proxyHistoryInitialized = true;
     debugWarn("[Proxy] Connection history failed to initialize:", error);
   }
-  await applyCurrentConfig(await loadConfig());
+  try {
+    await loadAdblockCache();
+  } catch (error) {
+    adblockCache = { version: ADBLOCK_CACHE_VERSION, lists: {} };
+    debugWarn("[Adblock] Filter cache failed to load:", error);
+  }
+  const config = await loadConfig();
+  await applyCurrentConfig(config);
+  scheduleAdblockUpdates(config);
+  refreshAdblockFilters(config).catch((error) => {
+    adblockStatus = { ...adblockStatus, updating: false, error: error.message };
+    debugWarn("[Adblock] Automatic filter update failed:", error);
+  });
   setupContextMenus();
   debugLog("Stealth Guard initialized");
 }
 
-initializationPromise = initializeBackground().catch((error) => {
+ensureBackgroundInitialized().catch((error) => {
   debugError("Failed to initialize Stealth Guard:", error);
 });
 
@@ -742,12 +1297,17 @@ async function applyWebRTCPolicy(configOverride) {
   await applyWebRTCPolicyValue(policy);
 }
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "loading") {
     trackerActivityPerTab.delete(tabId);
   }
   if (changeInfo.url) {
     const newHostname = getHostnameFromUrl(changeInfo.url);
+    if (newHostname) {
+      toolbarHostnamePerTab.set(tabId, newHostname);
+    } else {
+      toolbarHostnamePerTab.delete(tabId);
+    }
     const tabData = triggeredFeaturesPerTab.get(tabId);
     if (!newHostname || (tabData && tabData.hostname !== newHostname)) {
       triggeredFeaturesPerTab.delete(tabId);
@@ -757,12 +1317,33 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       trackerActivityPerTab.delete(tabId);
     }
   }
+  if (changeInfo.url || changeInfo.status === "loading") {
+    refreshStaleFiltersForYoutube(changeInfo.url || (tab && tab.url));
+    updateToolbarIndicator(
+      tabId,
+      getHostnameFromUrl(changeInfo.url || (tab && tab.url)),
+    );
+  }
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   triggeredFeaturesPerTab.delete(tabId);
   trackerActivityPerTab.delete(tabId);
+  toolbarHostnamePerTab.delete(tabId);
+  toolbarIconRenderVersions.delete(tabId);
 });
+
+if (chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (!alarm || alarm.name !== ADBLOCK_UPDATE_ALARM) return;
+    ensureBackgroundInitialized()
+      .then(() => refreshAdblockFilters(currentConfig))
+      .catch((error) => {
+        adblockStatus = { ...adblockStatus, updating: false, error: error.message };
+        debugWarn("[Adblock] Scheduled filter update failed:", error);
+      });
+  });
+}
 
 function handleFingerprintDetectedMessage(request, sender) {
   if (!request || !REPORTED_FEATURES.has(request.feature)) {
@@ -846,6 +1427,7 @@ async function applyConfigChanges(changeFlags, config) {
 
   if (changeFlags.trackerChanged) {
     applyTrackerBlocking(config);
+    scheduleAdblockUpdates(config);
   }
 
   if (changeFlags.webrtcChanged) {
@@ -884,6 +1466,13 @@ async function saveConfigWithRollback(previousConfig, nextConfig) {
   proxyCredentialManager.prune(nextConfig.proxy.profiles).catch((error) => {
     debugError("[Proxy] Failed to prune unused credentials:", error);
   });
+  if (changeFlags.trackerChanged) {
+    refreshAdblockFilters(nextConfig).catch((error) => {
+      adblockStatus = { ...adblockStatus, updating: false, error: error.message };
+      debugWarn("[Adblock] Filter refresh failed:", error);
+    });
+    await broadcastCosmeticRulesUpdated();
+  }
   await broadcastConfigUpdated(nextConfig);
 }
 
@@ -972,8 +1561,107 @@ function handleGetTriggeredFeaturesMessage(request) {
     tracker: {
       count: trackerData ? trackerData.count : 0,
       domains: trackerData ? Array.from(trackerData.domains) : [],
+      entries: trackerData
+        ? Array.from(trackerData.domainCounts, ([domain, count]) => ({
+            domain,
+            count,
+          }))
+        : [],
     },
   };
+}
+
+function handleGetAdblockStatusMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  const lists = currentConfig
+    ? normalizeFilterSubscriptions(currentConfig.tracker.filterLists)
+    : [];
+  return {
+    success: true,
+    status: {
+      ...adblockStatus,
+      lists: lists.map((list) => ({
+        id: list.id,
+        name: list.name,
+        enabled: list.enabled,
+        updatedAt: adblockCache.lists[list.id]?.updatedAt || null,
+        networkRules:
+          adblockCache.lists[list.id]?.stats?.network || 0,
+        cosmeticRules:
+          adblockCache.lists[list.id]?.stats?.cosmetic || 0,
+      })),
+    },
+  };
+}
+
+async function handleUpdateAdblockFiltersMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  const result = await refreshAdblockFilters(await getConfig(), true);
+  return { ...result, status: { ...adblockStatus } };
+}
+
+function handleGetCosmeticRulesMessage(request, sender) {
+  const hostname = resolveTabHostname(sender, request && request.hostname);
+  const config = currentConfig;
+  if (
+    !config ||
+    !hostname ||
+    !isFeatureActiveForHostname(config, "tracker", hostname) ||
+    !config.tracker.cosmeticFiltering ||
+    isDomainAllowlisted(hostname, config.tracker.cosmeticWhitelist)
+  ) {
+    return { success: true, enabled: false, selectors: [] };
+  }
+  const tokens = Array.isArray(request && request.tokens)
+    ? request.tokens
+        .filter((token) => typeof token === "string" && /^[a-z0-9_-]{1,128}$/i.test(token))
+        .slice(0, 3000)
+    : [];
+  return {
+    success: true,
+    enabled: true,
+    selectors: getCosmeticSelectors(adblockEngine, hostname, tokens),
+    youtubeEnhancements: Boolean(
+      config.tracker.youtubeEnhancements &&
+        (hostname === "youtube.com" || hostname.endsWith(".youtube.com")),
+    ),
+  };
+}
+
+function handleAddCosmeticRuleMessage(request, sender) {
+  return enqueueConfigMutation(async () => {
+    const hostname = resolveTabHostname(sender, null);
+    const requestedHostname = normalizeHostname(request && request.hostname);
+    const selector =
+      request && typeof request.selector === "string"
+        ? request.selector.trim()
+        : "";
+    const candidate = `${hostname || ""}##${selector}`;
+    const parsed = parseFilterList(candidate);
+    if (
+      !hostname ||
+      requestedHostname !== hostname ||
+      !selector ||
+      parsed.cosmetic.hide.length !== 1 ||
+      parsed.cosmetic.hide[0].selector !== selector
+    ) {
+      throw new Error("Invalid cosmetic filter");
+    }
+    const previousConfig = cloneConfig(await getConfig());
+    const nextConfig = cloneConfig(previousConfig);
+    const existing = nextConfig.tracker.customFilters
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (!existing.includes(candidate)) existing.push(candidate);
+    nextConfig.tracker.customFilters = existing.join("\n");
+    const normalized = normalizeConfig(nextConfig);
+    if (!normalized.tracker.customFilters.includes(candidate)) {
+      throw new Error("Custom filter limit reached");
+    }
+    await saveConfigWithRollback(previousConfig, normalized);
+    return { success: true, rule: candidate };
+  });
 }
 
 async function handlePrepareProxyProfileMessage(request) {
@@ -1081,7 +1769,6 @@ async function handleGetIdentityDiagnosticsMessage(request, sender) {
         name: timezoneFromProxy
           ? vpnLocation.timezone
           : config.timezone.name,
-        offset: config.timezone.offset,
         source: timezoneFromProxy ? "proxy" : "preset",
       },
       geolocation: {
@@ -1217,6 +1904,10 @@ const messageHandlers = {
   "remove-from-whitelist": handleRemoveFromWhitelistMessage,
   "reset-config": handleResetConfigMessage,
   "get-triggered-features": handleGetTriggeredFeaturesMessage,
+  "get-adblock-status": handleGetAdblockStatusMessage,
+  "update-adblock-filters": handleUpdateAdblockFiltersMessage,
+  "get-cosmetic-rules": handleGetCosmeticRulesMessage,
+  "add-cosmetic-rule": handleAddCosmeticRuleMessage,
   "prepare-proxy-profile": handlePrepareProxyProfileMessage,
   "get-proxy-credential-status": handleGetProxyCredentialStatusMessage,
   "set-proxy-credentials": handleSetProxyCredentialsMessage,

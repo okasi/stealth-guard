@@ -6,8 +6,11 @@ const {
   assertRuntimeResponse,
   callChromeApi,
   getChromeError,
+  getTimeZoneGmtOffsetLabel,
+  getTimeZoneShortName,
   loadRuntimeConfig,
   sendRuntimeMessage,
+  updateTimeZoneSelectLabels,
 } = require("../../lib/runtime.js");
 
 afterEach(() => {
@@ -55,6 +58,58 @@ test("assertRuntimeResponse returns successes and rejects missing or failed resp
   expect(() =>
     assertRuntimeResponse({ success: false, error: "denied" }, "fallback"),
   ).toThrow("denied");
+});
+
+test("timezone labels derive current GMT offsets from regional rules", () => {
+  const winter = new Date("2026-01-15T12:00:00Z");
+  const summer = new Date("2026-07-15T12:00:00Z");
+
+  expect(getTimeZoneGmtOffsetLabel("Europe/Paris", winter)).toBe("GMT+1");
+  expect(getTimeZoneGmtOffsetLabel("Europe/Paris", summer)).toBe("GMT+2");
+  expect(getTimeZoneGmtOffsetLabel("Asia/Kathmandu", winter)).toBe("GMT+5:45");
+  expect(getTimeZoneGmtOffsetLabel("America/New_York", winter)).toBe("GMT-5");
+  expect(getTimeZoneGmtOffsetLabel("UTC", winter)).toBe("GMT+0");
+  expect(getTimeZoneGmtOffsetLabel("Invalid/Timezone", winter)).toBeNull();
+  expect(getTimeZoneShortName("Europe/Paris", winter)).toBe("CET");
+  expect(getTimeZoneShortName("Europe/Paris", summer)).toBe("CEST");
+  expect(getTimeZoneShortName("Asia/Tokyo", winter)).toBeNull();
+  expect(getTimeZoneShortName("Invalid/Timezone", winter)).toBeNull();
+  const utcFormatter = vi
+    .spyOn(Intl, "DateTimeFormat")
+    .mockImplementationOnce(function MockDateTimeFormat() {
+      return {
+        formatToParts: () => [{ type: "timeZoneName", value: "UTC" }],
+      };
+    });
+  expect(getTimeZoneGmtOffsetLabel("UTC", winter)).toBe("GMT+0");
+  utcFormatter.mockRestore();
+
+  const select = {
+    options: [
+      {
+        value: "Europe/Paris",
+        textContent: " Paris ",
+        dataset: {},
+      },
+      {
+        value: "Invalid/Timezone",
+        textContent: "Unknown",
+        dataset: { timeZoneAbbreviation: "LOCAL" },
+      },
+      {
+        value: "Asia/Tokyo",
+        textContent: "Tokyo",
+        dataset: {},
+      },
+    ],
+  };
+  updateTimeZoneSelectLabels(select, winter);
+  expect(select.options[0].textContent).toBe("CET/Paris (GMT+1)");
+  expect(select.options[1].textContent).toBe("LOCAL/Unknown");
+  expect(select.options[2].textContent).toBe("Tokyo (GMT+9)");
+  updateTimeZoneSelectLabels(select, summer);
+  expect(select.options[0].textContent).toBe("CEST/Paris (GMT+2)");
+  updateTimeZoneSelectLabels(null, summer);
 });
 
 test("loadRuntimeConfig retries invalid responses and reports the final error", async () => {

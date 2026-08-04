@@ -61,6 +61,7 @@ test("getDefaultUserAgentPreset maps platform and browser combinations", () => {
 test("User-Agent and content config helpers expose only trusted runtime data", () => {
   const {
     BUILTIN_TRACKER_DOMAINS,
+    DEFAULT_CONFIG,
     LANGUAGE_PRESETS,
     PROTECTION_FEATURES,
     USER_AGENT_CLIENT_HINTS,
@@ -102,6 +103,11 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
   expect(contentConfig.enabled).toBe(false);
   expect(contentConfig.canvas.enabled).toBe(false);
   expect(contentConfig.proxy).toBeUndefined();
+  expect(contentConfig.tracker).toBeUndefined();
+  expect(contentConfig.adblock).toEqual({
+    enabled: false,
+    youtubeEnhancements: true,
+  });
   expect(contentConfig.vpnLocation).toBeNull();
   expect(contentConfig.language.identity).toEqual({
     locale: "en-US",
@@ -112,6 +118,13 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
   expect(contentConfig.unknown).toBeUndefined();
   expect(cloned.canvas.enabled).toBe(true);
   expect(contentConfig.canvas.enabled).toBe(false);
+
+  const adblockConfig = cloneConfig(DEFAULT_CONFIG);
+  expect(createContentConfig(adblockConfig, "www.youtube.com").adblock.enabled)
+    .toBe(true);
+  adblockConfig.tracker.whitelist = "youtube.com";
+  expect(createContentConfig(adblockConfig, "youtube.com").adblock.enabled)
+    .toBe(false);
   expect(emptyClone).toEqual({});
 });
 
@@ -306,9 +319,9 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
   expect(normalized.timezone).toMatchObject({
     enabled: true,
     whitelist: DEFAULT_CONFIG.timezone.whitelist,
-    offset: 60,
     name: "Europe/Paris",
   });
+  expect(normalized.timezone.offset).toBeUndefined();
   expect(normalized.webrtc.policy).toBe(DEFAULT_CONFIG.webrtc.policy);
   expect(normalized.canvas.noiseLevel).toBe(DEFAULT_CONFIG.canvas.noiseLevel);
   expect(normalized.webgl.preset).toBe(DEFAULT_CONFIG.webgl.preset);
@@ -358,7 +371,7 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
 });
 
 test("normalizeConfig preserves supported values and bounds user-controlled strings", () => {
-  const { normalizeConfig } = loadConfigModule();
+  const { DEFAULT_CONFIG, normalizeConfig } = loadConfigModule();
   const longValue = "x".repeat(200);
   const config = {
     useragent: { preset: "iphone" },
@@ -370,6 +383,31 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
       whitelist: "trusted.metrics.test",
       useBuiltIn: false,
       customDomains: `*.metrics.test,${"x".repeat(20000)}`,
+      autoUpdate: false,
+      updateIntervalHours: 999,
+      cosmeticFiltering: false,
+      cosmeticWhitelist: "broken-layout.test",
+      youtubeEnhancements: false,
+      customFilters: "x".repeat(140000),
+      filterLists: [
+        null,
+        { id: 7, name: 4, url: 9 },
+        { id: "", url: "https://empty.test/list.txt" },
+        { id: "broken", url: "not a url" },
+        { id: "insecure", url: "http://example.test/list.txt" },
+        {
+          id: " My_List! ",
+          name: "",
+          url: "https://example.test/list.txt",
+          enabled: "yes",
+        },
+        {
+          id: "my_list",
+          name: "Duplicate",
+          url: "https://duplicate.test/list.txt",
+          enabled: false,
+        },
+      ],
     },
     webrtc: { policy: "default_public_interface_only" },
     timezone: { offset: "-840", name: `  ${longValue}  ` },
@@ -398,8 +436,28 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
     useBuiltIn: false,
   });
   expect(normalized.tracker.customDomains).toHaveLength(16384);
+  expect(normalized.tracker).toMatchObject({
+    autoUpdate: false,
+    updateIntervalHours: 168,
+    cosmeticFiltering: false,
+    cosmeticWhitelist: "broken-layout.test",
+    youtubeEnhancements: false,
+  });
+  expect(normalized.tracker.customFilters).toHaveLength(131072);
+  expect(normalized.tracker.filterLists).toEqual([
+    {
+      id: "my_list",
+      name: "my_list",
+      url: "https://example.test/list.txt",
+      enabled: true,
+    },
+  ]);
+  expect(
+    normalizeConfig({ tracker: { filterLists: [null, { id: "bad", url: ":" }] } })
+      .tracker.filterLists,
+  ).toEqual(DEFAULT_CONFIG.tracker.filterLists);
   expect(normalized.webrtc.policy).toBe("default_public_interface_only");
-  expect(normalized.timezone.offset).toBe(-840);
+  expect(normalized.timezone.offset).toBeUndefined();
   expect(normalized.timezone.name).toBe(longValue.slice(0, 128));
   expect(normalized.proxy.activeProfile).toBe(longValue.slice(0, 128));
   expect(normalized.proxy.routingMode).toBe("protect-all");

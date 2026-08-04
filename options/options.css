@@ -210,6 +210,26 @@ header p {
   cursor: pointer;
 }
 
+.filter-list-settings .inline-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-weight: 400;
+}
+
+.filter-update-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+#filter-update-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .actions {
   display: flex;
   gap: 12px;

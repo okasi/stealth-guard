@@ -113,6 +113,311 @@ function installMainWorldProtections(
   };
 
   debugLog("[Stealth Guard] MAIN-world protections activating");
+
+  const isYouTubeHostname = function () {
+    const hostname = window.location.hostname.toLowerCase();
+    return hostname === "youtube.com" || hostname.endsWith(".youtube.com");
+  };
+
+  const isYouTubeAdBlockingActive = function () {
+    return Boolean(
+      isYouTubeHostname() &&
+        config.adblock &&
+        config.adblock.enabled &&
+        config.adblock.youtubeEnhancements,
+    );
+  };
+
+  if (isYouTubeHostname()) {
+    const nativeJsonParse = JSON.parse;
+    const nativeJsonStringify = JSON.stringify;
+    const youtubeAdKeys = new Set([
+      "adBreakHeartbeatParams",
+      "adPlacements",
+      "adSlots",
+      "legacyImportant",
+      "playerAds",
+    ]);
+
+    const isYouTubeAdEntry = function (value) {
+      return Boolean(
+        value &&
+          typeof value === "object" &&
+          (value.command?.reelWatchEndpoint?.adClientParams?.isAd === true ||
+            value.adSlotRenderer ||
+            value.displayAdRenderer ||
+            value.inFeedAdLayoutRenderer),
+      );
+    };
+
+    const sanitizeYouTubePayload = function (value, seen) {
+      if (!value || typeof value !== "object") return value;
+      const visited = seen || new WeakSet();
+      if (visited.has(value)) return value;
+      visited.add(value);
+      if (Array.isArray(value)) {
+        for (let index = value.length - 1; index >= 0; index -= 1) {
+          if (isYouTubeAdEntry(value[index])) {
+            value.splice(index, 1);
+          } else {
+            sanitizeYouTubePayload(value[index], visited);
+          }
+        }
+        return value;
+      }
+      for (const key of Object.keys(value)) {
+        if (youtubeAdKeys.has(key)) {
+          try {
+            delete value[key];
+          } catch (error) {}
+        } else {
+          sanitizeYouTubePayload(value[key], visited);
+        }
+      }
+      return value;
+    };
+
+    const sanitizeYouTubeJsonText = function (text) {
+      if (
+        !isYouTubeAdBlockingActive() ||
+        typeof text !== "string" ||
+        !/(?:"adPlacements"|"adSlots"|"playerAds"|"isAd"\s*:\s*true)/.test(
+          text,
+        )
+      ) {
+        return text;
+      }
+      try {
+        const parsed = Reflect.apply(nativeJsonParse, JSON, [text]);
+        sanitizeYouTubePayload(parsed);
+        return Reflect.apply(nativeJsonStringify, JSON, [parsed]);
+      } catch (error) {
+        return text;
+      }
+    };
+
+    const getRequestUrl = function (input) {
+      try {
+        if (typeof input === "string") return input;
+        if (typeof URL !== "undefined" && input instanceof URL) return input.href;
+        if (input && typeof input.url === "string") return input.url;
+      } catch (error) {}
+      return "";
+    };
+
+    const isYouTubePlayerRequest = function (url) {
+      if (typeof url !== "string" || !url) return false;
+      try {
+        const parsed = new URL(url, window.location.href);
+        if (
+          parsed.hostname !== "youtube.com" &&
+          !parsed.hostname.endsWith(".youtube.com")
+        ) {
+          return false;
+        }
+        return /(?:\/youtubei\/v1\/(?:player|playlist|get_watch)|\/get_watch|\/watch)/.test(
+          parsed.pathname,
+        );
+      } catch (error) {
+        return false;
+      }
+    };
+
+    const createSanitizedFetchResponse = async function (response) {
+      if (
+        !isYouTubeAdBlockingActive() ||
+        !response ||
+        typeof response.clone !== "function"
+      ) {
+        return response;
+      }
+      try {
+        const text = await response.clone().text();
+        const sanitized = sanitizeYouTubeJsonText(text);
+        if (sanitized === text) return response;
+        const headers = new Headers(response.headers);
+        headers.delete("content-length");
+        headers.delete("content-encoding");
+        const replacement = new Response(sanitized, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+        for (const property of ["url", "redirected", "type"]) {
+          try {
+            Object.defineProperty(replacement, property, {
+              configurable: true,
+              value: response[property],
+            });
+          } catch (error) {}
+        }
+        return replacement;
+      } catch (error) {
+        return response;
+      }
+    };
+
+    protectMethod(
+      window,
+      "fetch",
+      function (target, self, args) {
+        const responsePromise = Reflect.apply(target, self, args);
+        if (
+          !isYouTubeAdBlockingActive() ||
+          !isYouTubePlayerRequest(getRequestUrl(args[0]))
+        ) {
+          return responsePromise;
+        }
+        return responsePromise.then(createSanitizedFetchResponse);
+      },
+      "YouTube fetch responses",
+    );
+
+    const youtubeXhrUrls = new WeakMap();
+    const youtubeXhrTextCache = new WeakMap();
+    const youtubeXhrObjectCache = new WeakMap();
+    if (typeof XMLHttpRequest !== "undefined") {
+      protectMethod(
+        XMLHttpRequest.prototype,
+        "open",
+        function (target, self, args) {
+          youtubeXhrUrls.set(self, getRequestUrl(args[1]));
+          youtubeXhrTextCache.delete(self);
+          youtubeXhrObjectCache.delete(self);
+          return Reflect.apply(target, self, args);
+        },
+        "YouTube XMLHttpRequest.open",
+      );
+
+      protectGetter(
+        XMLHttpRequest.prototype,
+        "responseText",
+        function (target, self, args) {
+          const value = Reflect.apply(target, self, args);
+          if (
+            self.readyState !== 4 ||
+            !isYouTubeAdBlockingActive() ||
+            !isYouTubePlayerRequest(youtubeXhrUrls.get(self))
+          ) {
+            return value;
+          }
+          const cached = youtubeXhrTextCache.get(self);
+          if (cached && cached.source === value) return cached.value;
+          const sanitized = sanitizeYouTubeJsonText(value);
+          youtubeXhrTextCache.set(self, { source: value, value: sanitized });
+          return sanitized;
+        },
+        "YouTube XMLHttpRequest.responseText",
+      );
+
+      protectGetter(
+        XMLHttpRequest.prototype,
+        "response",
+        function (target, self, args) {
+          const value = Reflect.apply(target, self, args);
+          if (
+            self.readyState !== 4 ||
+            !isYouTubeAdBlockingActive() ||
+            !isYouTubePlayerRequest(youtubeXhrUrls.get(self))
+          ) {
+            return value;
+          }
+          if (typeof value === "string") return sanitizeYouTubeJsonText(value);
+          if (!value || typeof value !== "object" || self.responseType !== "json") {
+            return value;
+          }
+          const cached = youtubeXhrObjectCache.get(self);
+          if (cached && cached.source === value) return cached.value;
+          try {
+            const clone = Reflect.apply(nativeJsonParse, JSON, [
+              Reflect.apply(nativeJsonStringify, JSON, [value]),
+            ]);
+            sanitizeYouTubePayload(clone);
+            youtubeXhrObjectCache.set(self, { source: value, value: clone });
+            return clone;
+          } catch (error) {
+            return value;
+          }
+        },
+        "YouTube XMLHttpRequest.response",
+      );
+    }
+
+    protectMethod(
+      JSON,
+      "parse",
+      function (target, self, args) {
+        const value = Reflect.apply(target, self, args);
+        return isYouTubeAdBlockingActive()
+          ? sanitizeYouTubePayload(value)
+          : value;
+      },
+      "YouTube JSON.parse",
+    );
+
+    try {
+      const initialDescriptor = Object.getOwnPropertyDescriptor(
+        window,
+        "ytInitialPlayerResponse",
+      );
+      if (!initialDescriptor || initialDescriptor.configurable) {
+        let initialPlayerResponse = initialDescriptor?.value;
+        if (isYouTubeAdBlockingActive()) {
+          sanitizeYouTubePayload(initialPlayerResponse);
+        }
+        Object.defineProperty(window, "ytInitialPlayerResponse", {
+          configurable: true,
+          enumerable: initialDescriptor?.enumerable !== false,
+          get() {
+            return initialPlayerResponse;
+          },
+          set(value) {
+            initialPlayerResponse = isYouTubeAdBlockingActive()
+              ? sanitizeYouTubePayload(value)
+              : value;
+          },
+        });
+      }
+    } catch (error) {
+      debugWarn("[Adblock] Could not protect ytInitialPlayerResponse:", error);
+    }
+
+    const inspectYouTubePlayer = function () {
+      if (!isYouTubeAdBlockingActive()) return;
+      const player = document.getElementById("movie_player");
+      if (!player) return;
+      try {
+        const stats = player.getStatsForNerds?.();
+        const serverSideAd =
+          typeof stats?.debug_info === "string" &&
+          stats.debug_info.startsWith("SSAP, AD");
+        const showingAd = player.classList.contains("ad-showing");
+        if (!serverSideAd && !showingAd) return;
+        const progress = player.getProgressState?.();
+        const duration = Number(progress?.duration);
+        if (Number.isFinite(duration) && duration > 0) {
+          player.seekTo?.(duration, true);
+        }
+        const skip = document.querySelector(
+          ".ytp-ad-skip-button, .ytp-skip-ad-button, button.ytp-ad-skip-button-modern",
+        );
+        skip?.click();
+      } catch (error) {}
+    };
+
+    const startYouTubePlayerMonitor = function () {
+      inspectYouTubePlayer();
+      window.setInterval(inspectYouTubePlayer, 250);
+    };
+    if (document.documentElement) {
+      startYouTubePlayerMonitor();
+    } else {
+      document.addEventListener("DOMContentLoaded", startYouTubePlayerMonitor, {
+        once: true,
+      });
+    }
+  }
+
   const webglCanvases = new WeakSet();
   let webglNoiseSeed = 0;
 
@@ -662,33 +967,28 @@ function installMainWorldProtections(
           vpnLocation.syncTimezone && vpnLocation.timezone
             ? vpnLocation.timezone
             : null;
-        const parsedConfiguredOffset = Number(timezoneConfig.offset);
         return {
-          fallbackOffset: Number.isFinite(parsedConfiguredOffset)
-            ? -parsedConfiguredOffset
-            : 300,
           name:
             synchronizedTimezone ||
             timezoneConfig.name ||
-            "America/New_York",
+            new NativeIntlDateTimeFormat().resolvedOptions().timeZone,
         };
       };
 
       const getSpoofedTimezoneOffset = function (dateObj) {
         const options = getTimezoneOptions();
-        if (!options.name) return options.fallbackOffset;
         const timeValue =
           dateObj && typeof dateObj.getTime === "function"
             ? dateObj.getTime()
             : Date.now();
-        if (!Number.isFinite(timeValue)) return options.fallbackOffset;
+        if (!Number.isFinite(timeValue)) return getTimezoneOffset.call(dateObj);
 
         const cacheKey = `${options.name}:${Math.floor(timeValue / 3600000)}`;
         if (timezoneOffsetCache.has(cacheKey)) {
           return timezoneOffsetCache.get(cacheKey);
         }
 
-        let offset = options.fallbackOffset;
+        let offset = getTimezoneOffset.call(dateObj);
         try {
           const formatter = new NativeIntlDateTimeFormat("en-US", {
             timeZone: options.name,

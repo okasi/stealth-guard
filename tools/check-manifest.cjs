@@ -41,6 +41,7 @@ assertSameArray(
   [
     "lib/runtime.js",
     "lib/storage.js",
+    "lib/adblock.js",
     "lib/config.js",
     "lib/domainFilter.js",
     "lib/proxy.js",
@@ -63,6 +64,7 @@ assertSameArray(
     "lib/config.js",
     "content-scripts/main.js",
     "content-scripts/injector.js",
+    "content-scripts/adblock.js",
   ],
   "content_scripts[0].js",
 );

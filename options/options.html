@@ -356,22 +356,65 @@
         </section>
 
         <section class="card" id="tracker-section">
-          <h2><span>🛑 Tracker Blocking</span></h2>
+          <h2><span>🛑 Ads, Trackers &amp; Annoyances</span></h2>
           <p class="section-desc">
-            Block third-party requests to locally configured tracker domains.
-            No blocklists are downloaded automatically.
+            AdGuard-compatible lists are downloaded automatically and applied
+            to network requests and page elements. Site and cosmetic
+            allowlists provide quick recovery if a page breaks.
           </p>
           <div class="field checkbox">
             <label>
               <input type="checkbox" id="tracker-enabled" />
-              Enable third-party tracker blocking
+              Enable ad and tracker blocking
             </label>
           </div>
           <div class="field">
             <label for="tracker-whitelist"
-              >Per-Feature Allowlist (comma-separated domains)</label
+              >Blocking Allowlist (comma-separated domains)</label
             >
             <textarea id="tracker-whitelist" rows="2"></textarea>
+            <small>Disables network and cosmetic blocking on matching sites.</small>
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input type="checkbox" id="tracker-cosmetic-filtering" />
+              Hide ad slots, cookie banners, and other filtered elements
+            </label>
+          </div>
+          <div class="field">
+            <label for="tracker-cosmetic-whitelist"
+              >Cosmetic-Only Allowlist (comma-separated domains)</label
+            >
+            <textarea id="tracker-cosmetic-whitelist" rows="2"></textarea>
+            <small>Keeps request blocking active but stops element hiding.</small>
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input type="checkbox" id="tracker-youtube-enhancements" />
+              Enable minimal YouTube ad-slot cleanup and skip controls
+            </label>
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input type="checkbox" id="tracker-auto-update" />
+              Download and update enabled filter lists automatically
+            </label>
+          </div>
+          <div class="field">
+            <label for="tracker-update-interval">Update interval (hours)</label>
+            <input id="tracker-update-interval" type="number" min="1" max="168" />
+          </div>
+          <div class="field filter-list-settings">
+            <label>Filter subscriptions</label>
+            <label class="inline-check"><input type="checkbox" data-filter-list-id="adguard-base" /> AdGuard Base</label>
+            <label class="inline-check"><input type="checkbox" data-filter-list-id="adguard-tracking" /> AdGuard Tracking Protection</label>
+            <label class="inline-check"><input type="checkbox" data-filter-list-id="adguard-cookies" /> AdGuard Cookie Notices</label>
+            <label for="tracker-custom-subscriptions">Custom HTTPS subscriptions (one URL per line)</label>
+            <textarea id="tracker-custom-subscriptions" rows="3" placeholder="https://example.com/filter.txt"></textarea>
+            <div class="filter-update-row">
+              <button id="update-filter-lists" class="btn-secondary btn-compact" type="button">Update now</button>
+              <span id="filter-update-status" role="status">Waiting for status…</span>
+            </div>
           </div>
           <div class="field checkbox">
             <label>
@@ -392,6 +435,20 @@
             <small
               >Uses the same wildcard semantics as Stealth Guard allowlists.
               Invalid patterns are ignored and the value is capped at 16 KB.</small
+            >
+          </div>
+          <div class="field">
+            <label for="tracker-custom-filters">User filtering rules</label>
+            <textarea
+              id="tracker-custom-filters"
+              rows="7"
+              maxlength="131072"
+              placeholder="||ads.example^&#10;@@||needed.example^$domain=site.example&#10;site.example##.cookie-banner&#10;site.example#@#.needed-widget"
+            ></textarea>
+            <small
+              >Supports a safe subset of AdGuard/uBlock network rules,
+              exceptions, CSS hiding rules, and cosmetic exceptions. Rules
+              created by the element picker appear here.</small
             >
           </div>
         </section>
@@ -521,19 +578,23 @@
           <div class="field">
             <label for="timezone-select">Timezone</label>
             <select id="timezone-select">
-              <option value="America/Los_Angeles|-480">PST/Pacific (-8)</option>
-              <option value="America/Denver|-420">MST/Mountain (-7)</option>
-              <option value="America/Chicago|-360">CST/Central (-6)</option>
-              <option value="America/New_York|-300">EST/Eastern (-5)</option>
-              <option value="Europe/London|0">GMT/London (+0)</option>
-              <option value="Europe/Paris|60">CET/Paris (+1)</option>
-              <option value="Europe/Athens|120">EET/Athens (+2)</option>
-              <option value="Europe/Istanbul|180">TRT/Istanbul (+3)</option>
-              <option value="Asia/Dubai|240">GST/Dubai (+4)</option>
-              <option value="Asia/Jakarta|420">WIB/Jakarta (+7)</option>
-              <option value="Asia/Shanghai|480">China/Shanghai (+8)</option>
-              <option value="Asia/Tokyo|540">JST/Tokyo (+9)</option>
+              <option value="America/Los_Angeles">Pacific</option>
+              <option value="America/Denver">Mountain</option>
+              <option value="America/Chicago">Central</option>
+              <option value="America/New_York">Eastern</option>
+              <option value="Europe/London">London</option>
+              <option value="Europe/Paris">Paris</option>
+              <option value="Europe/Athens">Athens</option>
+              <option value="Europe/Istanbul" data-time-zone-abbreviation="TRT">Istanbul</option>
+              <option value="Asia/Dubai" data-time-zone-abbreviation="GST">Dubai</option>
+              <option value="Asia/Jakarta" data-time-zone-abbreviation="WIB">Jakarta</option>
+              <option value="Asia/Shanghai" data-time-zone-abbreviation="CST">Shanghai</option>
+              <option value="Asia/Tokyo" data-time-zone-abbreviation="JST">Tokyo</option>
             </select>
+            <small>
+              Offsets follow the selected region automatically, including
+              daylight saving time.
+            </small>
           </div>
         </section>
 

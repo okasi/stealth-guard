@@ -14,4 +14,9 @@ You should receive an acknowledgment within seven days. Triage and remediation t
 
 ## Scope notes
 
-Stealth Guard handles sensitive local state, including optional proxy configuration and saved site sessions. Reports involving cookie scope, session isolation, configuration import, permission abuse, MAIN-world injection, proxy routing, or browser-global privacy settings are especially valuable.
+Stealth Guard handles sensitive local state, including downloaded or custom
+filter subscriptions, optional proxy configuration, and saved site sessions.
+Reports involving filter-parser denial of service, untrusted subscription
+handling, cookie scope, session isolation, configuration import, permission
+abuse, MAIN-world injection, proxy routing, or browser-global privacy settings
+are especially valuable.

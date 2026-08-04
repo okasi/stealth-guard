@@ -1,10 +1,12 @@
 {
-  "version": "1.0.10",
+  "version": "1.0.16",
   "manifest_version": 2,
   "name": "Stealth Guard by okasi | MV2",
   "author": "okasi.me",
   "permissions": [
     "storage",
+    "unlimitedStorage",
+    "alarms",
     "contextMenus",
     "notifications",
     "privacy",
@@ -21,6 +23,7 @@
     "scripts": [
       "lib/runtime.js",
       "lib/storage.js",
+      "lib/adblock.js",
       "lib/config.js",
       "lib/domainFilter.js",
       "lib/proxy.js",
@@ -54,7 +57,8 @@
         "lib/domainFilter.js",
         "lib/config.js",
         "content-scripts/main.js",
-        "content-scripts/injector.js"
+        "content-scripts/injector.js",
+        "content-scripts/adblock.js"
       ]
     }
   ],

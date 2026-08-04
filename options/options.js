@@ -7,12 +7,17 @@ let toastTimeout = null;
 let proxyCredentialStatuses = new Map();
 let proxyRuntimeStatus = null;
 let proxyDiagnostics = null;
+let adblockStatus = null;
 
 const AUTO_SAVE_DELAY_MS = 1000;
 const MAX_CONFIG_FILE_SIZE = 1024 * 1024;
+const TIMEZONE_LABEL_REFRESH_MS = 60 * 1000;
 
 document.addEventListener("DOMContentLoaded", initializeOptions);
 document.addEventListener("visibilitychange", saveWhenHidden);
+setInterval(() => {
+  updateTimeZoneSelectLabels(document.getElementById("timezone-select"));
+}, TIMEZONE_LABEL_REFRESH_MS);
 
 async function initializeOptions() {
   try {
@@ -40,6 +45,7 @@ async function loadOptionsConfig() {
     refreshProxyCredentialStatuses(),
     refreshProxyRuntimeStatus(),
     refreshProxyDiagnostics(),
+    refreshAdblockStatus(),
   ]);
   lastSavedSnapshot = serializeConfig(currentConfig);
   saveInFlightSnapshot = null;
@@ -63,8 +69,9 @@ function populateForm() {
   document.getElementById("webgl-preset").value = currentConfig.webgl.preset;
   document.getElementById("canvas-noise-level").value =
     currentConfig.canvas.noiseLevel;
-  document.getElementById("timezone-select").value =
-    `${currentConfig.timezone.name}|${currentConfig.timezone.offset}`;
+  const timezoneSelect = document.getElementById("timezone-select");
+  updateTimeZoneSelectLabels(timezoneSelect);
+  timezoneSelect.value = currentConfig.timezone.name;
   document.getElementById("useragent-preset").value =
     currentConfig.useragent.preset;
   document.getElementById("language-preset").value =
@@ -78,6 +85,35 @@ function populateForm() {
     currentConfig.tracker.useBuiltIn;
   document.getElementById("tracker-custom-domains").value =
     currentConfig.tracker.customDomains;
+  document.getElementById("tracker-auto-update").checked =
+    currentConfig.tracker.autoUpdate;
+  document.getElementById("tracker-update-interval").value =
+    currentConfig.tracker.updateIntervalHours;
+  document.getElementById("tracker-cosmetic-filtering").checked =
+    currentConfig.tracker.cosmeticFiltering;
+  document.getElementById("tracker-cosmetic-whitelist").value =
+    currentConfig.tracker.cosmeticWhitelist;
+  document.getElementById("tracker-youtube-enhancements").checked =
+    currentConfig.tracker.youtubeEnhancements;
+  document.getElementById("tracker-custom-filters").value =
+    currentConfig.tracker.customFilters;
+  const defaultIds = new Set([
+    "adguard-base",
+    "adguard-tracking",
+    "adguard-cookies",
+  ]);
+  for (const input of document.querySelectorAll("[data-filter-list-id]")) {
+    const list = currentConfig.tracker.filterLists.find(
+      (entry) => entry.id === input.dataset.filterListId,
+    );
+    input.checked = Boolean(list && list.enabled);
+  }
+  document.getElementById("tracker-custom-subscriptions").value =
+    currentConfig.tracker.filterLists
+      .filter((entry) => !defaultIds.has(entry.id))
+      .map((entry) => entry.url)
+      .join("\n");
+  renderAdblockStatus();
   document.getElementById("proxy-enabled").checked =
     currentConfig.proxy.enabled;
   document.getElementById("proxy-routing-mode").value =
@@ -282,11 +318,8 @@ function collectForm(options = {}) {
   currentConfig.webgl.preset = document.getElementById("webgl-preset").value;
   currentConfig.canvas.noiseLevel =
     document.getElementById("canvas-noise-level").value;
-  const [timezoneName, timezoneOffset] = document
-    .getElementById("timezone-select")
-    .value.split("|");
-  currentConfig.timezone.name = timezoneName;
-  currentConfig.timezone.offset = Number.parseInt(timezoneOffset, 10);
+  currentConfig.timezone.name =
+    document.getElementById("timezone-select").value;
   currentConfig.useragent.preset =
     document.getElementById("useragent-preset").value;
   currentConfig.language.preset =
@@ -302,6 +335,51 @@ function collectForm(options = {}) {
   currentConfig.tracker.customDomains = document.getElementById(
     "tracker-custom-domains",
   ).value;
+  currentConfig.tracker.autoUpdate = document.getElementById(
+    "tracker-auto-update",
+  ).checked;
+  currentConfig.tracker.updateIntervalHours = Number.parseInt(
+    document.getElementById("tracker-update-interval").value,
+    10,
+  );
+  currentConfig.tracker.cosmeticFiltering = document.getElementById(
+    "tracker-cosmetic-filtering",
+  ).checked;
+  currentConfig.tracker.cosmeticWhitelist = document.getElementById(
+    "tracker-cosmetic-whitelist",
+  ).value;
+  currentConfig.tracker.youtubeEnhancements = document.getElementById(
+    "tracker-youtube-enhancements",
+  ).checked;
+  currentConfig.tracker.customFilters = document.getElementById(
+    "tracker-custom-filters",
+  ).value;
+  const existingDefaults = DEFAULT_TRACKER_FILTER_LISTS.map((defaultEntry) => ({
+    ...defaultEntry,
+    ...(currentConfig.tracker.filterLists.find(
+      (entry) => entry.id === defaultEntry.id,
+    ) || {}),
+  }));
+  for (const entry of existingDefaults) {
+    const input = document.querySelector(`[data-filter-list-id="${entry.id}"]`);
+    entry.enabled = Boolean(input && input.checked);
+  }
+  const customSubscriptions = document
+    .getElementById("tracker-custom-subscriptions")
+    .value.split(/\r?\n/)
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .slice(0, 20)
+    .map((url, index) => ({
+      id: `custom-${index + 1}`,
+      name: `Custom list ${index + 1}`,
+      url,
+      enabled: true,
+    }));
+  currentConfig.tracker.filterLists = [
+    ...existingDefaults,
+    ...customSubscriptions,
+  ];
 
   currentConfig.proxy.enabled =
     document.getElementById("proxy-enabled").checked;
@@ -836,6 +914,64 @@ async function clearEditingProxyCredentials() {
   }
 }
 
+async function refreshAdblockStatus() {
+  try {
+    const response = await sendRuntimeMessage({ type: "get-adblock-status" });
+    assertRuntimeResponse(response, "Ad-blocking status is unavailable");
+    adblockStatus = response.status;
+  } catch (error) {
+    adblockStatus = null;
+  }
+}
+
+function renderAdblockStatus() {
+  const status = document.getElementById("filter-update-status");
+  if (!status) return;
+  if (!adblockStatus) {
+    status.textContent = "Status unavailable";
+    return;
+  }
+  if (adblockStatus.updating) {
+    status.textContent = "Updating filter lists…";
+    return;
+  }
+  const ruleCount =
+    Number(adblockStatus.networkRules || 0) +
+    Number(adblockStatus.cosmeticRules || 0);
+  const updated = adblockStatus.lastUpdate
+    ? new Date(adblockStatus.lastUpdate).toLocaleString()
+    : "not downloaded yet";
+  status.textContent = `${ruleCount.toLocaleString()} rules · ${updated}${
+    adblockStatus.error ? ` · ${adblockStatus.error}` : ""
+  }`;
+}
+
+async function updateAdblockFiltersNow() {
+  const button = document.getElementById("update-filter-lists");
+  button.disabled = true;
+  adblockStatus = { ...(adblockStatus || {}), updating: true };
+  renderAdblockStatus();
+  try {
+    if (collectForm()) await saveOptionsConfig();
+    const response = await sendRuntimeMessage({ type: "update-adblock-filters" });
+    if (!response || (response.success === false && !response.status)) {
+      throw new Error((response && response.error) || "Filter update failed");
+    }
+    adblockStatus = response.status;
+    renderAdblockStatus();
+    showToast(
+      response.updated ? `Updated ${response.updated} filter list(s)` : "Filter lists are current",
+      response.success === false ? "error" : "success",
+    );
+  } catch (error) {
+    await refreshAdblockStatus();
+    renderAdblockStatus();
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function setupEventListeners() {
   for (const input of document.querySelectorAll("input, select, textarea")) {
     if (
@@ -894,6 +1030,9 @@ function setupEventListeners() {
   document
     .getElementById("clear-proxy-history")
     .addEventListener("click", clearProxyHistory);
+  document
+    .getElementById("update-filter-lists")
+    .addEventListener("click", updateAdblockFiltersNow);
   document
     .getElementById("export-config")
     .addEventListener("click", exportConfig);

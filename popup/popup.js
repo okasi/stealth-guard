@@ -5,11 +5,18 @@ let currentSessions = [];
 let activeSessionId = null;
 let pendingReloadTimeout = null;
 let currentProxyRuntimeStatus = null;
-let currentIdentityDiagnostics = null;
+let currentBlockedCount = 0;
+let currentBlockedEntries = [];
 
 const POPUP_RELOAD_DEBOUNCE_MS = 250;
+const TIMEZONE_LABEL_REFRESH_MS = 60 * 1000;
 
 document.addEventListener("DOMContentLoaded", initializePopup);
+setInterval(() => {
+  updateTimeZoneSelectLabels(
+    document.getElementById("timezone-quick-select"),
+  );
+}, TIMEZONE_LABEL_REFRESH_MS);
 
 async function initializePopup() {
   try {
@@ -21,11 +28,7 @@ async function initializePopup() {
     currentSessionHostname = getTabHostname(currentTab);
     renderPopup();
     setupEventListeners();
-    await Promise.all([
-      updateIdentityDiagnostics(),
-      updateTriggeredFeatures(),
-      refreshSessionList(),
-    ]);
+    await Promise.all([updateTriggeredFeatures(), refreshSessionList()]);
   } catch (error) {
     console.error("Failed to initialize popup:", error);
     document.body.textContent =
@@ -44,26 +47,6 @@ async function loadProxyRuntimeStatus() {
     console.warn("Proxy runtime status is unavailable:", error);
     return null;
   }
-}
-
-async function loadIdentityDiagnostics() {
-  try {
-    const response = await sendRuntimeMessage({
-      type: "get-identity-diagnostics",
-      hostname: getTabHostname(currentTab),
-      tabId: currentTab && currentTab.id,
-    });
-    assertRuntimeResponse(response, "Failed to load identity diagnostics");
-    return response.diagnostics;
-  } catch (error) {
-    console.warn("Identity diagnostics are unavailable:", error);
-    return null;
-  }
-}
-
-async function updateIdentityDiagnostics() {
-  currentIdentityDiagnostics = await loadIdentityDiagnostics();
-  renderIdentityDiagnostics();
 }
 
 function queryCurrentTab() {
@@ -114,10 +97,9 @@ function renderPopup() {
     document.getElementById("webgl-quick-select"),
     currentConfig.webgl.preset,
   );
-  setSelectValue(
-    document.getElementById("timezone-quick-select"),
-    `${currentConfig.timezone.name}|${currentConfig.timezone.offset}`,
-  );
+  const timezoneSelect = document.getElementById("timezone-quick-select");
+  updateTimeZoneSelectLabels(timezoneSelect);
+  setSelectValue(timezoneSelect, currentConfig.timezone.name);
   setSelectValue(
     document.getElementById("useragent-quick-select"),
     currentConfig.useragent.preset,
@@ -128,55 +110,89 @@ function renderPopup() {
   );
 
   renderProxyStatus();
-  renderIdentityDiagnostics();
+  renderTrackerStatus();
+  renderTrackerDetails();
   renderCurrentSite();
   renderAllowlistHighlighting();
   renderSessionDomain();
   renderSessionList();
 }
 
-function renderIdentityDiagnostics() {
-  const diagnostics = currentIdentityDiagnostics;
-  const summary = document.getElementById("identity-summary");
+function renderTrackerStatus() {
   const trackerStatus = document.getElementById("tracker-status");
-  if (!diagnostics) {
-    summary.textContent = "Unavailable";
-    trackerStatus.textContent = currentConfig.tracker.enabled
-      ? "Enabled"
-      : "Off";
-    return;
+  const hostname = getTabHostname(currentTab);
+  const paused = hostname && isDomainAllowlisted(
+    hostname,
+    currentConfig.tracker.whitelist,
+  );
+  trackerStatus.textContent = !currentConfig.tracker.enabled
+    ? "Off"
+    : paused
+      ? "Paused here"
+      : currentBlockedCount
+        ? `${currentBlockedCount} blocked`
+        : "Enabled";
+  const cosmeticPaused = hostname && isDomainAllowlisted(
+    hostname,
+    currentConfig.tracker.cosmeticWhitelist,
+  );
+  const siteButton = document.getElementById("toggle-adblock-site");
+  const cosmeticButton = document.getElementById("toggle-cosmetic-site");
+  const pickerButton = document.getElementById("block-element");
+  for (const button of [siteButton, cosmeticButton, pickerButton]) {
+    button.disabled = !hostname || !currentConfig.enabled || !currentConfig.tracker.enabled;
   }
+  siteButton.textContent = paused ? "Resume ads on this site" : "Pause ads on this site";
+  cosmeticButton.textContent = cosmeticPaused ? "Hide filtered items" : "Show hidden items";
+}
 
-  summary.textContent = !diagnostics.protectionEnabled
-    ? "Disabled"
-    : diagnostics.globallyAllowlisted
-      ? "Allowlisted"
-      : "Active";
-  document.getElementById("identity-useragent").textContent =
-    diagnostics.userAgent.enabled
-      ? diagnostics.userAgent.preset
-      : "Native";
-  document.getElementById("identity-language").textContent =
-    diagnostics.language.enabled
-      ? `${diagnostics.language.locale} · ${diagnostics.language.source}`
-      : "Native";
-  document.getElementById("identity-timezone").textContent =
-    diagnostics.timezone.enabled
-      ? `${diagnostics.timezone.name} · ${diagnostics.timezone.source}`
-      : "Native";
-  document.getElementById("identity-webrtc").textContent =
-    diagnostics.webrtc.effectivePolicy;
-  document.getElementById("identity-proxy").textContent =
-    diagnostics.proxy.enabled
-      ? `${diagnostics.proxy.state}${diagnostics.proxy.profile ? ` · ${diagnostics.proxy.profile}` : ""}`
-      : "Direct";
-  document.getElementById("identity-tracker").textContent =
-    diagnostics.tracker.enabled
-      ? `${diagnostics.tracker.blockedCount} blocked`
-      : "Off";
-  trackerStatus.textContent = diagnostics.tracker.enabled
-    ? `${diagnostics.tracker.blockedCount} blocked`
-    : "Off";
+function renderTrackerDetails() {
+  const summary = document.getElementById("tracker-blocked-summary");
+  const empty = document.getElementById("tracker-blocked-empty");
+  const list = document.getElementById("tracker-blocked-list");
+  summary.textContent = `${currentBlockedCount} request${
+    currentBlockedCount === 1 ? "" : "s"
+  }`;
+  list.textContent = "";
+
+  const entries = currentBlockedEntries
+    .filter(
+      (entry) =>
+        entry &&
+        typeof entry.domain === "string" &&
+        entry.domain &&
+        Number.isInteger(entry.count) &&
+        entry.count > 0,
+    )
+    .sort(
+      (left, right) =>
+        right.count - left.count || left.domain.localeCompare(right.domain),
+    );
+
+  empty.hidden = entries.length > 0;
+  for (const entry of entries) {
+    const item = document.createElement("li");
+    const domain = document.createElement("span");
+    domain.className = "tracker-blocked-domain";
+    domain.textContent = entry.domain;
+    const count = document.createElement("span");
+    count.className = "tracker-blocked-count";
+    count.textContent = `×${entry.count}`;
+    item.append(domain, count);
+    list.append(item);
+  }
+}
+
+function toggleTrackerDetails() {
+  const toggle = document.getElementById("tracker-details-toggle");
+  const panel = document.getElementById("tracker-blocked-panel");
+  const expanded = toggle.getAttribute("aria-expanded") !== "true";
+  toggle.setAttribute("aria-expanded", String(expanded));
+  toggle.setAttribute(
+    "aria-label",
+    `${expanded ? "Hide" : "Show"} blocked ads and trackers`,
+  );
+  panel.hidden = !expanded;
 }
 
 function renderProxyStatus() {
@@ -300,6 +316,14 @@ async function updateTriggeredFeatures() {
         feature === "user-agent" ? "useragent" : feature,
       ),
     );
+    currentBlockedCount = Number(response && response.tracker && response.tracker.count) || 0;
+    currentBlockedEntries = Array.isArray(
+      response && response.tracker && response.tracker.entries,
+    )
+      ? response.tracker.entries
+      : [];
+    renderTrackerStatus();
+    renderTrackerDetails();
 
     for (const row of document.querySelectorAll(".feature-row")) {
       row.classList.toggle("triggered", triggered.has(row.dataset.feature));
@@ -407,9 +431,8 @@ async function saveCurrentConfig() {
     });
     assertRuntimeResponse(response, "Failed to save settings");
     currentProxyRuntimeStatus = await loadProxyRuntimeStatus();
-    currentIdentityDiagnostics = await loadIdentityDiagnostics();
     renderProxyStatus();
-    renderIdentityDiagnostics();
+    renderTrackerStatus();
     scheduleCurrentTabReload();
   } catch (error) {
     console.error("Failed to save settings:", error);
@@ -455,6 +478,7 @@ function setupEventListeners() {
       currentConfig[toggle.dataset.featureToggle].enabled =
         event.target.checked;
       renderProxyStatus();
+      renderTrackerStatus();
       await saveCurrentConfig();
     });
   }
@@ -483,19 +507,29 @@ function setupEventListeners() {
   document
     .getElementById("timezone-quick-select")
     .addEventListener("change", async (event) => {
-      const [name, offset] = event.target.value.split("|");
-      currentConfig.timezone.name = name;
-      currentConfig.timezone.offset = Number.parseInt(offset, 10);
+      currentConfig.timezone.name = event.target.value;
       await saveCurrentConfig();
     });
 
   document
     .getElementById("toggle-current-site")
     .addEventListener("click", toggleCurrentSiteAllowlist);
+  document
+    .getElementById("toggle-adblock-site")
+    .addEventListener("click", toggleCurrentSiteAdblock);
+  document
+    .getElementById("toggle-cosmetic-site")
+    .addEventListener("click", toggleCurrentSiteCosmeticFiltering);
+  document
+    .getElementById("block-element")
+    .addEventListener("click", startElementPicker);
+  document
+    .getElementById("tracker-details-toggle")
+    .addEventListener("click", toggleTrackerDetails);
 
   for (const row of document.querySelectorAll(".feature-row")) {
     row.addEventListener("click", (event) => {
-      if (event.target.closest("input, select, .switch")) {
+      if (event.target.closest("input, select, button, .switch")) {
         return;
       }
       chrome.tabs.create({
@@ -553,6 +587,56 @@ async function toggleCurrentSiteAllowlist() {
     scheduleCurrentTabReload();
   } catch (error) {
     console.error("Failed to update allowlist:", error);
+  }
+}
+
+async function toggleCurrentSiteAdblock() {
+  if (!currentSessionHostname) return;
+  const allowlisted = isDomainAllowlisted(
+    currentSessionHostname,
+    currentConfig.tracker.whitelist,
+  );
+  currentConfig.tracker.whitelist = allowlisted
+    ? removeDomainFromAllowlist(
+        currentSessionHostname,
+        currentConfig.tracker.whitelist,
+      )
+    : addDomainToAllowlist(
+        currentSessionHostname,
+        currentConfig.tracker.whitelist,
+      );
+  renderPopup();
+  await saveCurrentConfig();
+}
+
+async function toggleCurrentSiteCosmeticFiltering() {
+  if (!currentSessionHostname) return;
+  const allowlisted = isDomainAllowlisted(
+    currentSessionHostname,
+    currentConfig.tracker.cosmeticWhitelist,
+  );
+  currentConfig.tracker.cosmeticWhitelist = allowlisted
+    ? removeDomainFromAllowlist(
+        currentSessionHostname,
+        currentConfig.tracker.cosmeticWhitelist,
+      )
+    : addDomainToAllowlist(
+        currentSessionHostname,
+        currentConfig.tracker.cosmeticWhitelist,
+      );
+  renderPopup();
+  await saveCurrentConfig();
+}
+
+async function startElementPicker() {
+  if (!currentTab || typeof currentTab.id !== "number") return;
+  try {
+    await callChromeApi(chrome.tabs, "sendMessage", currentTab.id, {
+      type: "start-element-picker",
+    });
+    window.close();
+  } catch (error) {
+    console.error("Failed to start element picker:", error);
   }
 }
 

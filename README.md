@@ -32,7 +32,7 @@ Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts
 | **🌍 Proxy**        | Masks your IP address by routing traffic through SOCKS4/5 or HTTP/HTTPS proxy servers |
 | **🌐 User-Agent**   | Keeps HTTP/JavaScript UA, client hints, touch, CPU, and memory claims aligned          |
 | **🗣️ Language**    | Aligns Navigator, default Intl locale, and the HTTP Accept-Language header             |
-| **🕐 Timezone**     | Spoofs timezone information (configurable, default: UTC+1)                            |
+| **🕐 Timezone**     | Spoofs timezone information using automatic regional DST rules (default: Paris)       |
 | **📍 Geolocation**  | Replaces permitted HTML geolocation results with coarse proxy-location coordinates   |
 | **📡 WebRTC**       | Prevents IP address leaks through WebRTC connections                                  |
 | **🎨 Canvas**       | Adds imperceptible noise to HTML and OffscreenCanvas reads and exports                 |
@@ -41,7 +41,7 @@ Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts
 | **🔊 AudioContext** | Injects noise into buffer copies and float/byte analyser readouts                      |
 | **🕹️ WebGL**       | Hides GPU identity and protects extension, capability, pixel, and export probes        |
 | **🎮 WebGPU**       | Spoofs WebGPU adapter limits and buffer operations                                    |
-| **🛑 Trackers**     | Optionally blocks third-party requests to bundled or custom local tracker rules       |
+| **🛑 Ads & trackers** | Updates AdGuard-compatible lists, blocks requests, hides filtered elements, and sanitizes YouTube player ad responses |
 
 ### 🚀 Additional Features
 
@@ -91,6 +91,8 @@ Open **Advanced Settings** from the popup to access:
 - Proxy profiles, credentials, fallback order, and split-tunneling modes
 - Proxy-location timezone/geolocation synchronization
 - Proxy-country language synchronization and local tracker rules
+- Automatic AdGuard Base, Tracking Protection, and Cookie Notices subscriptions
+- Network exceptions, cosmetic filtering, per-site pause controls, and an element picker
 - Connection diagnostics and local history
 - WebGL presets (Apple, Pixel 4, Surface Pro 7)
 - Export/import configuration
@@ -125,20 +127,20 @@ Choose from predefined User-Agent strings:
 
 ### 🕐 Timezone Presets
 
-Available timezones:
+Available timezones use IANA regional rules, so their UTC offsets adjust automatically for daylight saving time and historical changes:
 
-- UTC-8 (Los Angeles)
-- UTC-7 (Denver)
-- UTC-6 (Chicago)
-- UTC-5 (New York)
-- UTC+0 (London)
-- UTC+1 (Paris) - _Default_
-- UTC+2 (Athens)
-- UTC+3 (Istanbul)
-- UTC+4 (Dubai)
-- UTC+7 (Jakarta)
-- UTC+8 (Shanghai)
-- UTC+9 (Tokyo)
+- Los Angeles (Pacific)
+- Denver (Mountain)
+- Chicago (Central)
+- New York (Eastern)
+- London
+- Paris - _Default_
+- Athens
+- Istanbul
+- Dubai
+- Jakarta
+- Shanghai
+- Tokyo
 
 ## 🧪 Testing Your Protection
 
@@ -176,7 +178,8 @@ The content script installs wrappers immediately at `document_start` with embedd
 ### 📁 Architecture
 
 ```
-background.js              → Runtime orchestrator (config, headers, trackers, WebRTC, proxy, messages)
+background.js              → Runtime orchestrator (config, headers, ad blocking, WebRTC, proxy, messages)
+lib/adblock.js             → Safe filter parser, matcher, and cosmetic selector engine
     ↓
 content-scripts/
   injector.js              → Isolated bootstrap, trusted config updates, alerts, diagnostics
@@ -206,7 +209,9 @@ This extension intentionally remains on **Manifest V2** because its persistent b
 | `cookies`                           | Save and restore per-site login sessions                                           |
 | `privacy`                           | Control WebRTC IP handling policy                                                  |
 | `proxy`                             | Configure SOCKS5/HTTP proxy                                                        |
-| `webRequest` / `webRequestBlocking` | Align identity headers and optionally block locally matched tracker requests        |
+| `webRequest` / `webRequestBlocking` | Align identity headers and synchronously block matched ad/tracker requests          |
+| `alarms`                            | Refresh enabled filter subscriptions automatically                                  |
+| `unlimitedStorage`                  | Cache downloaded filter subscriptions locally                                       |
 | `tabs`                              | Identify active tabs, reload updated tabs, and track per-tab protection state      |
 | `contextMenus`                      | Right-click menu integration                                                       |
 | `notifications`                     | Fingerprint detection alerts                                                       |

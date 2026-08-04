@@ -21,6 +21,47 @@
     diagnosticResultEvent: `stealth-guard-diagnostic-result-${createPrivateToken()}`,
     diagnosticToken: createPrivateToken(),
   };
+  const reportedFeatures = new Set();
+  let active = true;
+  let runtimeMessageListener = null;
+  let alertMessageListener = null;
+
+  function getRuntimeLastError() {
+    try {
+      return chrome.runtime && chrome.runtime.lastError;
+    } catch (error) {
+      return error;
+    }
+  }
+
+  function isExtensionContextInvalidated(error) {
+    return Boolean(
+      error &&
+        /extension context invalidated|context invalidated/i.test(
+          error.message || String(error),
+        ),
+    );
+  }
+
+  function deactivate() {
+    if (!active) return;
+    active = false;
+    if (alertMessageListener) {
+      window.removeEventListener("message", alertMessageListener);
+    }
+    try {
+      if (
+        runtimeMessageListener &&
+        chrome.runtime &&
+        chrome.runtime.onMessage &&
+        typeof chrome.runtime.onMessage.removeListener === "function"
+      ) {
+        chrome.runtime.onMessage.removeListener(runtimeMessageListener);
+      }
+    } catch (error) {
+      // A stale content script cannot access the replacement extension context.
+    }
+  }
 
   function createPrivateToken() {
     if (
@@ -45,22 +86,36 @@
 
   function loadStoredContentConfig() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(STORAGE_KEY, (result) => {
-        if (chrome.runtime.lastError) {
-          debugWarn(
-            "[Stealth Guard] Failed to load stored config:",
-            chrome.runtime.lastError,
+      try {
+        chrome.storage.local.get(STORAGE_KEY, (result) => {
+          const error = getRuntimeLastError();
+          if (error) {
+            if (isExtensionContextInvalidated(error)) {
+              deactivate();
+            } else {
+              debugWarn(
+                "[Stealth Guard] Failed to load stored config:",
+                error,
+              );
+            }
+            resolve(config);
+            return;
+          }
+          resolve(
+            createContentConfig(
+              result && result[STORAGE_KEY],
+              window.location.hostname,
+            ),
           );
-          resolve(config);
-          return;
+        });
+      } catch (error) {
+        if (isExtensionContextInvalidated(error)) {
+          deactivate();
+        } else {
+          debugWarn("[Stealth Guard] Failed to load stored config:", error);
         }
-        resolve(
-          createContentConfig(
-            result && result[STORAGE_KEY],
-            window.location.hostname,
-          ),
-        );
-      });
+        resolve(config);
+      }
     });
   }
 
@@ -132,7 +187,8 @@
     });
   }
 
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  runtimeMessageListener = (request, sender, sendResponse) => {
+    if (!active) return;
     if (request && request.type === "config-updated") {
       applyTrustedContentConfig(request.config);
     }
@@ -146,11 +202,21 @@
       });
       return true;
     }
-  });
+  };
+  try {
+    chrome.runtime.onMessage.addListener(runtimeMessageListener);
+  } catch (error) {
+    if (isExtensionContextInvalidated(error)) {
+      deactivate();
+    } else {
+      throw error;
+    }
+  }
 
-  window.addEventListener("message", (event) => {
+  alertMessageListener = (event) => {
     const alert = event.data;
     if (
+      !active ||
       event.source !== window ||
       !alert ||
       alert.channel !== bridge.alertChannel ||
@@ -160,25 +226,49 @@
       return;
     }
 
-    chrome.runtime.sendMessage(
-      {
-        type: "fingerprint-detected",
-        feature: alert.feature,
-        hostname: window.location.hostname,
-      },
-      () => {
-        if (chrome.runtime.lastError) {
+    if (reportedFeatures.has(alert.feature)) return;
+    reportedFeatures.add(alert.feature);
+    try {
+      chrome.runtime.sendMessage(
+        {
+          type: "fingerprint-detected",
+          feature: alert.feature,
+          hostname: window.location.hostname,
+        },
+        () => {
+          const error = getRuntimeLastError();
+          if (error) {
+            if (isExtensionContextInvalidated(error)) {
+              deactivate();
+              return;
+            }
+            reportedFeatures.delete(alert.feature);
+            debugWarn(
+              "[Stealth Guard] Failed to report fingerprint access:",
+              error.message || String(error),
+            );
+          } else {
+            debugLog(
+              "[Stealth Guard] Reported fingerprint access:",
+              alert.feature,
+            );
+          }
+        },
+      );
+    } catch (error) {
+      if (isExtensionContextInvalidated(error)) {
+        deactivate();
+      } else {
+        reportedFeatures.delete(alert.feature);
+        if (active) {
           debugWarn(
             "[Stealth Guard] Failed to report fingerprint access:",
-            chrome.runtime.lastError.message,
-          );
-        } else {
-          debugLog(
-            "[Stealth Guard] Reported fingerprint access:",
-            alert.feature,
+            error.message || String(error),
           );
         }
-      },
-    );
-  });
+      }
+    }
+  };
+  window.addEventListener("message", alertMessageListener);
+  window.addEventListener("pagehide", deactivate, { once: true });
 })();

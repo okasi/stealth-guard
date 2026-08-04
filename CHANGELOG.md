@@ -6,9 +6,11 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Added
 
+- Toolbar icons with a per-tab proxy-state corner dot (including amber for PAC-bypassed sites), per-tab blocked-count badges, and a detailed hover summary, plus an expandable popup breakdown with per-domain hit counts.
 - OffscreenCanvas read/export protection, WebGL debug-extension monitoring, expanded Web Audio readout noise, and coherent Navigator hardware/client-hint profiles informed by public anti-bot detector coverage.
 - Language and locale alignment across Navigator, default Intl constructors, Accept-Language, and optional proxy-country synchronization.
-- Optional local third-party tracker blocking with bundled and user-defined domain rules plus per-tab counts.
+- Automatic AdGuard-compatible Base, Tracking Protection, and Cookie Notices subscriptions with local caching, network/cosmetic filtering, user rules, per-site recovery controls, an element picker, and per-tab counts.
+- Eight-hour scheduled filter refreshes plus a YouTube freshness check when enabled lists are more than 45 minutes old.
 - A local Guide & Self-Test page with live identity diagnostics and the repeatable detector suite; CreepJS remains the recurring reference benchmark.
 - Explicit protect-all, bypass-selected, and protect-selected split-tunneling modes with per-site PAC routing.
 - Proxy-location synchronized timezone and permission-preserving coarse HTML geolocation protection.
@@ -34,6 +36,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Fixed
 
+- YouTube player responses now remove first-party video-ad payloads before playback, with a server-side ad-segment skip fallback that still respects site and tracker allowlists.
 - Shared Chrome API calls preserve their owning object, preventing `Illegal invocation` failures from storage, tabs, proxy, privacy, cookies, and runtime methods.
 - MAIN-world config no longer receives proxy profiles or unknown imported fields.
 - Fingerprint alerts now use private per-frame channels instead of page-forgeable public strings.

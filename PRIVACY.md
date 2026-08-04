@@ -26,7 +26,7 @@ Extension settings and configurations are stored locally in your browser using t
 
 - Your protection preferences (enabled/disabled features)
 - Custom allowlists (domains you've allowlisted)
-- Optional tracker-domain rules stored with your local configuration
+- Downloaded ad-blocking filter lists, user rules, and allowlists
 - Per-tab blocked-domain counts kept only in memory
 - Proxy configurations (if configured)
 - Up to 100 recent proxy connection state changes, including timestamps, profile names, verified exit IPs, ownership state, and connection errors
@@ -35,6 +35,17 @@ Extension settings and configurations are stored locally in your browser using t
 ## Network Requests
 
 Stealth Guard may make the following optional network requests:
+
+### Ad-Blocking Filter Updates
+
+When ad and tracker blocking is enabled, Stealth Guard automatically downloads
+the enabled filter subscriptions. The defaults are AdGuard Base, AdGuard
+Tracking Protection, and AdGuard Cookie Notices from `filters.adtidy.org`.
+Downloads use no cookies or browser-history data and contain no page URL. Lists
+are parsed and stored locally. You can disable automatic updates, disable an
+individual list, change the interval, or add a custom HTTPS subscription in
+Settings. A custom subscription provider will receive the ordinary network
+metadata associated with requesting its URL, such as your IP address.
 
 ### Proxy Location Check (Optional)
 
@@ -58,10 +69,12 @@ The extension requests certain browser permissions to function. Here's why each 
 | Permission                          | Purpose                                          |
 | ----------------------------------- | ------------------------------------------------ |
 | `storage`                           | Store your settings locally                      |
+| `unlimitedStorage`                  | Store downloaded filter subscriptions locally   |
+| `alarms`                            | Schedule automatic filter-list updates           |
 | `cookies`                           | Save and restore per-site sessions locally       |
 | `privacy`                           | Control WebRTC IP handling                       |
 | `proxy`                             | Configure proxy settings                         |
-| `webRequest` / `webRequestBlocking` | Align identity headers and apply optional local tracker rules |
+| `webRequest` / `webRequestBlocking` | Align identity headers and apply ad-blocking rules |
 | `tabs`                              | Validate session targets, broadcast settings, and reload changed tabs |
 | `contextMenus`                      | Provide right-click menu options                 |
 | `notifications`                     | Show optional fingerprint detection alerts       |
@@ -69,7 +82,12 @@ The extension requests certain browser permissions to function. Here's why each 
 
 ## Third-Party Services
 
-Stealth Guard does not integrate with any third-party analytics, advertising, or tracking services. If you use automatic proxy location naming, the extension may contact `ipinfo.io` or `ipapi.co` with the proxy endpoint you entered. Proxy verification may contact `api.ipify.org` through the configured proxy.
+Stealth Guard does not integrate with any third-party analytics, advertising,
+or tracking services. Filter updates contact `filters.adtidy.org` by default or
+the HTTPS subscription URLs you configure. If you use automatic proxy location
+naming, the extension may contact `ipinfo.io` or `ipapi.co` with the proxy
+endpoint you entered. Proxy verification may contact `api.ipify.org` through
+the configured proxy.
 
 ## Data Sharing
 

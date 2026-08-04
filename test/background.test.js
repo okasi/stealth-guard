@@ -8,6 +8,7 @@ const { DEFAULT_CONFIG, getUserAgentString } = require("../lib/config.js");
 const BACKGROUND_SCRIPTS = [
   "lib/runtime.js",
   "lib/storage.js",
+  "lib/adblock.js",
   "lib/config.js",
   "lib/domainFilter.js",
   "lib/proxy.js",
@@ -38,6 +39,9 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
     "stealth-guard-proxy-credentials": structuredClone(
       behavior.credentials || {},
     ),
+    ...(behavior.filterCache
+      ? { "stealth-guard-filter-cache": structuredClone(behavior.filterCache) }
+      : {}),
   };
   const state = {
     storageData,
@@ -52,6 +56,12 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
     executedScripts: [],
     cookieQueries: [],
     contextMenus: [],
+    alarms: [],
+    badgeTexts: [],
+    badgeColors: [],
+    browserActionTitles: [],
+    browserActionIcons: [],
+    fetches: [],
     proxyFailuresRemaining: behavior.proxyFailures || 0,
     proxyValue: { mode: "system" },
     proxyControlLevel:
@@ -70,8 +80,13 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
     onProxyError: createEvent(),
     onProxySettingsChanged: createEvent(),
     onContextMenuClicked: createEvent(),
+    onAlarm: createEvent(),
   };
-  const tab = { id: 7, url: "https://www.example.com/account", active: true };
+  const tab = {
+    id: 7,
+    url: behavior.tabUrl || "https://www.example.com/account",
+    active: true,
+  };
   const cookie = {
     name: "session",
     value: "abc",
@@ -124,6 +139,16 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
           }
           callback();
         },
+      },
+    },
+    alarms: {
+      onAlarm: events.onAlarm,
+      create(name, details) {
+        state.alarms.push({ name, details: structuredClone(details) });
+      },
+      clear(name, callback) {
+        state.alarms = state.alarms.filter((entry) => entry.name !== name);
+        if (callback) callback(true);
       },
     },
     webRequest: {
@@ -234,6 +259,20 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
         if (callback) callback(`notification-${state.notifications.length}`);
       },
     },
+    browserAction: {
+      setBadgeText(details) {
+        state.badgeTexts.push(structuredClone(details));
+      },
+      setBadgeBackgroundColor(details) {
+        state.badgeColors.push(structuredClone(details));
+      },
+      setTitle(details) {
+        state.browserActionTitles.push(structuredClone(details));
+      },
+      setIcon(details) {
+        state.browserActionIcons.push(structuredClone(details));
+      },
+    },
     contextMenus: {
       onClicked: events.onContextMenuClicked,
       removeAll(callback) {
@@ -254,11 +293,58 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
       error: vi.fn(),
     },
     navigator: { platform: "Win32", userAgent: "Chrome/137" },
+    document: {
+      createElement(tagName) {
+        if (tagName === "img") {
+          return {
+            onload: null,
+            onerror: null,
+            set src(value) {
+              this.currentSrc = value;
+              Promise.resolve().then(() => this.onload());
+            },
+          };
+        }
+        if (tagName === "canvas") {
+          const canvas = {
+            width: 0,
+            height: 0,
+            getContext() {
+              return {
+                fillStyle: "",
+                drawImage() {},
+                beginPath() {},
+                arc() {},
+                fill() {},
+                getImageData() {
+                  return {
+                    width: canvas.width,
+                    height: canvas.height,
+                    indicatorColor: this.fillStyle,
+                  };
+                },
+              };
+            },
+          };
+          return canvas;
+        }
+        throw new Error(`Unexpected test element: ${tagName}`);
+      },
+    },
     fetch: vi.fn().mockImplementation(async (url) => {
+      state.fetches.push(String(url));
       if (behavior.exitIp && String(url).includes("api.ipify.org")) {
         return {
           ok: true,
           json: async () => ({ ip: behavior.exitIp }),
+        };
+      }
+      if (behavior.filterText && String(url).includes("filters.test")) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => String(behavior.filterText.length) },
+          text: async () => behavior.filterText,
         };
       }
       return { ok: false };
@@ -454,7 +540,7 @@ test("background blocks configured third-party trackers and reports identity dia
   const config = structuredClone(DEFAULT_CONFIG);
   config.tracker.enabled = true;
   config.tracker.customDomains = "metrics.test";
-  const { events, sendMessage, tab } = await installBackground(config);
+  const { events, sendMessage, state, tab } = await installBackground(config);
 
   expect(events.onBeforeRequest.listeners).toHaveLength(1);
   const blockRequest = events.onBeforeRequest.listeners[0];
@@ -486,6 +572,13 @@ test("background blocks configured third-party trackers and reports identity dia
       initiator: tab.url,
     }),
   ).toEqual({});
+  expect(
+    blockRequest({
+      tabId: -1,
+      url: "https://www.google-analytics.com/collect",
+      initiator: "chrome-extension://test/background.html",
+    }),
+  ).toEqual({});
   expect(blockRequest({ tabId: tab.id, url: "not a url" })).toEqual({});
 
   const activity = await sendMessage({
@@ -496,7 +589,22 @@ test("background blocks configured third-party trackers and reports identity dia
   expect(activity.tracker).toEqual({
     count: 3,
     domains: ["www.google-analytics.com", "metrics.test"],
+    entries: [
+      { domain: "www.google-analytics.com", count: 1 },
+      { domain: "metrics.test", count: 2 },
+    ],
   });
+  expect(state.badgeTexts.at(-1)).toEqual({ tabId: tab.id, text: "3" });
+  expect(state.badgeColors.at(-1)).toEqual({
+    tabId: tab.id,
+    color: "#B3261E",
+  });
+  expect(state.browserActionIcons.at(-1).imageData["16"].indicatorColor).toBe(
+    "#5F6368",
+  );
+  expect(state.browserActionTitles.at(-1).title).toContain(
+    "3 ad/tracker requests blocked — Proxy inactive",
+  );
 
   const diagnostics = await sendMessage({
     type: "get-identity-diagnostics",
@@ -542,6 +650,7 @@ test("background blocks configured third-party trackers and reports identity dia
     (await sendMessage({ type: "get-triggered-features", tabId: tab.id }))
       .tracker.count,
   ).toBe(0);
+  expect(state.badgeTexts.at(-1)).toEqual({ tabId: tab.id, text: "0" });
 
   const current = (await sendMessage({ type: "get-config" })).config;
   current.tracker.useBuiltIn = false;
@@ -550,6 +659,117 @@ test("background blocks configured third-party trackers and reports identity dia
     await sendMessage({ type: "update-config", config: current }),
   ).toEqual({ success: true });
   expect(events.onBeforeRequest.listeners).toHaveLength(0);
+});
+
+test("background downloads filter subscriptions and serves cosmetic and user rules", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.filterLists = [
+    {
+      id: "test-list",
+      name: "Test list",
+      url: "https://filters.test/list.txt",
+      enabled: true,
+    },
+  ];
+  const { events, sendMessage, state, tab } = await installBackground(config, {
+    filterText: "||ads.remote^$third-party\n##.generic-ad\nexample.com##.site-ad",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(state.storageData["stealth-guard-filter-cache"].lists["test-list"])
+    .toBeTruthy();
+  expect(state.alarms.some((alarm) => alarm.name === "stealth-guard-filter-update"))
+    .toBe(true);
+  const blockRequest = events.onBeforeRequest.listeners[0];
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      type: "script",
+      url: "https://ads.remote/banner.js",
+      initiator: tab.url,
+    }),
+  ).toEqual({ cancel: true });
+
+  expect(
+    await sendMessage(
+      {
+        type: "get-cosmetic-rules",
+        hostname: "example.com",
+        tokens: ["generic-ad", "bad token"],
+      },
+      { tab },
+    ),
+  ).toMatchObject({
+    success: true,
+    enabled: true,
+    selectors: expect.arrayContaining([".generic-ad", ".site-ad"]),
+  });
+  expect(
+    await sendMessage(
+      {
+        type: "add-cosmetic-rule",
+        hostname: "www.example.com",
+        selector: ".picked-ad",
+      },
+      { tab },
+    ),
+  ).toEqual({ success: true, rule: "www.example.com##.picked-ad" });
+  expect((await sendMessage({ type: "get-config" })).config.tracker.customFilters)
+    .toContain("www.example.com##.picked-ad");
+
+  const status = await sendMessage({ type: "get-adblock-status" });
+  expect(status.status).toMatchObject({
+    updating: false,
+    networkRules: expect.any(Number),
+    cosmeticRules: expect.any(Number),
+  });
+  expect(status.status.lists[0]).toMatchObject({
+    id: "test-list",
+    updatedAt: expect.any(Number),
+  });
+});
+
+test("background refreshes 45-minute-old filters when YouTube starts loading", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.filterLists = [
+    {
+      id: "youtube-freshness",
+      name: "YouTube freshness",
+      url: "https://filters.test/youtube.txt",
+      enabled: true,
+    },
+  ];
+  const staleTimestamp = Date.now() - 60 * 60 * 1000;
+  const { events, state, tab } = await installBackground(config, {
+    filterText: "||fresh.remote^\n##.fresh-ad",
+    filterCache: {
+      version: 2,
+      lists: {
+        "youtube-freshness": {
+          name: "YouTube freshness",
+          url: "https://filters.test/youtube.txt",
+          updatedAt: staleTimestamp,
+          text: "||cached.remote^",
+        },
+      },
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(state.fetches).toEqual([]);
+  expect(state.alarms.at(-1).details.periodInMinutes).toBe(8 * 60);
+  events.onUpdated.listeners[0](
+    tab.id,
+    { status: "loading" },
+    { ...tab, url: "https://www.youtube.com/watch?v=test" },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(state.fetches).toEqual(["https://filters.test/youtube.txt"]);
+  expect(
+    state.storageData["stealth-guard-filter-cache"].lists["youtube-freshness"]
+      .updatedAt,
+  ).toBeGreaterThan(staleTimestamp);
 });
 
 test("background tracks fingerprint access and manages global allowlists", async () => {
@@ -791,6 +1011,17 @@ test("background protects proxy credentials and reports verified connection stat
     profile: "Main",
     exitIp: "203.0.113.8",
   });
+  expect(state.badgeColors.at(-1)).toEqual({
+    tabId: tab.id,
+    color: "#5F6368",
+  });
+  expect(state.browserActionIcons.at(-1).imageData["16"].indicatorColor).toBe(
+    "#188038",
+  );
+  expect(state.browserActionIcons.at(-1).tabId).toBe(tab.id);
+  expect(state.browserActionTitles.at(-1).title).toContain(
+    "0 ad/tracker requests blocked — Proxy active (Main)",
+  );
   const diagnostics = await sendMessage({ type: "get-proxy-diagnostics" });
   expect(diagnostics.diagnostics).toMatchObject({
     effectiveSettings: {
@@ -901,6 +1132,44 @@ test("background protects proxy credentials and reports verified connection stat
   expect(
     (await sendMessage({ type: "get-proxy-diagnostics" })).diagnostics.history,
   ).toEqual([]);
+});
+
+test("toolbar proxy indicator turns amber when the current site is bypassed", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.proxy = {
+    enabled: true,
+    activeProfile: "Main",
+    profiles: [
+      { name: "Main", host: "proxy.test", port: 8443, scheme: "https" },
+    ],
+    domainRoutes: [],
+    bypassList: ["example.com"],
+  };
+  const { events, state, tab } = await installBackground(config, {
+    exitIp: "203.0.113.8",
+    tabUrl: "https://shop.example.com/",
+  });
+
+  expect(state.browserActionIcons.at(-1)).toMatchObject({ tabId: tab.id });
+  expect(state.browserActionIcons.at(-1).imageData["16"].indicatorColor).toBe(
+    "#B06000",
+  );
+  expect(state.browserActionTitles.at(-1).title).toContain(
+    "Proxy bypassed for this site",
+  );
+
+  events.onUpdated.listeners[0](
+    tab.id,
+    { url: "https://proxied.test/" },
+    { ...tab, url: "https://proxied.test/" },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(state.browserActionIcons.at(-1).imageData["16"].indicatorColor).toBe(
+    "#188038",
+  );
+  expect(state.browserActionTitles.at(-1).title).toContain(
+    "Proxy active (Main)",
+  );
 });
 
 test("background surfaces proxy ownership conflicts without fighting them", async () => {

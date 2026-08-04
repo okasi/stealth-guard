@@ -54,6 +54,14 @@ const protectionSources = [
   .map(readSource)
   .join("\n");
 
+const adblockContentSources = [
+  "lib/runtime.js",
+  "lib/domainFilter.js",
+  "content-scripts/adblock.js",
+]
+  .map(readSource)
+  .join("\n");
+
 function protectionInitScript(config) {
   return `
     (() => {
@@ -362,8 +370,44 @@ function uiMockInitScript(config, options = {}) {
         }
         if (message.type === "get-triggered-features") {
           return {
-            features: ["canvas", "user-agent"],
-            tracker: { count: 0, domains: [] },
+            features: ["canvas", "user-agent", "tracker"],
+            tracker: {
+              count: 4,
+              domains: ["ads.example", "analytics.example"],
+              entries: [
+                { domain: "ads.example", count: 3 },
+                { domain: "analytics.example", count: 1 },
+              ],
+            },
+          };
+        }
+        if (message.type === "get-adblock-status") {
+          return {
+            success: true,
+            status: {
+              updating: false,
+              lastUpdate: Date.now(),
+              nextUpdate: Date.now() + 86400000,
+              networkRules: 100,
+              cosmeticRules: 50,
+              error: null,
+              lists: [],
+            },
+          };
+        }
+        if (message.type === "update-adblock-filters") {
+          return {
+            success: true,
+            updated: 3,
+            status: {
+              updating: false,
+              lastUpdate: Date.now(),
+              nextUpdate: Date.now() + 86400000,
+              networkRules: 110,
+              cosmeticRules: 55,
+              error: null,
+              lists: [],
+            },
           };
         }
         if (message.type === "get-identity-diagnostics") {
@@ -562,7 +606,6 @@ function uiMockInitScript(config, options = {}) {
                       languages: [state.config.language.preset, "en"],
                       intlLocale: state.config.language.preset,
                       timeZone: state.config.timezone.name,
-                      timezoneOffset: state.config.timezone.offset,
                     },
                   }
                 : { success: false, error: "Unsupported tab message" },
@@ -1213,7 +1256,6 @@ async function testProtectionRuntime(browser, port) {
     timezone: {
       ...DEFAULT_CONFIG.timezone,
       name: "Asia/Tokyo",
-      offset: 540,
     },
   });
   assert(updatedRuntime.userAgent.includes("Android 13; Pixel 4"));
@@ -1475,13 +1517,283 @@ async function testAllowlistAndChallengeFrames(browser, port) {
   await challengeContext.close();
 }
 
+async function testInvalidatedExtensionContext(browser, port) {
+  const context = await browser.newContext();
+  await context.addInitScript({
+    content: protectionInitScript(DEFAULT_CONFIG),
+  });
+  const pageErrors = [];
+  const page = await context.newPage();
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.goto(`http://site.test:${port}/`);
+  await page.waitForFunction(() => window.__sgHarnessReady === true);
+
+  const invalidatedCalls = await page.evaluate(async () => {
+    let calls = 0;
+    chrome.runtime.sendMessage = () => {
+      calls += 1;
+      throw new Error("Extension context invalidated.");
+    };
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    canvas.getContext("2d").getImageData(0, 0, 1, 1);
+    const gl = document.createElement("canvas").getContext("webgl");
+    gl.getParameter(gl.VENDOR);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    return calls;
+  });
+
+  assert.equal(invalidatedCalls, 1);
+  assert.deepEqual(pageErrors, []);
+  await context.close();
+}
+
+async function testCosmeticFilteringAndElementPicker(browser, port) {
+  const context = await browser.newContext();
+  const pageErrors = [];
+  await context.addInitScript({
+    content: `
+      window.__adblockMessages = [];
+      window.__adblockListeners = [];
+      Object.assign(window.chrome || (window.chrome = {}), {
+        runtime: {
+          lastError: null,
+          onMessage: {
+            addListener(listener) { window.__adblockListeners.push(listener); }
+          },
+          sendMessage(message, callback) {
+            window.__adblockMessages.push(structuredClone(message));
+            if (message.type === "get-cosmetic-rules") {
+              callback({
+                success: true,
+                enabled: true,
+                selectors: [".ad-banner"],
+                youtubeEnhancements: false,
+              });
+            } else {
+              callback({ success: true });
+            }
+          }
+        }
+      });
+    `,
+  });
+  await context.route(`http://site.test:${port}/adblock-test`, (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: "<!doctype html><html><head></head><body></body></html>",
+    }),
+  );
+  const page = await context.newPage();
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await page.goto(`http://site.test:${port}/adblock-test`);
+  await page.evaluate(() => {
+    const ad = document.createElement("div");
+    ad.className = "ad-banner";
+    ad.textContent = "advertisement";
+    const pick = document.createElement("div");
+    pick.id = "pick-me";
+    pick.textContent = "custom annoyance";
+    pick.style.marginTop = "120px";
+    document.body.append(ad, pick);
+  });
+  await page.addScriptTag({ content: adblockContentSources });
+  const cosmeticState = await page.evaluate(() => ({
+    messages: window.__adblockMessages,
+    listeners: window.__adblockListeners.length,
+    styles: document.querySelectorAll("style[data-stealth-guard-adblock]").length,
+    display: getComputedStyle(document.querySelector(".ad-banner")).display,
+  }));
+  assert.equal(
+    cosmeticState.display,
+    "none",
+    `Cosmetic filtering did not apply: ${JSON.stringify({ cosmeticState, pageErrors })}`,
+  );
+  await page.waitForFunction(
+    () => getComputedStyle(document.querySelector(".ad-banner")).display === "none",
+  );
+  await page.evaluate(() => {
+    window.__adblockListeners[0](
+      { type: "start-element-picker" },
+      {},
+      () => {},
+    );
+  });
+  await page.hover("#pick-me");
+  await page.click("#pick-me");
+  await page.waitForFunction(() =>
+    window.__adblockMessages.some(
+      (message) =>
+        message.type === "add-cosmetic-rule" && message.selector === "#pick-me",
+    ),
+  );
+  await page.waitForTimeout(100);
+  const invalidatedCalls = await page.evaluate(async () => {
+    let calls = 0;
+    chrome.runtime.sendMessage = () => {
+      calls += 1;
+      throw new Error("Extension context invalidated.");
+    };
+    const first = document.createElement("div");
+    first.className = "new-cosmetic-token";
+    document.body.appendChild(first);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 120));
+    const second = document.createElement("div");
+    second.className = "another-cosmetic-token";
+    document.body.appendChild(second);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 120));
+    return calls;
+  });
+  assert.equal(invalidatedCalls, 1);
+  assert.deepEqual(pageErrors, []);
+  await context.close();
+}
+
+async function testYouTubeVideoAdSanitizer(browser) {
+  const context = await browser.newContext();
+  await context.addInitScript({ content: protectionInitScript(DEFAULT_CONFIG) });
+  await context.route("https://www.youtube.com/**", (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.includes("/youtubei/v1/player")) {
+      route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          adPlacements: [{ id: "video-ad" }],
+          adSlots: [{ id: "slot" }],
+          playerAds: [{ id: "player-ad" }],
+          videoDetails: { videoId: "content-video" },
+          playerResponse: {
+            adPlacements: [{ id: "nested-ad" }],
+            videoDetails: { videoId: "nested-content" },
+          },
+        }),
+      });
+      return;
+    }
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>`,
+    });
+  });
+  const page = await context.newPage();
+  await page.goto("https://www.youtube.com/watch?v=content-video");
+  const result = await page.evaluate(async () => {
+    window.ytInitialPlayerResponse = {
+      adPlacements: [{ id: "initial-ad" }],
+      adSlots: [{ id: "initial-slot" }],
+      videoDetails: { videoId: "initial-content" },
+    };
+    const parsed = JSON.parse(
+      JSON.stringify({
+        playerAds: [{ id: "parsed-ad" }],
+        entries: [
+          {
+            command: {
+              reelWatchEndpoint: { adClientParams: { isAd: true } },
+            },
+          },
+          { command: { reelWatchEndpoint: { videoId: "short-content" } } },
+        ],
+      }),
+    );
+    const fetched = await fetch("/youtubei/v1/player?key=test", {
+      method: "POST",
+    }).then((response) => response.json());
+    const xhr = await new Promise((resolvePromise, rejectPromise) => {
+      const request = new XMLHttpRequest();
+      request.open("GET", "/youtubei/v1/player?key=xhr");
+      request.responseType = "json";
+      request.timeout = 3000;
+      request.onload = () => resolvePromise(request.response);
+      request.onerror = rejectPromise;
+      request.ontimeout = () => rejectPromise(new Error("YouTube XHR timed out"));
+      request.send();
+    });
+
+    const player = document.createElement("div");
+    player.id = "movie_player";
+    player.className = "ad-showing";
+    player.getStatsForNerds = () => ({ debug_info: "SSAP, AD segment" });
+    player.getProgressState = () => ({ duration: 15, current: 1 });
+    player.seekTo = (time) => {
+      window.__youtubeSeekTarget = time;
+      player.classList.remove("ad-showing");
+    };
+    document.body.appendChild(player);
+
+    return {
+      initial: window.ytInitialPlayerResponse,
+      parsed,
+      fetched,
+      xhr,
+    };
+  });
+  for (const payload of [result.initial, result.fetched, result.xhr]) {
+    assert.equal("adPlacements" in payload, false);
+    assert.equal("adSlots" in payload, false);
+    assert.equal("playerAds" in payload, false);
+  }
+  assert.equal(result.initial.videoDetails.videoId, "initial-content");
+  assert.equal(result.fetched.videoDetails.videoId, "content-video");
+  assert.equal("adPlacements" in result.fetched.playerResponse, false);
+  assert.equal(result.fetched.playerResponse.videoDetails.videoId, "nested-content");
+  assert.equal("playerAds" in result.parsed, false);
+  assert.equal(result.parsed.entries.length, 1);
+  assert.equal(
+    result.parsed.entries[0].command.reelWatchEndpoint.videoId,
+    "short-content",
+  );
+  await page.waitForTimeout(750);
+  const playerState = await page.evaluate(() => {
+    const player = document.getElementById("movie_player");
+    return {
+      seekTarget: window.__youtubeSeekTarget,
+      className: player && player.className,
+      hasStats: Boolean(player && player.getStatsForNerds),
+      hasProgress: Boolean(player && player.getProgressState),
+      hasSeek: Boolean(player && player.seekTo),
+    };
+  });
+  assert.equal(
+    playerState.seekTarget,
+    15,
+    `YouTube server-side ad fallback did not seek: ${JSON.stringify(playerState)}`,
+  );
+  const allowlistedConfig = structuredClone(DEFAULT_CONFIG);
+  allowlistedConfig.tracker.whitelist = "youtube.com";
+  const allowlisted = await page.evaluate((nextConfig) => {
+    window.__sgUpdateConfig(nextConfig);
+    return JSON.parse('{"adPlacements":[{"id":"allowed"}]}');
+  }, allowlistedConfig);
+  assert.equal(allowlisted.adPlacements[0].id, "allowed");
+  await context.close();
+}
+
 async function testPopup(browser) {
   const context = await browser.newContext();
   await context.addInitScript({ content: uiMockInitScript(DEFAULT_CONFIG) });
   const page = await context.newPage();
   await page.goto(pathToFileURL(join(root, "popup/popup.html")).href);
   await page.waitForSelector("#current-url:text-is('example.com')");
-  await page.waitForSelector("#identity-summary:text-is('Active')");
+  await page.waitForSelector("#tracker-status:text-is('4 blocked')");
+  await page.click("#tracker-details-toggle");
+  await page.waitForSelector("#tracker-blocked-panel:not([hidden])");
+  assert.equal(await page.locator("#tracker-blocked-list li").count(), 2);
+  assert.match(await page.textContent("#tracker-blocked-panel"), /ads\.example/);
+  assert.match(await page.textContent("#tracker-blocked-panel"), /×3/);
+  assert.equal(
+    await page.getAttribute("#tracker-details-toggle", "aria-expanded"),
+    "true",
+  );
+  assert.match(
+    await page.locator('#timezone-quick-select option[value="Europe/Paris"]').textContent(),
+    /^(?:CET|CEST)\/Paris \(GMT\+\d+(?::\d{2})?\)$/,
+  );
+  assert.equal(await page.locator(".identity-diagnostics").count(), 0);
+  assert.equal(await page.locator("#toggle-adblock-site").isEnabled(), true);
+  assert.equal(await page.locator("#toggle-cosmetic-site").isEnabled(), true);
+  assert.equal(await page.locator("#block-element").isEnabled(), true);
   await page.screenshot({ path: join(tmpdir(), "stealth-guard-popup.png") });
 
   await page.evaluate(() => {
@@ -1530,7 +1842,7 @@ async function testPopup(browser) {
   await page.selectOption("#webgl-quick-select", "apple");
   await page.selectOption("#useragent-quick-select", "android");
   await page.selectOption("#language-quick-select", "sv-SE");
-  await page.selectOption("#timezone-quick-select", "Asia/Tokyo|540");
+  await page.selectOption("#timezone-quick-select", "Asia/Tokyo");
   await page.waitForFunction(
     () =>
       window.__chromeState.config.webgl.preset === "apple" &&
@@ -1620,6 +1932,7 @@ async function testOptions(browser) {
   await page.selectOption("#language-preset", "sv-SE");
   await page.check("#tracker-enabled");
   await page.uncheck("#tracker-use-built-in");
+  await page.uncheck('[data-filter-list-id="adguard-cookies"]');
   await page.fill("#tracker-custom-domains", "*.metrics.test");
   await page.waitForTimeout(1100);
   assert.deepEqual(
@@ -1630,10 +1943,15 @@ async function testOptions(browser) {
       window.__chromeState.config.language.preset,
       window.__chromeState.config.tracker.enabled,
       window.__chromeState.config.tracker.useBuiltIn,
+      window.__chromeState.config.tracker.filterLists.find(
+        (entry) => entry.id === "adguard-cookies",
+      ).enabled,
       window.__chromeState.config.tracker.customDomains,
     ]),
-    [false, "*.custom.test", "high", "sv-SE", true, false, "*.metrics.test"],
+    [false, "*.custom.test", "high", "sv-SE", true, false, false, "*.metrics.test"],
   );
+  await page.click("#update-filter-lists");
+  await page.waitForSelector(".toast.success.show");
   await page.check("#global-enabled");
 
   await page.click("#proxy-section details summary");
@@ -1953,6 +2271,9 @@ async function main() {
   try {
     await testProtectionRuntime(browser, server.port);
     await testAllowlistAndChallengeFrames(browser, server.port);
+    await testInvalidatedExtensionContext(browser, server.port);
+    await testCosmeticFilteringAndElementPicker(browser, server.port);
+    await testYouTubeVideoAdSanitizer(browser);
     await testPopup(browser);
     await testOptions(browser);
     await testGuide(browser);
