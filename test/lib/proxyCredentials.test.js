@@ -6,6 +6,7 @@ const { normalizeProxyProfile } = require("../../lib/proxy.js");
 globalThis.normalizeProxyProfile = normalizeProxyProfile;
 const {
   MAX_PROXY_AUTH_ATTEMPTS,
+  PROXY_AUTH_FAILURE_MAX_AGE_MS,
   PROXY_CREDENTIALS_STORAGE_KEY,
   createProxyCredentialManager,
   getProxyCredentialEndpoint,
@@ -257,4 +258,130 @@ test("auth handler answers only bounded active proxy challenges", async () => {
   expect(
     manager.handleAuthRequired({ ...repeated, requestId: "missing-secret" }),
   ).toEqual({ cancel: true });
+});
+
+test("auth challenges record why a profile could not authenticate", async () => {
+  const storage = createStorage();
+  let config = {
+    enabled: true,
+    proxy: {
+      enabled: true,
+      activeProfile: "Main",
+      fallbackProfiles: [],
+      profiles: [mainProfile],
+      domainRoutes: [],
+    },
+  };
+  const manager = createProxyCredentialManager({
+    storageApi: storage,
+    getConfig: () => config,
+  });
+  await manager.initialize();
+
+  expect(manager.getAuthFailure({ host: "bad host" })).toBeNull();
+  expect(manager.getAuthFailure(mainProfile)).toBeNull();
+
+  // A challenge from an endpoint no active profile uses.
+  expect(
+    manager.handleAuthRequired({
+      isProxy: true,
+      requestId: "stray",
+      challenger: { host: "other.test", port: 3128 },
+    }),
+  ).toEqual({ cancel: true });
+  expect(
+    manager.getAuthFailure({ ...mainProfile, host: "other.test", port: 3128 })
+      .reason,
+  ).toBe(
+    "other.test:3128 asked for proxy credentials but no active profile uses " +
+      "that endpoint",
+  );
+
+  // A challenge for the active profile with nothing saved.
+  expect(
+    manager.handleAuthRequired({
+      isProxy: true,
+      requestId: "missing",
+      challenger: { host: "proxy.test", port: 8443 },
+    }),
+  ).toEqual({ cancel: true });
+  expect(manager.getAuthFailure(mainProfile).reason).toBe(
+    "proxy.test:8443 requires a username and password, but no proxy " +
+      "credentials are saved for it",
+  );
+
+  // Saving credentials clears the stale reason.
+  await manager.setCredential(mainProfile, {
+    username: "alice",
+    password: "wrong",
+  });
+  expect(manager.getAuthFailure(mainProfile)).toBeNull();
+
+  // Repeated challenges for one request mean the proxy rejected them.
+  for (let attempt = 0; attempt <= MAX_PROXY_AUTH_ATTEMPTS; attempt += 1) {
+    manager.handleAuthRequired({
+      isProxy: true,
+      requestId: "rejected",
+      challenger: { host: "proxy.test", port: 8443 },
+    });
+  }
+  expect(manager.getAuthFailure(mainProfile).reason).toBe(
+    `proxy.test:8443 rejected the saved credentials for "alice" after ` +
+      `${MAX_PROXY_AUTH_ATTEMPTS} attempts`,
+  );
+
+  // Failures older than the freshness window are not reported.
+  const staleNow = Date.now() + PROXY_AUTH_FAILURE_MAX_AGE_MS + 1;
+  const clock = vi.spyOn(Date, "now").mockReturnValue(staleNow);
+  expect(manager.getAuthFailure(mainProfile)).toBeNull();
+  clock.mockRestore();
+
+  // A challenge with no request id cannot be replayed, and says so.
+  await manager.removeCredential(mainProfile);
+  expect(manager.getAuthFailure(mainProfile)).toBeNull();
+  await manager.setCredential(mainProfile, {
+    username: "alice",
+    password: "wrong",
+  });
+  expect(
+    manager.handleAuthRequired({
+      isProxy: true,
+      challenger: { host: "proxy.test", port: 8443 },
+    }),
+  ).toEqual({ cancel: true });
+  expect(manager.getAuthFailure(mainProfile).reason).toBe(
+    "proxy.test:8443 challenged a request that carried no id, so the " +
+      "credentials could not be replayed safely",
+  );
+
+  // A challenger that reports no host still yields a usable endpoint label.
+  expect(
+    manager.handleAuthRequired({
+      isProxy: true,
+      requestId: "hostless",
+      challenger: { port: 8443 },
+    }),
+  ).toEqual({ cancel: true });
+
+  // Pruning drops reasons for endpoints that are no longer configured.
+  manager.handleAuthRequired({
+    isProxy: true,
+    requestId: "prune-me",
+    challenger: { host: "gone.test", port: 9000 },
+  });
+  const goneProfile = { ...mainProfile, host: "gone.test", port: 9000 };
+  expect(manager.getAuthFailure(goneProfile)).not.toBeNull();
+  await manager.prune([mainProfile, goneProfile]);
+  expect(manager.getAuthFailure(goneProfile)).not.toBeNull();
+  await manager.prune([mainProfile]);
+  expect(manager.getAuthFailure(goneProfile)).toBeNull();
+
+  manager.handleAuthRequired({
+    isProxy: true,
+    requestId: "cleared",
+    challenger: { host: "proxy.test", port: 8443 },
+  });
+  await manager.clearAll();
+  expect(manager.getAuthFailure(mainProfile)).toBeNull();
+  config = null;
 });

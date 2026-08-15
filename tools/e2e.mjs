@@ -1864,7 +1864,7 @@ async function testPopup(browser) {
 
   await page.click('[data-feature="canvas"] .feature-name');
   await page.click("#open-options");
-  await page.click("#open-guide");
+  await page.click("#open-selftest");
   await page.click("#test-webrtc");
   assert.equal(
     await page.evaluate(() => window.__chromeState.openedOptions),
@@ -1877,7 +1877,8 @@ async function testPopup(browser) {
   assert(
     await page.evaluate(() =>
       window.__chromeState.createdTabs.some(
-        (entry) => entry.url === "guide/guide.html?tabId=1",
+        (entry) =>
+          entry.url === "options/options.html?tabId=1#selftest-section",
       ),
     ),
   );
@@ -1913,6 +1914,16 @@ async function testPopup(browser) {
   await noSitePage.click("#save-session");
   await noSitePage.waitForSelector("#session-status.error");
   await noSiteContext.close();
+}
+
+// Advanced proxy controls live in collapsed <details> groups, so a user has to
+// expand one before its fields are reachable.
+async function openProxyGroup(page, selector) {
+  const group = page.locator(selector);
+  if (!(await group.evaluate((el) => el.open))) {
+    await group.locator("summary").click();
+  }
+  await group.locator(".proxy-group-panel").waitFor({ state: "visible" });
 }
 
 async function testOptions(browser) {
@@ -1954,7 +1965,7 @@ async function testOptions(browser) {
   await page.waitForSelector(".toast.success.show");
   await page.check("#global-enabled");
 
-  await page.click("#proxy-section details summary");
+  await page.click("#proxy-section .proxy-editor summary");
   await page.fill("#new-proxy-host", "bad host");
   await page.fill("#new-proxy-port", "0");
   await page.click("#add-proxy-profile");
@@ -2012,7 +2023,7 @@ async function testOptions(browser) {
     },
   );
 
-  await page.click("#proxy-section details summary");
+  await page.click("#proxy-section .proxy-editor summary");
   await page.fill("#new-proxy-host", "backup.proxy.test");
   await page.fill("#new-proxy-port", "8080");
   await page.fill("#new-proxy-name", "Backup");
@@ -2020,7 +2031,9 @@ async function testOptions(browser) {
   await page.click("#add-proxy-profile");
   const backupCard = page.locator(".proxy-profile-card", { hasText: "Backup" });
   await page.selectOption("#proxy-active-profile", "Renamed");
+  await openProxyGroup(page, "#proxy-advanced-group");
   await page.selectOption("#proxy-fallback-profiles", ["Backup"]);
+  await openProxyGroup(page, "#proxy-routes-group");
   await page.fill("#new-proxy-route-pattern", "bad host");
   await page.click("#add-proxy-route");
   await page.waitForSelector(".toast.error.show");
@@ -2031,7 +2044,10 @@ async function testOptions(browser) {
     hasText: "*.video.example",
   });
   await page.selectOption("#proxy-routing-mode", "protect-selected");
-  assert(await page.isDisabled("#proxy-bypass-list"));
+  // Controls that the mode ignores are removed, not left visible but inert.
+  assert(await page.locator("#proxy-bypass-field").isHidden());
+  assert(await page.locator("#proxy-default-field").isHidden());
+  assert(await page.locator("#proxy-routes-group").evaluate((el) => el.open));
   await page.uncheck("#proxy-sync-timezone");
   await page.uncheck("#proxy-sync-geolocation");
   await page.uncheck("#proxy-sync-language");
@@ -2066,14 +2082,16 @@ async function testOptions(browser) {
     [],
   );
 
-  await page.selectOption("#proxy-active-profile", "Renamed");
+  // Leaving protect-selected brings the default-proxy control back.
   await page.selectOption("#proxy-routing-mode", "bypass-selected");
+  await page.selectOption("#proxy-active-profile", "Renamed");
   await page.check("#proxy-sync-timezone");
   await page.check("#proxy-sync-geolocation");
   await page.check("#proxy-sync-language");
   await page.check("#proxy-enabled");
   await page.click("#save-settings");
   assert(await page.evaluate(() => window.__chromeState.reloads > 0));
+  await openProxyGroup(page, "#proxy-diagnostics-group");
   await page.click("#refresh-proxy-diagnostics");
   await page.waitForSelector("#proxy-connection-history li:not(.empty-state)");
   const diagnosticsDownloadPromise = page.waitForEvent("download");
@@ -2174,20 +2192,23 @@ async function testOptions(browser) {
   await context.close();
 }
 
-async function testGuide(browser) {
+async function testSelfTest(browser) {
   const context = await browser.newContext();
   await context.addInitScript({ content: uiMockInitScript(DEFAULT_CONFIG) });
   const page = await context.newPage();
-  const guideUrl = pathToFileURL(join(root, "guide/guide.html"));
-  guideUrl.searchParams.set("tabId", "1");
-  await page.goto(guideUrl.href);
-  await page.waitForSelector("#test-summary[data-state='success']");
-  assert.match(await page.textContent("#test-summary"), /passed/i);
+  // The popup and the context menu both deep-link into the options page.
+  const selfTestUrl = pathToFileURL(join(root, "options/options.html"));
+  selfTestUrl.searchParams.set("tabId", "1");
+  selfTestUrl.hash = "selftest-section";
+  await page.goto(selfTestUrl.href);
+  await page.waitForSelector("#selftest-summary[data-state='success']");
+  assert.match(await page.textContent("#selftest-summary"), /passed/i);
   assert.equal(await page.textContent("#result-language"), "en-US · en-US, en");
   assert.equal(
     await page.textContent("#result-webrtc"),
     `${DEFAULT_CONFIG.webrtc.policy} · controlled_by_this_extension`,
   );
+  await page.click("#selftest-detectors-group summary");
   assert.equal(
     await page.getAttribute("a.reference", "href"),
     "https://creepjs.org/checker#scan",
@@ -2276,7 +2297,7 @@ async function main() {
     await testYouTubeVideoAdSanitizer(browser);
     await testPopup(browser);
     await testOptions(browser);
-    await testGuide(browser);
+    await testSelfTest(browser);
     await testUiInitializationFailures(browser);
     await testAuxiliaryVpnApiFailures(browser);
     console.log("End-to-end browser checks passed");

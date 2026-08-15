@@ -9,7 +9,11 @@ const {
   applyProxySettings,
   buildPacCondition,
   createUnknownProxyLocation,
+  describeProxyChain,
+  describeProxyFetchError,
+  describeProxyProfile,
   fetchJson,
+  formatProxyEndpoint,
   fetchProxyLocation,
   findInvalidProxyPattern,
   formatProxyServer,
@@ -413,7 +417,10 @@ test("builds PAC conditions and scripts for every pattern type", () => {
   );
   expect(runPacScript(directPac, "unrelated.test")).toBe("DIRECT");
   expect(directPac).toContain('return "DIRECT"');
+  expect(directPac).not.toContain(PROXY_VERIFICATION_HOST);
+  expect(runPacScript(directPac, PROXY_VERIFICATION_HOST)).toBe("DIRECT");
   expect(emptyPac).toContain('return "DIRECT"');
+  expect(emptyPac).not.toContain(PROXY_VERIFICATION_HOST);
   expect(skippedPac).toContain('return "DIRECT"');
   expect(PROXY_VERIFICATION_URL).toContain(PROXY_VERIFICATION_HOST);
   expect(runPacScript(forcedVerificationPac, "example.org")).toBe("DIRECT");
@@ -628,4 +635,55 @@ test("applyProxySettings loads config and rejects every invalid enabled state", 
       },
     }),
   ).rejects.toThrow("no valid active profile");
+});
+
+test("proxy profiles describe themselves for connection errors", () => {
+  const profile = { name: "Paris", scheme: "socks5", host: "1.2.3.4", port: 1080 };
+  expect(formatProxyEndpoint(profile)).toBe("socks5://1.2.3.4:1080");
+  expect(formatProxyEndpoint({ host: "bad host" })).toBeNull();
+  expect(describeProxyProfile(profile)).toBe("Paris (socks5://1.2.3.4:1080)");
+  expect(describeProxyProfile({ ...profile, name: "  " })).toBe(
+    "socks5://1.2.3.4:1080",
+  );
+  expect(describeProxyProfile(null)).toBeNull();
+
+  expect(describeProxyChain()).toBe("the configured proxy");
+  expect(describeProxyChain([{ host: "bad host" }])).toBe(
+    "the configured proxy",
+  );
+  expect(describeProxyChain([profile])).toBe("Paris (socks5://1.2.3.4:1080)");
+  expect(
+    describeProxyChain([
+      profile,
+      { name: "Berlin", scheme: "http", host: "p.test", port: 80 },
+    ]),
+  ).toBe(
+    "proxy chain Paris (socks5://1.2.3.4:1080) then Berlin (http://p.test:80)",
+  );
+});
+
+test("proxy fetch failures explain the underlying cause", () => {
+  const abortError = Object.assign(new Error("aborted"), {
+    name: "AbortError",
+  });
+  expect(describeProxyFetchError(abortError, 5000)).toBe(
+    "no response within 5000 ms — the proxy accepted the connection but " +
+      "never returned the request",
+  );
+
+  expect(describeProxyFetchError(new TypeError("Failed to fetch"), 5000)).toBe(
+    "Failed to fetch — the browser could not complete the request through " +
+      "the proxy (host unreachable, connection refused, TLS failure, or the " +
+      "proxy rejected the request)",
+  );
+  expect(describeProxyFetchError(new TypeError(""), 5000)).toMatch(
+    /^TypeError — the browser could not complete/,
+  );
+  expect(
+    describeProxyFetchError(new Error("NetworkError while fetching"), 5000),
+  ).toMatch(/^NetworkError while fetching — the browser could not complete/);
+
+  expect(describeProxyFetchError(new Error("boom"), 5000)).toBe("boom");
+  expect(describeProxyFetchError(new Error(""), 5000)).toBe("Error");
+  expect(describeProxyFetchError(null, 5000)).toBe("null");
 });

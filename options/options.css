@@ -426,18 +426,40 @@ textarea:focus-visible {
   margin-top: 12px;
 }
 
-.proxy-editor summary {
+.proxy-editor summary,
+.proxy-group > summary {
   cursor: pointer;
   color: #1a73e8;
   font-weight: 650;
 }
 
-.proxy-editor-panel {
+.proxy-editor-panel,
+.proxy-group-panel {
   margin-top: 10px;
   padding: 16px;
   background: var(--surface-subtle);
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+
+.proxy-group {
+  margin-bottom: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.proxy-group:last-child {
+  margin-bottom: 0;
+}
+
+.proxy-group-panel > .field:last-child {
+  margin-bottom: 0;
+}
+
+/* A step whose control does not apply to the current routing mode is
+   removed from the flow rather than left visible but inert. */
+.field[hidden] {
+  display: none;
 }
 
 .proxy-editor-grid {
@@ -494,14 +516,8 @@ textarea:focus-visible {
 
 .proxy-diagnostics-heading {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.proxy-diagnostics-heading > div {
-  display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
 }
 
@@ -659,5 +675,120 @@ textarea:focus-visible {
   *::after {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+.selftest-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.selftest-controls small {
+  margin: 0;
+  color: var(--muted);
+}
+
+.selftest-controls small[data-state="success"] {
+  color: #2e7d32;
+}
+
+.selftest-controls small[data-state="warning"] {
+  color: #9a6700;
+}
+
+.selftest-controls small[data-state="error"] {
+  color: #b42318;
+}
+
+.identity-grid,
+.benchmark-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.identity-grid > div,
+.benchmark-grid > a {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+}
+
+.identity-grid strong,
+.identity-grid span,
+.benchmark-grid strong,
+.benchmark-grid span {
+  display: block;
+}
+
+.identity-grid strong,
+.benchmark-grid strong {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.identity-grid span {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.identity-grid span[data-state="success"] {
+  color: #2e7d32;
+}
+
+.identity-grid span[data-state="warning"] {
+  color: #9a6700;
+}
+
+.identity-grid span[data-state="error"] {
+  color: #b42318;
+  font-weight: 700;
+}
+
+.benchmark-grid a {
+  color: var(--text);
+  text-decoration: none;
+  transition:
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+
+.benchmark-grid a:hover {
+  border-color: var(--primary);
+  transform: translateY(-1px);
+}
+
+.benchmark-grid .reference {
+  border-color: var(--primary);
+}
+
+.benchmark-grid strong {
+  color: var(--text);
+  font-size: 13px;
+  text-transform: none;
+}
+
+.benchmark-grid span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 680px) {
+  .selftest-controls {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .identity-grid,
+  .benchmark-grid {
+    grid-template-columns: 1fr;
   }
 }

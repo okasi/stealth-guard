@@ -62,9 +62,6 @@
               <button id="import-config" class="btn-secondary">
                 📥 Import
               </button>
-              <a class="button-link btn-secondary" href="../guide/guide.html">
-                🧭 Guide &amp; Self-Test
-              </a>
               <input
                 type="file"
                 id="import-file"
@@ -88,7 +85,8 @@
           </h2>
           <p class="section-desc">
             Route browser traffic through SOCKS4/5 or HTTP/HTTPS proxy
-            servers. OpenVPN and WireGuard configurations are not supported.
+            servers. Add a server, pick which one to use, then choose which
+            sites go through it. OpenVPN and WireGuard are not supported.
           </p>
           <div class="proxy-runtime-card" id="proxy-runtime-card">
             <div>
@@ -109,72 +107,10 @@
           </div>
 
           <div class="field">
-            <label for="proxy-routing-mode">Split-tunneling mode</label>
-            <select id="proxy-routing-mode">
-              <option value="protect-all">Protect all public sites</option>
-              <option value="bypass-selected">
-                Protect all except bypassed sites
-              </option>
-              <option value="protect-selected">
-                Protect only selected sites
-              </option>
-            </select>
-            <small id="proxy-routing-mode-help"
-              >Selected bypass destinations connect directly and expose your
-              normal network identity.</small
-            >
-          </div>
-
-          <div class="field">
-            <label for="proxy-active-profile"
-              >Default Proxy Profile</label
-            >
-            <select id="proxy-active-profile">
-              <option value="">None (Direct)</option>
-            </select>
-            <small
-              >Select a proxy profile to route all traffic through. Leave as
-              "None" to only use domain-specific routing.</small
-            >
-          </div>
-
-          <div class="field">
-            <label for="proxy-fallback-profiles"
-              >Fallback Profiles (ordered)</label
-            >
-            <select id="proxy-fallback-profiles" multiple size="4"></select>
-            <small
-              >When the active endpoint fails, Chrome tries selected profiles
-              in this order. Hold Ctrl/Cmd to select more than one.</small
-            >
-          </div>
-
-          <div class="field proxy-location-sync">
-            <label>Location synchronization</label>
-            <label class="checkbox-inline">
-              <input type="checkbox" id="proxy-sync-timezone" />
-              Match timezone to the effective proxy location
-            </label>
-            <label class="checkbox-inline">
-              <input type="checkbox" id="proxy-sync-geolocation" />
-              Match HTML geolocation to coarse proxy coordinates
-            </label>
-            <label class="checkbox-inline">
-              <input type="checkbox" id="proxy-sync-language" />
-              Match language and locale to the proxy country
-            </label>
-            <small
-              >Synchronization is applied per site and only when its selected
-              proxy profile has location metadata.</small
-            >
-          </div>
-
-          <div class="field">
-            <label>Proxy Profiles</label>
-            <div id="proxy-profiles-list" class="proxy-profiles-list">
-            </div>
+            <label>Step 1 · Your proxy servers</label>
+            <div id="proxy-profiles-list" class="proxy-profiles-list"></div>
             <details class="proxy-editor">
-              <summary>Add New Proxy Profile</summary>
+              <summary id="proxy-editor-summary">Add a proxy server</summary>
               <div class="proxy-editor-panel">
                 <div class="proxy-editor-grid">
                   <div>
@@ -281,59 +217,128 @@
             </details>
           </div>
 
-          <div class="field">
-            <label for="proxy-bypass-list"
-              >Bypass/Direct List (comma-separated)</label
+          <div class="field" id="proxy-default-field">
+            <label for="proxy-active-profile">Step 2 · Default proxy</label>
+            <select id="proxy-active-profile">
+              <option value="">None (Direct)</option>
+            </select>
+            <small
+              >Traffic goes through this server unless a per-site rule says
+              otherwise.</small
             >
+          </div>
+
+          <div class="field">
+            <label for="proxy-routing-mode" id="proxy-step-coverage"
+              >Step 3 · Which sites use it</label
+            >
+            <select id="proxy-routing-mode">
+              <option value="protect-all">Every site</option>
+              <option value="bypass-selected">
+                Every site except the ones I list
+              </option>
+              <option value="protect-selected">
+                Only the sites I list
+              </option>
+            </select>
+            <small id="proxy-routing-mode-help"
+              >Selected bypass destinations connect directly and expose your
+              normal network identity.</small
+            >
+          </div>
+
+          <div class="field" id="proxy-bypass-field">
+            <label for="proxy-bypass-list">Sites that skip the proxy</label>
             <textarea
               id="proxy-bypass-list"
-              rows="6"
+              rows="4"
               placeholder="localhost, 127.0.0.1, 192.168.*, 10.*"
             ></textarea>
             <small
-              >Domains/IPs that bypass the proxy and connect directly. These
-              destinations can see your normal network identity.</small
+              >Comma-separated domains or IPs. These connect directly and can
+              see your normal network identity.</small
             >
           </div>
 
-          <div class="field">
-            <label>Per-site Proxy Routes</label>
-            <div id="proxy-routes-list" class="proxy-routes-list"></div>
-            <div class="proxy-route-editor">
-              <div>
-                <label for="new-proxy-route-pattern" class="proxy-field-label"
-                  >Domain pattern</label
-                >
-                <input
-                  type="text"
-                  id="new-proxy-route-pattern"
-                  placeholder="*.example.com"
-                  class="compact-control"
-                />
+          <details class="proxy-group" id="proxy-routes-group">
+            <summary id="proxy-routes-summary">Per-site proxy rules</summary>
+            <div class="proxy-group-panel">
+              <div id="proxy-routes-list" class="proxy-routes-list"></div>
+              <div class="proxy-route-editor">
+                <div>
+                  <label for="new-proxy-route-pattern" class="proxy-field-label"
+                    >Domain pattern</label
+                  >
+                  <input
+                    type="text"
+                    id="new-proxy-route-pattern"
+                    placeholder="*.example.com"
+                    class="compact-control"
+                  />
+                </div>
+                <div>
+                  <label for="new-proxy-route-profile" class="proxy-field-label"
+                    >Proxy server</label
+                  >
+                  <select
+                    id="new-proxy-route-profile"
+                    class="compact-control"
+                  ></select>
+                </div>
+                <button id="add-proxy-route" class="btn-primary btn-compact">
+                  Add rule
+                </button>
               </div>
-              <div>
-                <label for="new-proxy-route-profile" class="proxy-field-label"
-                  >Proxy profile</label
-                >
-                <select
-                  id="new-proxy-route-profile"
-                  class="compact-control"
-                ></select>
-              </div>
-              <button id="add-proxy-route" class="btn-primary btn-compact">
-                Add route
-              </button>
+              <small id="proxy-routes-help"
+                >Each rule sends matching sites through the server you pick
+                here, overriding the default proxy.</small
+              >
             </div>
-            <small
-              >Routes override the active profile for matching sites. With
-              Active Profile set to None, only matching sites use a proxy.</small
-            >
-          </div>
+          </details>
 
-          <div class="field proxy-diagnostics">
-            <div class="proxy-diagnostics-heading">
-              <label>Connection diagnostics and history</label>
-              <div>
+          <details class="proxy-group" id="proxy-advanced-group">
+            <summary>Fallbacks and location matching</summary>
+            <div class="proxy-group-panel">
+              <div class="field">
+                <label for="proxy-fallback-profiles"
+                  >Fallback servers (ordered)</label
+                >
+                <select id="proxy-fallback-profiles" multiple size="4"></select>
+                <small
+                  >If the default proxy stops responding, Chrome tries these in
+                  order. Hold Ctrl/Cmd to pick more than one.</small
+                >
+              </div>
+
+              <div class="field proxy-location-sync">
+                <label>Match browser identity to the proxy location</label>
+                <label class="checkbox-inline">
+                  <input type="checkbox" id="proxy-sync-timezone" />
+                  Timezone
+                </label>
+                <label class="checkbox-inline">
+                  <input type="checkbox" id="proxy-sync-geolocation" />
+                  HTML geolocation (coarse coordinates)
+                </label>
+                <label class="checkbox-inline">
+                  <input type="checkbox" id="proxy-sync-language" />
+                  Language and locale
+                </label>
+                <small
+                  >Applied per site, and only when the proxy server used for
+                  that site has location metadata.</small
+                >
+              </div>
+            </div>
+          </details>
+
+          <details
+            class="proxy-group proxy-diagnostics"
+            id="proxy-diagnostics-group"
+          >
+            <summary>Connection diagnostics and history</summary>
+            <div class="proxy-group-panel">
+              <div class="proxy-diagnostics-heading">
                 <button id="refresh-proxy-diagnostics" class="btn-secondary btn-compact">
                   Refresh
                 </button>
@@ -344,15 +349,15 @@
                   Clear history
                 </button>
               </div>
+              <div id="proxy-diagnostics-summary" class="proxy-diagnostics-summary"></div>
+              <ol id="proxy-connection-history" class="proxy-connection-history"></ol>
+              <small
+                >History is stored locally and capped at 100 state changes. It
+                contains status, profile name, exit IP, and errors—never proxy
+                passwords.</small
+              >
             </div>
-            <div id="proxy-diagnostics-summary" class="proxy-diagnostics-summary"></div>
-            <ol id="proxy-connection-history" class="proxy-connection-history"></ol>
-            <small
-              >History is stored locally and capped at 100 state changes. It
-              contains status, profile name, exit IP, and errors—never proxy
-              passwords.</small
-            >
-          </div>
+          </details>
         </section>
 
         <section class="card" id="tracker-section">
@@ -860,6 +865,114 @@
             >
             <textarea id="webgpu-whitelist" rows="2"></textarea>
           </div>
+        </section>
+
+        <section class="card" id="selftest-section">
+          <h2><span>🧭 Self-Test</span></h2>
+          <p class="section-desc">
+            Compare the identity Stealth Guard intends to present with the live
+            values visible inside a protected page. A mismatch is a diagnostic
+            signal, not proof that a site can identify you.
+          </p>
+          <div class="field">
+            <label for="selftest-tab">Protected page</label>
+            <select id="selftest-tab"></select>
+            <div class="selftest-controls">
+              <button id="run-selftest" class="btn-secondary btn-compact">
+                Run self-test
+              </button>
+              <small id="selftest-summary" role="status"
+                >Choose a web page to begin.</small
+              >
+            </div>
+            <div class="identity-grid">
+              <div>
+                <strong>User-Agent</strong><span id="result-useragent">—</span>
+              </div>
+              <div>
+                <strong>Language</strong><span id="result-language">—</span>
+              </div>
+              <div>
+                <strong>Intl locale</strong><span id="result-intl">—</span>
+              </div>
+              <div>
+                <strong>Timezone</strong><span id="result-timezone">—</span>
+              </div>
+              <div>
+                <strong>WebRTC policy</strong><span id="result-webrtc">—</span>
+              </div>
+              <div><strong>Proxy</strong><span id="result-proxy">—</span></div>
+              <div>
+                <strong>Trackers</strong><span id="result-trackers">—</span>
+              </div>
+              <div>
+                <strong>Triggered</strong><span id="result-triggered">—</span>
+              </div>
+            </div>
+          </div>
+
+          <details class="proxy-group" id="selftest-detectors-group">
+            <summary>Manual detector suite</summary>
+            <div class="proxy-group-panel">
+              <p class="section-desc">
+                Establish a disabled baseline in the same clean Opera profile,
+                then enable Stealth Guard, clear site data, and repeat. Record
+                detailed inconsistencies instead of relying on one pass/fail
+                score.
+              </p>
+              <div class="benchmark-grid">
+                <a
+                  class="reference"
+                  href="https://creepjs.org/checker#scan"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><strong>CreepJS Checker</strong
+                  ><span>Recurring reference benchmark</span></a
+                >
+                <a
+                  href="https://bot.sannysoft.com/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><strong>Sannysoft</strong><span>Automation signals</span></a
+                >
+                <a
+                  href="https://bot-detector.rebrowser.net/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><strong>Rebrowser</strong><span>Bot detector</span></a
+                >
+                <a
+                  href="https://scrapfly.io/web-scraping-tools/automation-detector"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><strong>Scrapfly</strong><span>Automation detector</span></a
+                >
+                <a
+                  href="https://deviceandbrowserinfo.com/are_you_a_bot"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><strong>Device &amp; Browser Info</strong
+                  ><span>Bot checks</span></a
+                >
+                <a
+                  href="https://www.apivoid.com/tools/bot-detection-test/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><strong>APIVoid</strong><span>Bot detection test</span></a
+                >
+                <a
+                  href="https://infosimples.github.io/detect-headless/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><strong>Infosimples</strong><span>Headless checks</span></a
+                >
+              </div>
+              <small
+                >The full procedure and result template are in
+                BENCHMARKS.md.</small
+              >
+            </div>
+          </details>
         </section>
 
         <div class="actions">

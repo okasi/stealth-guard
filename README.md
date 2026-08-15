@@ -100,7 +100,7 @@ Open **Advanced Settings** from the popup to access:
 
 ### 🖱️ Context Menu
 
-Right-click on any webpage to quickly add or remove the current domain from the global allowlist, or open the local Guide & Self-Test for that tab.
+Right-click on any webpage to quickly add or remove the current domain from the global allowlist, or open the Self-Test section of the settings page for that tab.
 
 ## 🔧 Configuration
 

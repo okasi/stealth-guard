@@ -201,6 +201,7 @@ function renderProxyStatus() {
   const activeProfile = proxy.profiles.find(
     (profile) => profile.name === proxy.activeProfile,
   );
+  status.title = "";
 
   if (!proxy.enabled) {
     status.textContent = "No proxy";
@@ -221,10 +222,16 @@ function renderProxyStatus() {
     currentProxyRuntimeStatus &&
     ["error", "degraded"].includes(currentProxyRuntimeStatus.state)
   ) {
-    status.textContent =
+    const failingProfile =
+      currentProxyRuntimeStatus.profile || activeProfile?.name;
+    const label =
       currentProxyRuntimeStatus.state === "error"
         ? "Proxy error"
         : "Not verified";
+    status.textContent = failingProfile
+      ? `${label} · ${failingProfile}`
+      : label;
+    status.title = currentProxyRuntimeStatus.error || "";
     status.dataset.state = "warning";
   } else if (
     currentProxyRuntimeStatus &&
@@ -543,13 +550,13 @@ function setupEventListeners() {
   document.getElementById("open-options").addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
   });
-  document.getElementById("open-guide").addEventListener("click", () => {
-    const guideUrl = chrome.runtime.getURL("guide/guide.html");
+  document.getElementById("open-selftest").addEventListener("click", () => {
+    const optionsUrl = chrome.runtime.getURL("options/options.html");
     chrome.tabs.create({
       url:
         currentTab && Number.isInteger(currentTab.id)
-          ? `${guideUrl}?tabId=${currentTab.id}`
-          : guideUrl,
+          ? `${optionsUrl}?tabId=${currentTab.id}#selftest-section`
+          : `${optionsUrl}#selftest-section`,
     });
   });
   document.getElementById("test-webrtc").addEventListener("click", () => {

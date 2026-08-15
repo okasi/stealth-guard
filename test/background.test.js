@@ -639,8 +639,8 @@ test("background blocks configured third-party trackers and reports identity dia
     await sendMessage(
       { type: "get-identity-diagnostics", hostname: "example.com" },
       {
-        tab: { id: 9, url: "chrome-extension://test/guide/guide.html" },
-        url: "chrome-extension://test/guide/guide.html",
+        tab: { id: 9, url: "chrome-extension://test/options/options.html" },
+        url: "chrome-extension://test/options/options.html",
       },
     ),
   ).toMatchObject({ success: true });
@@ -1251,7 +1251,7 @@ test("background handles install, context-menu, proxy, and unknown events", asyn
   );
   await clickContextMenu({ menuItemId: "test-protection" }, tab);
   expect(state.createdTabs.at(-1).url).toBe(
-    "chrome-extension://test/guide/guide.html?tabId=7",
+    "chrome-extension://test/options/options.html?tabId=7#selftest-section",
   );
 
   const notificationCount = state.notifications.length;

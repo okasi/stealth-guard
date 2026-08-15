@@ -23,6 +23,7 @@ async function initializeOptions() {
   try {
     await loadOptionsConfig();
     setupEventListeners();
+    await initializeSelfTest();
     if (window.location.hash) {
       setTimeout(() => scrollToSection(window.location.hash.slice(1)), 300);
     }
@@ -202,15 +203,33 @@ async function refreshProxyDiagnostics() {
 
 function updateProxyRoutingModeUi() {
   const mode = document.getElementById("proxy-routing-mode").value;
-  const bypass = document.getElementById("proxy-bypass-list");
-  const help = document.getElementById("proxy-routing-mode-help");
-  bypass.disabled = mode !== "bypass-selected";
-  help.textContent =
-    mode === "protect-selected"
-      ? "Only matching per-site routes use a proxy; every unmatched site connects directly."
-      : mode === "protect-all"
-        ? "All public sites use the default proxy except global allowlist and required local destinations."
-        : "Selected bypass destinations connect directly and expose your normal network identity.";
+  const routesOnly = mode === "protect-selected";
+  const routesGroup = document.getElementById("proxy-routes-group");
+
+  // The default proxy is ignored in protect-selected mode — each rule carries
+  // its own server — so hide the control instead of letting it look effective.
+  document.getElementById("proxy-default-field").hidden = routesOnly;
+  document.getElementById("proxy-bypass-field").hidden =
+    mode !== "bypass-selected";
+  if (routesOnly) {
+    routesGroup.open = true;
+  }
+
+  // Step 2 disappears in this mode, so the last step keeps the count honest.
+  document.getElementById("proxy-step-coverage").textContent = routesOnly
+    ? "Step 2 · Which sites use it"
+    : "Step 3 · Which sites use it";
+  document.getElementById("proxy-routes-summary").textContent = routesOnly
+    ? "Per-site proxy rules (required for this mode)"
+    : "Per-site proxy rules";
+  document.getElementById("proxy-routes-help").textContent = routesOnly
+    ? "Only sites matching a rule use a proxy, and each rule picks its own server. Everything else connects directly."
+    : "Each rule sends matching sites through the server you pick here, overriding the default proxy.";
+  document.getElementById("proxy-routing-mode-help").textContent = routesOnly
+    ? "Add a rule below for every site you want proxied; unmatched sites connect directly."
+    : mode === "protect-all"
+      ? "Every public site uses the default proxy, except your global allowlist and required local addresses."
+      : "Sites you list below connect directly and expose your normal network identity.";
 }
 
 function renderProxyDiagnostics() {
@@ -231,6 +250,7 @@ function renderProxyDiagnostics() {
     ["Effective mode", effective.mode || "system/direct"],
     ["Control", effective.controlLevel || "unknown"],
     ["Routing", configuration.routingMode || "unknown"],
+    ["Endpoint", status.endpoint || "none"],
     ["Exit IP", status.exitIp || "not verified"],
     ["Profiles with credentials", String(configuration.credentialProfileCount || 0)],
   ];
@@ -249,6 +269,7 @@ function renderProxyDiagnostics() {
     const when = new Date(entry.timestamp).toLocaleString();
     const parts = [when, entry.state];
     if (entry.profile) parts.push(entry.profile);
+    if (entry.endpoint) parts.push(entry.endpoint);
     if (entry.exitIp) parts.push(`exit ${entry.exitIp}`);
     if (entry.error) parts.push(entry.error);
     item.textContent = parts.join(" · ");
@@ -282,7 +303,13 @@ function renderProxyRuntimeStatus() {
   card.dataset.state = status.state;
   state.textContent = labels[status.state] || "Unknown proxy state";
   if (status.state === "connected") {
-    detail.textContent = `${status.profile || "Proxy"} · exit ${status.exitIp || "verified"}`;
+    detail.textContent = [
+      status.profile || "Proxy",
+      status.endpoint,
+      `exit ${status.exitIp || "verified"}`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
   } else if (status.error) {
     detail.textContent = status.error;
   } else if (status.state === "routing") {
@@ -725,8 +752,10 @@ function editProxyProfile(profileName) {
   document.getElementById("clear-proxy-credentials").disabled =
     !credentialStatus.configured;
   document.getElementById("add-proxy-profile").textContent = "Save Profile";
+  document.getElementById("proxy-editor-summary").textContent =
+    `Edit "${profileName}"`;
 
-  const editor = document.querySelector("#proxy-section details");
+  const editor = document.querySelector("#proxy-section .proxy-editor");
   editor.open = true;
   editor.scrollIntoView({ behavior: "smooth", block: "center" });
 }
@@ -741,6 +770,8 @@ function resetProxyEditor() {
   document.getElementById("persist-proxy-credentials").checked = true;
   document.getElementById("clear-proxy-credentials").disabled = true;
   document.getElementById("add-proxy-profile").textContent = "Add Profile";
+  document.getElementById("proxy-editor-summary").textContent =
+    "Add a proxy server";
 }
 
 async function prepareProxyProfileFromForm() {
@@ -840,7 +871,7 @@ async function saveProxyProfile() {
     await refreshProxyRuntimeStatus();
 
     resetProxyEditor();
-    document.querySelector("#proxy-section details").open = false;
+    document.querySelector("#proxy-section .proxy-editor").open = false;
     populateProxyProfiles();
     renderProxyRuntimeStatus();
     showToast(
@@ -977,7 +1008,8 @@ function setupEventListeners() {
     if (
       input.id === "import-file" ||
       input.closest(".proxy-editor") ||
-      input.closest(".proxy-route-editor")
+      input.closest(".proxy-route-editor") ||
+      input.closest("#selftest-section")
     ) {
       continue;
     }
@@ -1000,6 +1032,12 @@ function setupEventListeners() {
   document
     .getElementById("reset-settings")
     .addEventListener("click", resetSettings);
+  document
+    .getElementById("run-selftest")
+    .addEventListener("click", runSelfTest);
+  document
+    .getElementById("selftest-tab")
+    .addEventListener("change", runSelfTest);
   document
     .getElementById("useragent-preset")
     .addEventListener("change", updateUserAgentString);
@@ -1191,4 +1229,226 @@ function importConfig(file) {
   };
   reader.onerror = () => showToast("Failed to read file", "error");
   reader.readAsText(file);
+}
+
+const SELF_TEST_RESULT_IDS = [
+  "result-useragent",
+  "result-language",
+  "result-intl",
+  "result-timezone",
+  "result-webrtc",
+  "result-proxy",
+  "result-trackers",
+  "result-triggered",
+];
+
+function sendTabMessage(tabId, message) {
+  return callChromeApi(chrome.tabs, "sendMessage", tabId, message, {
+    frameId: 0,
+  });
+}
+
+// The popup and the "Test protection" context menu open this page with the tab
+// they were invoked from, so that tab starts selected.
+function requestedSelfTestTabId() {
+  const value = new URL(window.location.href).searchParams.get("tabId");
+  const tabId = value === null ? Number.NaN : Number(value);
+  return Number.isInteger(tabId) && tabId >= 0 ? tabId : null;
+}
+
+function setSelfTestSummary(message, state = "") {
+  const summary = document.getElementById("selftest-summary");
+  summary.textContent = message;
+  summary.dataset.state = state;
+}
+
+function setSelfTestResult(id, value, state = "") {
+  const element = document.getElementById(id);
+  element.textContent = value || "—";
+  element.dataset.state = state;
+}
+
+function clearSelfTestResults() {
+  for (const id of SELF_TEST_RESULT_IDS) {
+    setSelfTestResult(id, "—");
+  }
+}
+
+async function initializeSelfTest() {
+  const select = document.getElementById("selftest-tab");
+  const runButton = document.getElementById("run-selftest");
+  try {
+    const tabs = await queryTabs();
+    const preferredTabId = requestedSelfTestTabId();
+    select.replaceChildren();
+    for (const tab of tabs) {
+      if (!Number.isInteger(tab.id) || !tab.url) continue;
+      const label = tab.title ? `${tab.title} — ${tab.url}` : tab.url;
+      const option = new Option(
+        label,
+        String(tab.id),
+        false,
+        tab.id === preferredTabId,
+      );
+      option.dataset.url = tab.url;
+      select.appendChild(option);
+    }
+    if (select.selectedIndex < 0 && select.options.length) {
+      select.selectedIndex = 0;
+    }
+    runButton.disabled = select.options.length === 0;
+    if (runButton.disabled) {
+      setSelfTestSummary(
+        "Open an HTTP(S) page, then return and run the test.",
+        "error",
+      );
+      return;
+    }
+    await runSelfTest();
+  } catch (error) {
+    setSelfTestSummary(error.message || String(error), "error");
+  }
+}
+
+async function runSelfTest() {
+  const select = document.getElementById("selftest-tab");
+  const runButton = document.getElementById("run-selftest");
+  const tabId = Number(select.value);
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+
+  runButton.disabled = true;
+  setSelfTestSummary("Reading extension policy and live page values…");
+  clearSelfTestResults();
+  try {
+    const selected = select.options[select.selectedIndex];
+    const hostname = new URL(selected ? selected.dataset.url : "").hostname;
+    const [policyResponse, pageResponse] = await Promise.all([
+      sendRuntimeMessage({
+        type: "get-identity-diagnostics",
+        hostname,
+        tabId,
+      }),
+      sendTabMessage(tabId, { type: "run-self-test" }),
+    ]);
+    const policy = assertRuntimeResponse(
+      policyResponse,
+      "Identity diagnostics failed",
+    ).diagnostics;
+    const pageResult = assertRuntimeResponse(
+      pageResponse,
+      "The selected page did not answer the self-test",
+    );
+    const result = renderSelfTestResults(policy, pageResult.snapshot);
+    if (!policy.protectionEnabled) {
+      setSelfTestSummary(
+        `Protection is disabled; live values were read for ${hostname}`,
+        "warning",
+      );
+    } else if (policy.globallyAllowlisted) {
+      setSelfTestSummary(
+        `${hostname} is globally allowlisted; live values are expected to remain native`,
+        "warning",
+      );
+    } else if (result.failures) {
+      setSelfTestSummary(
+        `${result.failures} identity mismatch${result.failures === 1 ? "" : "es"} found for ${hostname}`,
+        "error",
+      );
+    } else {
+      setSelfTestSummary(
+        `Self-test passed for ${hostname}${result.warnings ? ` with ${result.warnings} informational warning${result.warnings === 1 ? "" : "s"}` : ""}`,
+        "success",
+      );
+    }
+  } catch (error) {
+    setSelfTestSummary(error.message || String(error), "error");
+  } finally {
+    runButton.disabled = select.options.length === 0;
+  }
+}
+
+function renderSelfTestResults(policy, snapshot) {
+  let failures = 0;
+  let warnings = 0;
+  const check = (enabled, matches) => {
+    if (!enabled) {
+      warnings++;
+      return "warning";
+    }
+    if (!matches) {
+      failures++;
+      return "error";
+    }
+    return "success";
+  };
+
+  setSelfTestResult(
+    "result-useragent",
+    snapshot.userAgent,
+    check(
+      policy.userAgent.enabled,
+      snapshot.userAgent === policy.userAgent.value,
+    ),
+  );
+  setSelfTestResult(
+    "result-language",
+    `${snapshot.language} · ${(snapshot.languages || []).join(", ")}`,
+    check(
+      policy.language.enabled,
+      snapshot.language === policy.language.locale &&
+        Array.isArray(snapshot.languages) &&
+        snapshot.languages[0] === policy.language.languages[0],
+    ),
+  );
+  setSelfTestResult(
+    "result-intl",
+    snapshot.intlLocale,
+    check(policy.language.enabled, snapshot.intlLocale === policy.language.locale),
+  );
+  setSelfTestResult(
+    "result-timezone",
+    `${snapshot.timeZone || "unknown"} · offset ${snapshot.timezoneOffset}`,
+    check(policy.timezone.enabled, snapshot.timeZone === policy.timezone.name),
+  );
+  setSelfTestResult(
+    "result-webrtc",
+    `${policy.webrtc.effectivePolicy} · ${policy.webrtc.controlLevel}`,
+    check(
+      policy.webrtc.enabled,
+      policy.webrtc.effectivePolicy === policy.webrtc.requestedPolicy,
+    ),
+  );
+  setSelfTestResult(
+    "result-proxy",
+    policy.proxy.enabled
+      ? `${policy.proxy.state}${policy.proxy.profile ? ` · ${policy.proxy.profile}` : ""}`
+      : "Direct",
+    policy.proxy.enabled
+      ? check(
+          true,
+          ["connected", "configured", "routing"].includes(policy.proxy.state),
+        )
+      : "warning",
+  );
+  if (!policy.proxy.enabled) warnings++;
+  setSelfTestResult(
+    "result-trackers",
+    policy.tracker.enabled
+      ? `${policy.tracker.blockedCount} blocked · ${policy.tracker.builtInRules + policy.tracker.customRules} rules`
+      : "Off",
+    policy.tracker.enabled
+      ? check(true, policy.tracker.builtInRules + policy.tracker.customRules > 0)
+      : "warning",
+  );
+  if (!policy.tracker.enabled) warnings++;
+  setSelfTestResult(
+    "result-triggered",
+    policy.triggeredFeatures.length
+      ? policy.triggeredFeatures.join(", ")
+      : "None yet",
+    "neutral",
+  );
+  return { failures, warnings };
 }

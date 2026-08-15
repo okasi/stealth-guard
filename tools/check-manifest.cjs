@@ -75,7 +75,4 @@ assertFilesExist(Object.values(manifest.icons), "icons");
 assertFilesExist([
   manifest.browser_action.default_popup,
   manifest.options_ui.page,
-  "guide/guide.html",
-  "guide/guide.css",
-  "guide/guide.js",
 ], "extension pages");

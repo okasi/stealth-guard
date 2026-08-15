@@ -11,6 +11,7 @@ let proxyAuthenticationConfig = null;
 let proxyRuntimeStatus = {
   state: "idle",
   profile: null,
+  endpoint: null,
   verifiedAt: null,
   exitIp: null,
   error: null,
@@ -37,6 +38,7 @@ let adblockStatus = {
 };
 
 const NOTIFICATION_THROTTLE_MS = 3770;
+const PROXY_VERIFICATION_TIMEOUT_MS = 5000;
 const ADBLOCK_UPDATE_ALARM = "stealth-guard-filter-update";
 const YOUTUBE_FILTER_MAX_AGE_MS = 45 * 60 * 1000;
 const PROXY_INDICATOR_COLORS = {
@@ -84,6 +86,7 @@ function setProxyRuntimeStatus(nextStatus) {
   const next = {
     state: nextStatus.state || "idle",
     profile: nextStatus.profile || null,
+    endpoint: nextStatus.endpoint || null,
     verifiedAt: nextStatus.verifiedAt || null,
     exitIp: nextStatus.exitIp || null,
     error: nextStatus.error || null,
@@ -122,6 +125,8 @@ function normalizeProxyHistoryEntry(value) {
     state: value.state,
     profile:
       typeof value.profile === "string" ? value.profile.slice(0, 128) : null,
+    endpoint:
+      typeof value.endpoint === "string" ? value.endpoint.slice(0, 256) : null,
     exitIp:
       typeof value.exitIp === "string" ? value.exitIp.slice(0, 64) : null,
     error:
@@ -192,11 +197,38 @@ function isConflictingProxyControl(levelOfControl) {
   );
 }
 
-async function verifyProxyExit() {
-  const data = await fetchJson(PROXY_VERIFICATION_URL, 5000);
+function describeProxyVerificationFailure(chainProfiles, cause) {
+  const authFailure = chainProfiles
+    .map((profile) => proxyCredentialManager.getAuthFailure(profile))
+    .find(Boolean);
+  return [
+    `${describeProxyChain(chainProfiles)}: ${cause}`,
+    authFailure ? ` — ${authFailure.reason}` : "",
+  ].join("");
+}
+
+async function verifyProxyExit(chainProfiles = []) {
+  let data;
+  try {
+    data = await fetchJson(PROXY_VERIFICATION_URL, PROXY_VERIFICATION_TIMEOUT_MS);
+  } catch (error) {
+    throw new Error(
+      describeProxyVerificationFailure(
+        chainProfiles,
+        describeProxyFetchError(error, PROXY_VERIFICATION_TIMEOUT_MS),
+      ),
+    );
+  }
+
   const ip = data && typeof data.ip === "string" ? data.ip.trim() : "";
   if (!ip || ip.length > 64 || !/^[0-9a-f:.]+$/i.test(ip)) {
-    throw new Error("Exit IP verification failed");
+    throw new Error(
+      describeProxyVerificationFailure(
+        chainProfiles,
+        `${PROXY_VERIFICATION_HOST} returned no usable exit IP, so the ` +
+          "request probably did not reach it through the proxy",
+      ),
+    );
   }
   return ip;
 }
@@ -226,12 +258,22 @@ async function applyProxyPolicy(config) {
     return;
   }
 
-  const activeProfile = (config.proxy.profiles || []).find(
-    (profile) => profile.name === config.proxy.activeProfile,
-  );
+  const findProfile = (profileName) =>
+    (config.proxy.profiles || []).find(
+      (profile) => profile.name === profileName,
+    );
+  const activeProfile = findProfile(config.proxy.activeProfile);
+  const activeEndpoint = formatProxyEndpoint(activeProfile);
+  const verificationChain = [
+    activeProfile,
+    ...(config.proxy.fallbackProfiles || [])
+      .filter((profileName) => profileName !== config.proxy.activeProfile)
+      .map(findProfile),
+  ].filter(Boolean);
   setProxyRuntimeStatus({
     state: "connecting",
     profile: activeProfile ? activeProfile.name : null,
+    endpoint: activeEndpoint,
     controlLevel,
   });
 
@@ -241,6 +283,7 @@ async function applyProxyPolicy(config) {
     setProxyRuntimeStatus({
       state: "error",
       profile: activeProfile ? activeProfile.name : null,
+      endpoint: activeEndpoint,
       error: error.message,
       controlLevel,
     });
@@ -253,6 +296,7 @@ async function applyProxyPolicy(config) {
     setProxyRuntimeStatus({
       state: "conflict",
       profile: activeProfile ? activeProfile.name : null,
+      endpoint: activeEndpoint,
       error: "Proxy settings were overridden by another extension or policy",
       controlLevel: effectiveControlLevel,
     });
@@ -268,13 +312,14 @@ async function applyProxyPolicy(config) {
   }
 
   try {
-    const exitIp = await verifyProxyExit();
+    const exitIp = await verifyProxyExit(verificationChain);
     setProxyRuntimeStatus({
       state:
         config.proxy.routingMode === "protect-selected"
           ? "routing"
           : "connected",
       profile: activeProfile.name,
+      endpoint: activeEndpoint,
       exitIp,
       verifiedAt: Date.now(),
       controlLevel: effectiveControlLevel,
@@ -283,6 +328,7 @@ async function applyProxyPolicy(config) {
     setProxyRuntimeStatus({
       state: "degraded",
       profile: activeProfile.name,
+      endpoint: activeEndpoint,
       error: error.message,
       controlLevel: effectiveControlLevel,
     });
@@ -2071,7 +2117,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
       reloadTabAfterAllowlistChange(tab.id);
     } else if (info.menuItemId === "test-protection") {
       chrome.tabs.create({
-        url: `${chrome.runtime.getURL("guide/guide.html")}?tabId=${tab.id}`,
+        url: `${chrome.runtime.getURL("options/options.html")}?tabId=${tab.id}#selftest-section`,
       });
     }
   } catch (e) {
