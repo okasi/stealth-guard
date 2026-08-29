@@ -32,6 +32,11 @@ assert(
 );
 assert(/^https:\/\//.test(manifest.homepage_url), "homepage_url must use HTTPS");
 assert(
+  manifest.update_url ===
+    "https://github.com/okasi/stealth-guard/releases/latest/download/updates.xml",
+  "update_url must point to the stable GitHub Release update manifest",
+);
+assert(
   new Set(manifest.permissions).size === manifest.permissions.length,
   "manifest permissions must not contain duplicates",
 );
@@ -41,8 +46,11 @@ assertSameArray(
   [
     "lib/runtime.js",
     "lib/storage.js",
+    "lib/filterLists.js",
     "lib/adblock.js",
+    "lib/gpuProfiles.js",
     "lib/config.js",
+    "lib/curlProfiles.js",
     "lib/domainFilter.js",
     "lib/proxy.js",
     "lib/proxyCredentials.js",
@@ -60,8 +68,11 @@ assert(contentScript.all_frames === true, "content script must run in every fram
 assertSameArray(
   contentScript.js,
   [
+    "lib/filterLists.js",
     "lib/domainFilter.js",
+    "lib/gpuProfiles.js",
     "lib/config.js",
+    "lib/curlProfiles.js",
     "content-scripts/main.js",
     "content-scripts/injector.js",
     "content-scripts/adblock.js",
@@ -76,3 +87,31 @@ assertFilesExist([
   manifest.browser_action.default_popup,
   manifest.options_ui.page,
 ], "extension pages");
+
+const bundledGpuProfileIndex = JSON.parse(
+  readFileSync("profiles/clearcote/index.json", "utf8"),
+);
+assert(
+  Array.isArray(bundledGpuProfileIndex.profiles) &&
+    bundledGpuProfileIndex.profiles.length > 0,
+  "bundled GPU profile index must contain profiles",
+);
+assertFilesExist(
+  [
+    "profiles/clearcote/LICENSE",
+    "profiles/clearcote/NOTICE.md",
+    "profiles/clearcote/index.json",
+    ...bundledGpuProfileIndex.profiles.map(
+      (profile) => `profiles/clearcote/${profile.id}.json`,
+    ),
+  ],
+  "bundled GPU profiles",
+);
+
+assertFilesExist(
+  [
+    "profiles/apify/README.md",
+    "tools/generate-apify-profile.mjs",
+  ],
+  "Apify GPU profile source",
+);

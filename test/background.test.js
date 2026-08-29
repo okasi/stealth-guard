@@ -5,11 +5,19 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const { DEFAULT_CONFIG, getUserAgentString } = require("../lib/config.js");
+const {
+  CURL_PROFILE_CACHE_KEY,
+  CURL_PROFILE_UPDATE_SOURCE,
+  getCurlProfileForConfig,
+} = require("../lib/curlProfiles.js");
 const BACKGROUND_SCRIPTS = [
   "lib/runtime.js",
   "lib/storage.js",
+  "lib/filterLists.js",
   "lib/adblock.js",
+  "lib/gpuProfiles.js",
   "lib/config.js",
+  "lib/curlProfiles.js",
   "lib/domainFilter.js",
   "lib/proxy.js",
   "lib/proxyCredentials.js",
@@ -45,6 +53,7 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
   };
   const state = {
     storageData,
+    windowBounds: { width: 1440, height: 900 },
     proxySettings: [],
     webRTCPolicy: "default",
     broadcasts: [],
@@ -221,6 +230,12 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
             },
           ]);
         } else {
+          if (
+            behavior.navigateAfterClear &&
+            details.code.includes("localStorage.clear")
+          ) {
+            tab.url = behavior.navigateAfterClear;
+          }
           callback([true]);
         }
       },
@@ -234,6 +249,21 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
       },
       create(details) {
         state.createdTabs.push(details);
+      },
+    },
+    windows: {
+      get(windowId, callback) {
+        callback(windowId === 12 ? { id: 12, ...state.windowBounds } : null);
+      },
+      update(windowId, updateInfo, callback) {
+        if (windowId !== 12) {
+          chrome.runtime.lastError = { message: "Window not found" };
+          callback();
+          chrome.runtime.lastError = null;
+          return;
+        }
+        Object.assign(state.windowBounds, updateInfo);
+        callback({ id: windowId, ...state.windowBounds });
       },
     },
     cookies: {
@@ -347,6 +377,21 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
           text: async () => behavior.filterText,
         };
       }
+      if (String(url) === CURL_PROFILE_UPDATE_SOURCE && behavior.curlProfileIndex) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => behavior.curlProfileIndex,
+        };
+      }
+      const curlProfileSource = behavior.curlProfileSources?.[String(url)];
+      if (curlProfileSource) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => curlProfileSource,
+        };
+      }
       return { ok: false };
     }),
     URL,
@@ -407,7 +452,7 @@ test("background initializes policies and applies config changes atomically", as
   expect(
     modified.requestHeaders.find((header) => header.name === "User-Agent")
       .value,
-  ).toBe(getUserAgentString(initial.config.useragent.preset));
+  ).toBe(getCurlProfileForConfig(initial.config, null).userAgent);
 
   const existingHeaders = [{ name: "user-agent", value: "native" }];
   const replaced = events.onBeforeSendHeaders.listeners[0]({
@@ -420,7 +465,7 @@ test("background initializes policies and applies config changes atomically", as
       (header) => header.name.toLowerCase() === "user-agent",
     ).value,
   ).toBe(
-    getUserAgentString(initial.config.useragent.preset),
+    getCurlProfileForConfig(initial.config, null).userAgent,
   );
   expect(
     replaced.requestHeaders.find(
@@ -431,6 +476,12 @@ test("background initializes policies and applies config changes atomically", as
   expect(
     events.onBeforeSendHeaders.listeners[0]({
       url: "https://challenges.cloudflare.com/turnstile",
+      requestHeaders: challengeHeaders,
+    }).requestHeaders,
+  ).toBe(challengeHeaders);
+  expect(
+    events.onBeforeSendHeaders.listeners[0]({
+      url: "https://geo.captcha-delivery.com/captcha/",
       requestHeaders: challengeHeaders,
     }).requestHeaders,
   ).toBe(challengeHeaders);
@@ -462,6 +513,27 @@ test("background initializes policies and applies config changes atomically", as
   expect((await sendMessage({ type: "get-config" })).config.enabled).toBe(true);
 });
 
+test("repairs invalid native window geometry without shrinking the browser window", async () => {
+  const { sendMessage, state } = await installBackground();
+
+  const repaired = await sendMessage(
+    { type: "repair-window-geometry", width: 1800, height: 1100 },
+    { tab: { id: 7, windowId: 12 } },
+  );
+
+  expect(repaired).toEqual({ success: true });
+  expect(state.windowBounds).toEqual({ width: 1800, height: 1100 });
+  expect(
+    await sendMessage(
+      { type: "repair-window-geometry", width: 1800, height: 1100 },
+      { tab: { id: 7 } },
+    ),
+  ).toEqual({
+    success: false,
+    error: "Native window geometry is unavailable",
+  });
+});
+
 test("User-Agent policy keeps existing client-hint headers consistent", async () => {
   const windowsConfig = structuredClone(DEFAULT_CONFIG);
   windowsConfig.useragent.preset = "windows";
@@ -485,16 +557,17 @@ test("User-Agent policy keeps existing client-hint headers consistent", async ()
   const values = Object.fromEntries(
     rewritten.map((header) => [header.name.toLowerCase(), header.value]),
   );
-  expect(values["user-agent"]).toContain("Edg/125.0.0.0");
-  expect(values["sec-ch-ua"]).toContain('"Microsoft Edge";v="125"');
+  expect(values["user-agent"]).toContain("Edg/101.0.1210.47");
+  expect(values["sec-ch-ua"]).toContain('"Microsoft Edge";v="101"');
   expect(values["sec-ch-ua-mobile"]).toBe("?0");
   expect(values["sec-ch-ua-platform"]).toBe('"Windows"');
   expect(values["sec-ch-ua-arch"]).toBe('"x86"');
-  expect(values["sec-ch-ua-full-version"]).toBe('"125.0.0.0"');
+  expect(values["sec-ch-ua-full-version"]).toBe('"101.0.0.0"');
   expect(values["sec-ch-ua-unknown"]).toBeUndefined();
 
   const safariConfig = structuredClone(current);
   safariConfig.useragent.preset = "macos";
+  safariConfig.useragent.curlProfile = "safari184";
   safariConfig.language.preset = "sv-SE";
   expect(
     await sendMessage({ type: "update-config", config: safariConfig }),
@@ -511,7 +584,7 @@ test("User-Agent policy keeps existing client-hint headers consistent", async ()
   expect(safariHeaders).toEqual([
     {
       name: "User-Agent",
-      value: expect.stringContaining("Version/17.6 Safari/605.1.15"),
+      value: expect.stringContaining("Version/18.4 Safari/605.1.15"),
     },
     { name: "accept-language", value: "sv-SE,sv;q=0.9,en;q=0.8" },
   ]);
@@ -729,6 +802,153 @@ test("background downloads filter subscriptions and serves cosmetic and user rul
   });
 });
 
+test("background keeps blocking active and hides TradingView's anti-adblock dialog", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.filterLists = [
+    {
+      id: "test-list",
+      name: "Test list",
+      url: "https://filters.test/list.txt",
+      enabled: true,
+    },
+  ];
+  const { events, sendMessage, tab } = await installBackground(config, {
+    tabUrl: "https://www.tradingview.com/chart/OyGjguKO/?symbol=INDEX%3ABTCUSD",
+    filterText: "||ads.remote^$third-party\n##.generic-ad",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const blockRequest = events.onBeforeRequest.listeners[0];
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      type: "script",
+      url: "https://ads.remote/banner.js",
+      initiator: tab.url,
+    }),
+  ).toEqual({ cancel: true });
+  expect(
+    await sendMessage(
+      {
+        type: "get-cosmetic-rules",
+        hostname: "www.tradingview.com",
+        tokens: ["generic-ad"],
+      },
+      { tab },
+    ),
+  ).toMatchObject({
+    success: true,
+    enabled: true,
+    selectors: expect.arrayContaining([
+      '[data-dialog-name="gopro"]',
+      ".generic-ad",
+    ]),
+  });
+});
+
+test("background keeps TechCrunch usable without opening its anti-adblock gate", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.filterLists = [
+    {
+      id: "test-list",
+      name: "Test list",
+      url: "https://filters.test/list.txt",
+      enabled: true,
+    },
+  ];
+  const { events, sendMessage, tab } = await installBackground(config, {
+    tabUrl:
+      "https://techcrunch.com/2022/07/29/how-the-problem-of-hiring-healthcare-staff-has-become-a-fertile-ground-for-startups/",
+    filterText: "||servenobid.com^\n||sail-horizon.com^\n||ads.remote^",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  const blockRequest = events.onBeforeRequest.listeners[0];
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      type: "script",
+      url:
+        "https://public.servenobid.com/partner/163965/163966/wrapup_1.0.0.js?ver=66e1dba3ef08ae9649dc",
+      initiator: tab.url,
+    }),
+  ).toEqual({});
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      type: "script",
+      url: "https://ak.sail-horizon.com/spm/spm.v1.min.js?ver=6.9.7",
+      initiator: tab.url,
+    }),
+  ).toEqual({});
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      type: "script",
+      url: "https://public.servenobid.com/unrelated.js",
+      initiator: tab.url,
+    }),
+  ).toEqual({ cancel: true });
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      type: "script",
+      url: "https://ads.remote/banner.js",
+      initiator: tab.url,
+    }),
+  ).toEqual({ cancel: true });
+  expect(
+    await sendMessage(
+      {
+        type: "get-cosmetic-rules",
+        hostname: "www.techcrunch.com",
+        tokens: ["DCDOr"],
+      },
+      { tab },
+    ),
+  ).toMatchObject({
+    success: true,
+    enabled: true,
+    selectors: expect.arrayContaining([".DCDOr"]),
+  });
+});
+
+test("background refreshes modern curl-impersonate profiles every four hours", async () => {
+  const wrapperUrl =
+    "https://raw.githubusercontent.com/lexiforest/curl-impersonate/main/bin/curl_chrome150";
+  const { sendMessage, state } = await installBackground(DEFAULT_CONFIG, {
+    curlProfileIndex: [
+      { name: "curl_chrome150", type: "file" },
+      { name: "curl_chrome136", type: "file" },
+    ],
+    curlProfileSources: {
+      [wrapperUrl]:
+        '#!/usr/bin/env bash\n"$dir/curl-impersonate" --compressed --impersonate "chrome150" "$@"',
+    },
+  });
+
+  const before = await sendMessage({ type: "get-curl-profile-status" });
+  expect(before.status.profiles.some((profile) => profile.target === "chrome131")).toBe(true);
+  expect(
+    before.status.profiles.some((profile) =>
+      ["chrome142", "chrome145", "chrome146"].includes(profile.target),
+    ),
+  ).toBe(false);
+
+  const result = await sendMessage({ type: "update-curl-profiles" });
+  expect(result.success).toBe(true);
+  expect(result.catalog.profiles.some((profile) => profile.target === "chrome150")).toBe(true);
+  expect(state.storageData[CURL_PROFILE_CACHE_KEY]).toBeTruthy();
+  expect(state.fetches).toContain(CURL_PROFILE_UPDATE_SOURCE);
+  expect(
+    state.alarms.some(
+      (alarm) =>
+        alarm.name === "stealth-guard-curl-profile-update" &&
+        alarm.details.periodInMinutes === 4 * 60,
+    ),
+  ).toBe(true);
+});
+
 test("background refreshes 45-minute-old filters when YouTube starts loading", async () => {
   const config = structuredClone(DEFAULT_CONFIG);
   config.tracker.filterLists = [
@@ -868,6 +1088,7 @@ test("background exercises proxy preparation and the full session lifecycle", as
     port: 1080,
     scheme: "socks5",
     location: {
+      asn: "",
       city: "Unknown",
       region: "",
       country: "Unknown",
@@ -981,6 +1202,34 @@ test("background exercises proxy preparation and the full session lifecycle", as
   expect(limited.sessions.some((session) => session.name === "Session 1")).toBe(
     false,
   );
+});
+
+test("session restore stops when the tab navigates between clear and restore", async () => {
+  const { sendMessage, state, tab } = await installBackground(DEFAULT_CONFIG, {
+    navigateAfterClear: "https://other.test/account",
+  });
+  const saved = await sendMessage({
+    type: "save-session",
+    hostname: "example.com",
+    tabId: tab.id,
+    name: "Work",
+  });
+
+  // The test mock changes the tab URL after clearTabStorage; the real browser
+  // can do the same when a navigation races a popup action.
+  const result = await sendMessage({
+    type: "switch-session",
+    sessionId: saved.session.id,
+    tabId: tab.id,
+  });
+
+  expect(result).toMatchObject({
+    success: false,
+    error: "The target tab changed sites; reopen the popup and try again",
+  });
+  expect(state.removedCookies).toHaveLength(1);
+  expect(state.restoredCookies).toHaveLength(0);
+  expect(state.reloads).toHaveLength(0);
 });
 
 test("background protects proxy credentials and reports verified connection state", async () => {
@@ -1132,6 +1381,43 @@ test("background protects proxy credentials and reports verified connection stat
   expect(
     (await sendMessage({ type: "get-proxy-diagnostics" })).diagnostics.history,
   ).toEqual([]);
+});
+
+test("background retries a stale proxy error on the scheduled alarm", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.proxy = {
+    enabled: true,
+    activeProfile: "Main",
+    profiles: [
+      { name: "Main", host: "proxy.test", port: 8443, scheme: "https" },
+    ],
+    domainRoutes: [],
+    bypassList: [],
+  };
+  const { events, sendMessage, state } = await installBackground(config, {
+    exitIp: "203.0.113.8",
+  });
+
+  expect(
+    state.alarms.some(
+      (alarm) =>
+        alarm.name === "stealth-guard-proxy-retry" &&
+        alarm.details.periodInMinutes === 5,
+    ),
+  ).toBe(true);
+
+  events.onProxyError.listeners[0]({ fatal: true, error: "offline" });
+  expect(
+    (await sendMessage({ type: "get-proxy-runtime-status" })).status,
+  ).toMatchObject({ state: "error", error: "offline" });
+
+  events.onAlarm.listeners[0]({ name: "stealth-guard-proxy-retry" });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(
+    (await sendMessage({ type: "get-proxy-runtime-status" })).status,
+  ).toMatchObject({ state: "connected", exitIp: "203.0.113.8" });
+  expect(state.proxySettings).toHaveLength(2);
 });
 
 test("toolbar proxy indicator turns amber when the current site is bypassed", async () => {

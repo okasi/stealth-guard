@@ -2,6 +2,9 @@ import { createRequire } from "node:module";
 import { expect, test } from "vitest";
 
 const require = createRequire(import.meta.url);
+const { DEFAULT_FILTER_LISTS, normalizeFilterListEntries } = require(
+  "../../lib/filterLists.js",
+);
 const {
   createAdblockEngine,
   getCosmeticSelectors,
@@ -11,6 +14,21 @@ const {
   isSafeRegexPattern,
   shouldBlockRequest,
 } = require("../../lib/adblock.js");
+
+test("shares immutable filter-list defaults across config and adblock", () => {
+  expect(DEFAULT_FILTER_LISTS).toHaveLength(3);
+  expect(normalizeFilterListEntries(DEFAULT_FILTER_LISTS)).toEqual(
+    DEFAULT_FILTER_LISTS,
+  );
+  expect(normalizeFilterListEntries([{ id: "custom", url: "https://example.test/filter" }], false)).toEqual([
+    {
+      id: "custom",
+      name: "custom",
+      url: "https://example.test/filter",
+      enabled: true,
+    },
+  ]);
+});
 
 test("normalizes safe HTTPS filter subscriptions", () => {
   expect(
@@ -92,6 +110,38 @@ test("parses and matches common AdGuard and uBlock network rules", () => {
       "hosts.example",
     ),
   ).toBe(true);
+});
+
+test("preserves trailing wildcard domain scopes on network rules", () => {
+  const scoped = parseFilterList("/index.js^$domain=daft.*|dsex.*");
+  expect(scoped.network.block[0].options.domains).toEqual(["daft.*", "dsex.*"]);
+
+  const engine = createAdblockEngine(scoped);
+  const details = (url) => ({ url, type: "script" });
+  expect(
+    shouldBlockRequest(
+      engine,
+      details("https://assets.daft.ie/pkg/index.js"),
+      "www.daft.ie",
+      "assets.daft.ie",
+    ),
+  ).toBe(true);
+  expect(
+    shouldBlockRequest(
+      engine,
+      details("https://www.prisjakt.nu/a/app/index.js"),
+      "www.prisjakt.nu",
+      "www.prisjakt.nu",
+    ),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(
+      engine,
+      details("https://assets.blocket.se/pkg/app/index.js"),
+      "www.blocket.se",
+      "assets.blocket.se",
+    ),
+  ).toBe(false);
 });
 
 test("rejects regex patterns with common denial-of-service shapes", () => {

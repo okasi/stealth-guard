@@ -6,7 +6,10 @@ const {
   createDomainPatternTools,
   addDomainToAllowlist,
   getDomainPatternParts,
+  isAdblockCompatibilityHostname,
+  isAdblockFeatureActiveForHostname,
   isCloudflareChallengeHostname,
+  isDataDomeChallengeHostname,
   isDomainAllowlisted,
   isFeatureActiveForHostname,
   matchesDomainPattern,
@@ -128,6 +131,26 @@ test("feature activation applies global and per-feature allowlists", () => {
   expect(isDomainAllowlisted("site.test", null)).toBe(false);
 });
 
+test("site compatibility markers keep adblock active", () => {
+  const config = {
+    enabled: true,
+    globalWhitelist: "",
+    tracker: { enabled: true, whitelist: "" },
+  };
+
+  expect(isAdblockCompatibilityHostname("tradingview.com")).toBe(true);
+  expect(isAdblockCompatibilityHostname("www.tradingview.com")).toBe(true);
+  expect(isAdblockCompatibilityHostname("charts.tradingview.com")).toBe(true);
+  expect(isAdblockCompatibilityHostname("techcrunch.com")).toBe(true);
+  expect(isAdblockCompatibilityHostname("www.techcrunch.com")).toBe(true);
+  expect(isAdblockCompatibilityHostname("not-tradingview.com")).toBe(false);
+  expect(isAdblockCompatibilityHostname("not-techcrunch.com")).toBe(false);
+  expect(isAdblockFeatureActiveForHostname(config, "www.tradingview.com")).toBe(true);
+  expect(isAdblockFeatureActiveForHostname(config, "www.example.com")).toBe(
+    true,
+  );
+});
+
 test("allowlist helpers add covered domains once and remove every covering rule", () => {
   const added = addDomainToAllowlist("Example.com", "test.com");
 
@@ -151,4 +174,11 @@ test("Cloudflare challenge detection accepts only the owned challenge domain", (
   expect(isCloudflareChallengeHostname("nested.challenges.cloudflare.com.")).toBe(true);
   expect(isCloudflareChallengeHostname("cloudflare.com")).toBe(false);
   expect(isCloudflareChallengeHostname(null)).toBe(false);
+});
+
+test("DataDome challenge detection accepts only the delivery domain", () => {
+  expect(isDataDomeChallengeHostname("captcha-delivery.com")).toBe(true);
+  expect(isDataDomeChallengeHostname("geo.captcha-delivery.com.")).toBe(true);
+  expect(isDataDomeChallengeHostname("datadome.co")).toBe(false);
+  expect(isDataDomeChallengeHostname(null)).toBe(false);
 });

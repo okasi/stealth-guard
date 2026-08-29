@@ -6,7 +6,9 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: [
+        "lib/filterLists.js",
         "lib/config.js",
+        "lib/curlProfiles.js",
         "lib/domainFilter.js",
         "lib/proxy.js",
         "lib/proxyCredentials.js",

@@ -456,6 +456,34 @@ textarea:focus-visible {
   margin-bottom: 0;
 }
 
+.tracker-group {
+  margin-bottom: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.tracker-group > summary {
+  cursor: pointer;
+  color: #1a73e8;
+  font-weight: 650;
+}
+
+.tracker-group-panel {
+  margin-top: 10px;
+  padding: 16px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.tracker-group-panel > .field:last-child {
+  margin-bottom: 0;
+}
+
+.tracker-group:last-child {
+  margin-bottom: 0;
+}
+
 /* A step whose control does not apply to the current routing mode is
    removed from the flow rather than left visible but inert. */
 .field[hidden] {
@@ -582,6 +610,13 @@ textarea:focus-visible {
 .btn-compact {
   padding: 6px 10px;
   font-size: 0.85em;
+}
+
+.profile-import-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
 }
 
 .readonly-output {

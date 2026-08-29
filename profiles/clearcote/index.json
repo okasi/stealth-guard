@@ -1,0 +1,730 @@
+{
+ "count": 72,
+ "by_vendor": {
+  "NVIDIA": 34,
+  "Intel": 29,
+  "AMD": 9
+ },
+ "profiles": [
+  {
+   "id": "vinyzu-09961",
+   "gpu_vendor": "AMD",
+   "gpu_family": "Radeon",
+   "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics (0x00001638) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1494x934",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09975",
+   "gpu_vendor": "AMD",
+   "gpu_family": "Radeon",
+   "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09977",
+   "gpu_vendor": "AMD",
+   "gpu_family": "Radeon",
+   "renderer": "ANGLE (AMD, Radeon RX 5500 XT (0x00007340) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09980",
+   "gpu_vendor": "AMD",
+   "gpu_family": "Radeon",
+   "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2560x1440",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09985",
+   "gpu_vendor": "AMD",
+   "gpu_family": "Radeon",
+   "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09987",
+   "gpu_vendor": "AMD",
+   "gpu_family": "Radeon",
+   "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09988",
+   "gpu_vendor": "AMD",
+   "gpu_family": "Radeon",
+   "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1280x800",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09991",
+   "gpu_vendor": "AMD",
+   "gpu_family": "Radeon",
+   "renderer": "ANGLE (AMD, AMD Radeon(TM) Vega 8 Graphics (0x000015DD) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09992",
+   "gpu_vendor": "AMD",
+   "gpu_family": "Radeon",
+   "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-04201",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Arc",
+   "renderer": "ANGLE (Intel, Intel(R) Arc(TM) A770 Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-06045",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Arc",
+   "renderer": "ANGLE (Intel, Intel(R) Arc(TM) A750 Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09887",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Intel",
+   "renderer": "ANGLE (Intel, Intel(R) HD Graphics 530 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1366x768",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": false
+  },
+  {
+   "id": "vinyzu-09891",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Intel",
+   "renderer": "ANGLE (Intel, Intel(R) HD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09901",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Intel",
+   "renderer": "ANGLE (Intel, Intel(R) HD Graphics 530 (0x0000191B) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09904",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Intel",
+   "renderer": "ANGLE (Intel, Intel(R) HD Graphics 630 (0x0000591B) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09905",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Iris",
+   "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics (0x000046A6) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2560x1440",
+   "hardware_concurrency": 20,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09911",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Iris",
+   "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09919",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Iris",
+   "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1423x889",
+   "hardware_concurrency": 20,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09928",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Iris",
+   "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09934",
+   "gpu_vendor": "Intel",
+   "gpu_family": "UHD",
+   "renderer": "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09936",
+   "gpu_vendor": "Intel",
+   "gpu_family": "UHD",
+   "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 620 (0x00005917) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09940",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Iris",
+   "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09942",
+   "gpu_vendor": "Intel",
+   "gpu_family": "UHD",
+   "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 730 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09947",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Iris",
+   "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics (0x00009A49) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09955",
+   "gpu_vendor": "Intel",
+   "gpu_family": "UHD",
+   "renderer": "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09956",
+   "gpu_vendor": "Intel",
+   "gpu_family": "UHD",
+   "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09957",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Intel",
+   "renderer": "ANGLE (Intel, Intel(R) HD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09959",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Iris",
+   "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09960",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Intel",
+   "renderer": "ANGLE (Intel, Intel(R) HD Graphics 520 (0x00001916) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09965",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Intel",
+   "renderer": "ANGLE (Intel, Intel(R) HD Graphics 4000 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1366x768",
+   "hardware_concurrency": 4,
+   "device_memory": 4,
+   "webgpu_available": false
+  },
+  {
+   "id": "vinyzu-09966",
+   "gpu_vendor": "Intel",
+   "gpu_family": "UHD",
+   "renderer": "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1280x720",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09968",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Intel",
+   "renderer": "ANGLE (Intel, Intel(R) HD Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2560x1080",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": false
+  },
+  {
+   "id": "vinyzu-09970",
+   "gpu_vendor": "Intel",
+   "gpu_family": "UHD",
+   "renderer": "ANGLE (Intel, Intel(R) UHD Graphics (0x00009B41) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09978",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Intel",
+   "renderer": "ANGLE (Intel, Intel(R) HD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09981",
+   "gpu_vendor": "Intel",
+   "gpu_family": "UHD",
+   "renderer": "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09982",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Iris",
+   "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1440x960",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09986",
+   "gpu_vendor": "Intel",
+   "gpu_family": "UHD",
+   "renderer": "ANGLE (Intel, Intel(R) UHD Graphics (0x00009A68) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09999",
+   "gpu_vendor": "Intel",
+   "gpu_family": "Iris",
+   "renderer": "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2048x1280",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09437",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "NVIDIA",
+   "renderer": "ANGLE (NVIDIA, NVIDIA NVS 510 (0x00000FFD) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 32,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09648",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "NVIDIA",
+   "renderer": "ANGLE (NVIDIA, NVIDIA NVS 510 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 32,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09667",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "NVIDIA",
+   "renderer": "ANGLE (NVIDIA, NVIDIA Quadro 3000M Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1536x864",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": false
+  },
+  {
+   "id": "vinyzu-09756",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GeForce",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GT 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1366x768",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": false
+  },
+  {
+   "id": "vinyzu-09761",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GeForce",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GT 610 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "3440x1440",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09778",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "NVIDIA",
+   "renderer": "ANGLE (NVIDIA, NVIDIA Quadro K2200 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2560x1440",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09797",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "NVIDIA",
+   "renderer": "ANGLE (NVIDIA, NVIDIA NVS 510 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 32,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09837",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GeForce",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GT 1030 (0x00001D01) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2752x1152",
+   "hardware_concurrency": 48,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09864",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "NVIDIA",
+   "renderer": "ANGLE (NVIDIA, NVIDIA Quadro M4000 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 2,
+   "device_memory": 4,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09865",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "NVIDIA",
+   "renderer": "ANGLE (NVIDIA, NVIDIA NVS 510 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 32,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09869",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GeForce",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GT 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1366x768",
+   "hardware_concurrency": 4,
+   "device_memory": 4,
+   "webgpu_available": false
+  },
+  {
+   "id": "vinyzu-09870",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GeForce",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GT 730 (0x00001287) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1366x768",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09874",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "NVIDIA",
+   "renderer": "ANGLE (NVIDIA, NVIDIA Quadro K2200 (0x000013BA) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09890",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GeForce",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GT 1030 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2752x1152",
+   "hardware_concurrency": 48,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09930",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GeForce",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GT 1030 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09937",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "RTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 (0x00002488) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09941",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "RTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 2060 (0x00001F08) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09944",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "RTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 4050 Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1928x1054",
+   "hardware_concurrency": 6,
+   "device_memory": 4,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09950",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1070 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1080x1920",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09951",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "RTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2560x1440",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09952",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1050 Ti (0x00001C8C) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09953",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1050 Ti Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 24,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09954",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 (0x00002184) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1181x738",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09958",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "RTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3050 OEM Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 12,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09962",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 (0x00001F82) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2560x1440",
+   "hardware_concurrency": 32,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09963",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 3GB Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09964",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "RTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 (0x00002504) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 6,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09967",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "RTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 (0x00002504) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "3440x1440",
+   "hardware_concurrency": 8,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09973",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "RTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2560x1440",
+   "hardware_concurrency": 6,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09979",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GeForce",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GT 630 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1440x900",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": false
+  },
+  {
+   "id": "vinyzu-09983",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "RTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3050 Ti Laptop GPU Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1707x1067",
+   "hardware_concurrency": 16,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09984",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1060 6GB (0x00001C03) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "2560x1440",
+   "hardware_concurrency": 6,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09989",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER (0x000021C4) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": true
+  },
+  {
+   "id": "vinyzu-09998",
+   "gpu_vendor": "NVIDIA",
+   "gpu_family": "GTX",
+   "renderer": "ANGLE (NVIDIA, NVIDIA GeForce GTX 460 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+   "screen": "1920x1080",
+   "hardware_concurrency": 4,
+   "device_memory": 8,
+   "webgpu_available": false
+  }
+ ]
+}

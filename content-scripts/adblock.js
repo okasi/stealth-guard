@@ -2,7 +2,8 @@
   if (
     window.top !== window ||
     !/^https?:$/.test(location.protocol) ||
-    isCloudflareChallengeHostname(location.hostname)
+    isCloudflareChallengeHostname(location.hostname) ||
+    isDataDomeChallengeHostname(location.hostname)
   ) {
     return;
   }

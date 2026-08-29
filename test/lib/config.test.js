@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const configPath = require.resolve("../../lib/config.js");
+const filterLists = require("../../lib/filterLists.js");
+const { isFeatureActiveForHostname } = require("../../lib/domainFilter.js");
 
 function loadConfigModule(
   navigatorValue = { platform: "Win32", userAgent: "Chrome/125" },
@@ -17,7 +19,52 @@ function loadConfigModule(
 
 afterEach(() => {
   delete globalThis.storage;
+  delete globalThis.getCurlProfileForConfig;
+  delete globalThis.DEFAULT_FILTER_LISTS;
+  delete globalThis.normalizeFilterListEntries;
+  delete globalThis.normalizeGpuProfile;
   vi.restoreAllMocks();
+});
+
+test("uses the bundled filter-list API when it is available globally", () => {
+  const defaultFilterLists = [
+    {
+      id: "bundled",
+      name: "Bundled filter",
+      url: "https://filters.example/bundled.txt",
+      enabled: true,
+    },
+  ];
+  globalThis.DEFAULT_FILTER_LISTS = defaultFilterLists;
+  globalThis.normalizeFilterListEntries = vi.fn((value) => value || defaultFilterLists);
+  globalThis.normalizeGpuProfile = vi.fn(() => null);
+
+  const { DEFAULT_CONFIG, normalizeConfig } = loadConfigModule();
+
+  expect(DEFAULT_CONFIG.tracker.filterLists).toEqual(defaultFilterLists);
+  normalizeConfig({});
+  expect(globalThis.normalizeGpuProfile).toHaveBeenCalled();
+});
+
+test("filter-list normalization can preserve custom identifiers as names", () => {
+  expect(
+    filterLists.normalizeFilterListEntries(
+      [{ id: "custom", url: "https://filters.example/custom.txt" }],
+      false,
+    ),
+  ).toEqual([
+    {
+      id: "custom",
+      name: "custom",
+      url: "https://filters.example/custom.txt",
+      enabled: true,
+    },
+  ]);
+  expect(
+    filterLists.normalizeFilterListEntries([
+      { id: "unknown", url: "https://filters.example/unknown.txt" },
+    ])[0].name,
+  ).toBe("unknown");
 });
 
 test("getDefaultUserAgentPreset maps platform and browser combinations", () => {
@@ -60,6 +107,7 @@ test("getDefaultUserAgentPreset maps platform and browser combinations", () => {
 
 test("User-Agent and content config helpers expose only trusted runtime data", () => {
   const {
+    BUILTIN_ADBLOCK_COMPATIBILITY_FILTERS,
     BUILTIN_TRACKER_DOMAINS,
     DEFAULT_CONFIG,
     LANGUAGE_PRESETS,
@@ -88,9 +136,33 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
   cloned.canvas.enabled = true;
 
   expect(PROTECTION_FEATURES).toContain("canvas");
+  expect(PROTECTION_FEATURES).toContain("worker");
+  expect(DEFAULT_CONFIG.webgl.mode).toBe("strict");
+  expect(DEFAULT_CONFIG.webgl.compatibilityWhitelist).toContain("*.figma.com");
+  expect(contentConfig.worker).toMatchObject({
+    enabled: true,
+    whitelist: expect.stringContaining("web.telegram.org"),
+  });
+  expect(contentConfig.worker.whitelist).toContain("*.facebook.com");
+  expect(contentConfig.worker.whitelist).toContain("*.x.com");
+  expect(
+    isFeatureActiveForHostname(DEFAULT_CONFIG, "worker", "www.facebook.com"),
+  ).toBe(false);
+  expect(isFeatureActiveForHostname(DEFAULT_CONFIG, "worker", "x.com")).toBe(
+    false,
+  );
   expect(PROTECTION_FEATURES).toContain("geolocation");
   expect(PROTECTION_FEATURES).toContain("language");
   expect(BUILTIN_TRACKER_DOMAINS).toContain("*.google-analytics.com");
+  expect(BUILTIN_ADBLOCK_COMPATIBILITY_FILTERS).toContain(
+    'tradingview.com##[data-dialog-name="gopro"]',
+  );
+  expect(BUILTIN_ADBLOCK_COMPATIBILITY_FILTERS).toContain(
+    "techcrunch.com##.DCDOr",
+  );
+  expect(BUILTIN_ADBLOCK_COMPATIBILITY_FILTERS).toContain(
+    "@@||public.servenobid.com/partner/163965/163966/wrapup_*.js$script,domain=techcrunch.com",
+  );
   expect(LANGUAGE_PRESETS["en-US"].acceptLanguage).toBe("en-US,en;q=0.9");
   expect(getUserAgentString("macos")).toBe(USER_AGENT_STRINGS.macos);
   expect(getUserAgentString("missing")).toBeNull();
@@ -116,11 +188,35 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
     source: "preset",
   });
   expect(contentConfig.unknown).toBeUndefined();
+  const contentWithGpuProfile = createContentConfig({
+    gpuProfile: {
+      webgl: {
+        webgl1: {
+          debug: {
+            VENDOR: "WebKit",
+            RENDERER: "WebKit WebGL",
+          },
+        },
+      },
+      webgpu: {
+        info: { vendor: "intel" },
+        limits: { maxBufferSize: "1024" },
+      },
+    },
+  });
+  expect(contentWithGpuProfile.gpuProfile).toMatchObject({
+    schema: "clearcote-profile",
+    webgpu: { limits: { maxBufferSize: 1024 } },
+  });
   expect(cloned.canvas.enabled).toBe(true);
   expect(contentConfig.canvas.enabled).toBe(false);
 
   const adblockConfig = cloneConfig(DEFAULT_CONFIG);
   expect(createContentConfig(adblockConfig, "www.youtube.com").adblock.enabled)
+    .toBe(true);
+  expect(createContentConfig(adblockConfig, "www.tradingview.com").adblock.enabled)
+    .toBe(true);
+  expect(createContentConfig(adblockConfig, "www.tradingview.com").canvas.enabled)
     .toBe(true);
   adblockConfig.tracker.whitelist = "youtube.com";
   expect(createContentConfig(adblockConfig, "youtube.com").adblock.enabled)
@@ -206,6 +302,7 @@ test("content config resolves only coarse effective proxy location data", () => 
   expect(parseCoarseCoordinates({ loc: "invalid" })).toBeNull();
   expect(parseCoarseCoordinates({ loc: "91,181" })).toBeNull();
   expect(normalizeProxyLocation(null)).toEqual({
+    asn: "",
     city: "",
     region: "",
     country: "",
@@ -230,6 +327,36 @@ test("content config resolves only coarse effective proxy location data", () => 
   });
 });
 
+test("content config projects only the selected curl browser profile", () => {
+  const { createContentConfig } = loadConfigModule();
+  globalThis.getCurlProfileForConfig = vi.fn().mockReturnValue({
+    target: "chrome131",
+    userAgent: "profile-agent",
+  });
+
+  const contentConfig = createContentConfig({
+    useragent: { preset: "windows", curlProfile: "chrome131" },
+  });
+
+  expect(contentConfig.useragent.profile).toEqual({
+    target: "chrome131",
+    userAgent: "profile-agent",
+  });
+  expect(globalThis.getCurlProfileForConfig).toHaveBeenCalled();
+  globalThis.getCurlProfileForConfig.mockReturnValueOnce(null);
+  expect(
+    createContentConfig({ useragent: { preset: "windows" } }).useragent.profile,
+  ).toBeNull();
+});
+
+test("content config leaves the profile projection empty when no profile is available", () => {
+  globalThis.getCurlProfileForConfig = () => null;
+  const { createContentConfig } = loadConfigModule();
+  expect(
+    createContentConfig({ useragent: { preset: "windows" } }).useragent.profile,
+  ).toBeNull();
+});
+
 test("normalizeConfig restores safe values for malformed configuration", () => {
   const { DEFAULT_CONFIG, normalizeConfig } = loadConfigModule();
   const malformed = {
@@ -248,6 +375,7 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
       bypassList: "localhost",
     },
     useragent: { enabled: 1, whitelist: [], preset: "unknown" },
+    worker: { enabled: "yes", whitelist: [] },
     language: { enabled: 1, whitelist: [], preset: "unknown" },
     tracker: { enabled: 1, whitelist: [], useBuiltIn: "yes", customDomains: [] },
     timezone: { enabled: null, whitelist: false, offset: 9999, name: "  " },
@@ -256,7 +384,12 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
     clientrects: [],
     font: null,
     audiocontext: "invalid",
-    webgl: { preset: "invalid" },
+    webgl: {
+      preset: "invalid",
+      mode: "invalid",
+      compatibilityWhitelist: 7,
+      strictWhitelist: 7,
+    },
     webgpu: 5,
   };
 
@@ -311,9 +444,29 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
   });
   expect(normalized.useragent).toMatchObject({
     enabled: true,
-    whitelist: "",
+    whitelist: "*.soundcloud.com",
     preset: DEFAULT_CONFIG.useragent.preset,
   });
+  expect(normalized.worker).toEqual(DEFAULT_CONFIG.worker);
+  expect(
+    normalizeConfig({
+      worker: { enabled: true, whitelist: "web.telegram.org" },
+    }).worker.whitelist,
+  ).toBe(DEFAULT_CONFIG.worker.whitelist);
+  const previousDefaultWorkerWhitelist = DEFAULT_CONFIG.worker.whitelist.replace(
+    ", *.x.com",
+    "",
+  );
+  expect(
+    normalizeConfig({
+      worker: { enabled: true, whitelist: previousDefaultWorkerWhitelist },
+    }).worker.whitelist,
+  ).toBe(DEFAULT_CONFIG.worker.whitelist);
+  expect(
+    normalizeConfig({
+      worker: { enabled: true, whitelist: "custom-worker.test" },
+    }).worker.whitelist,
+  ).toBe("custom-worker.test");
   expect(normalized.language).toEqual(DEFAULT_CONFIG.language);
   expect(normalized.tracker).toEqual(DEFAULT_CONFIG.tracker);
   expect(normalized.timezone).toMatchObject({
@@ -325,6 +478,22 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
   expect(normalized.webrtc.policy).toBe(DEFAULT_CONFIG.webrtc.policy);
   expect(normalized.canvas.noiseLevel).toBe(DEFAULT_CONFIG.canvas.noiseLevel);
   expect(normalized.webgl.preset).toBe(DEFAULT_CONFIG.webgl.preset);
+  expect(normalized.webgl.mode).toBe(DEFAULT_CONFIG.webgl.mode);
+  expect(normalized.webgl.compatibilityWhitelist).toBe(
+    DEFAULT_CONFIG.webgl.compatibilityWhitelist,
+  );
+  expect(normalized.webgl.strictWhitelist).toBe(
+    DEFAULT_CONFIG.webgl.strictWhitelist,
+  );
+  const migratedLegacyWebgl = normalizeConfig({
+    webgl: {
+      whitelist: "*.figma.com, *.miro.com, *.adguard-mail.com, *.soundcloud.com",
+    },
+  });
+  expect(migratedLegacyWebgl.webgl.whitelist).toBe("");
+  expect(migratedLegacyWebgl.webgl.compatibilityWhitelist).toContain(
+    "*.figma.com",
+  );
   expect(normalized.clientrects).toEqual(DEFAULT_CONFIG.clientrects);
   expect(normalized.font).toEqual(DEFAULT_CONFIG.font);
   expect(normalized.audiocontext).toEqual(DEFAULT_CONFIG.audiocontext);
@@ -342,6 +511,7 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
       port: 1080,
       scheme: "socks5",
       location: {
+        asn: "",
         city: "Paris",
         region: "",
         country: "",
@@ -374,8 +544,13 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
   const { DEFAULT_CONFIG, normalizeConfig } = loadConfigModule();
   const longValue = "x".repeat(200);
   const config = {
-    useragent: { preset: "iphone" },
-    webgl: { preset: "apple" },
+    useragent: { preset: "iphone", curlProfile: "chrome131" },
+    webgl: {
+      preset: "apple",
+      mode: "strict",
+      compatibilityWhitelist: "*.figma.com",
+      strictWhitelist: "fingerprint.test, *.strict.test",
+    },
     canvas: { noiseLevel: "high" },
     language: { preset: "sv-SE" },
     tracker: {
@@ -427,9 +602,40 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
   const normalized = normalizeConfig(config);
 
   expect(normalized.useragent.preset).toBe("iphone");
+  expect(normalized.useragent.curlProfile).toBe("auto");
   expect(normalized.webgl.preset).toBe("apple");
+  expect(normalized.webgl.mode).toBe("strict");
+  expect(normalized.webgl.compatibilityWhitelist).toBe("*.figma.com");
+  expect(normalized.webgl.strictWhitelist).toBe(
+    "fingerprint.test, *.strict.test",
+  );
   expect(normalized.canvas.noiseLevel).toBe("high");
   expect(normalized.language.preset).toBe("sv-SE");
+  expect(
+    normalizeConfig({
+      useragent: { preset: "android", curlProfile: "chrome131" },
+    }).useragent.curlProfile,
+  ).toBe("auto");
+  expect(
+    normalizeConfig({
+      useragent: { preset: "android", curlProfile: "chrome131_android" },
+    }).useragent.curlProfile,
+  ).toBe("chrome131_android");
+  expect(
+    normalizeConfig({
+      useragent: { preset: "macos", curlProfile: "safari184" },
+    }).useragent.curlProfile,
+  ).toBe("safari184");
+  expect(
+    normalizeConfig({
+      useragent: { preset: "iphone", curlProfile: "safari184" },
+    }).useragent.curlProfile,
+  ).toBe("auto");
+  expect(
+    normalizeConfig({
+      useragent: { preset: "firefox", curlProfile: "firefox147" },
+    }).useragent,
+  ).toMatchObject({ preset: "windows", curlProfile: "auto" });
   expect(normalized.tracker).toMatchObject({
     enabled: true,
     whitelist: "trusted.metrics.test",

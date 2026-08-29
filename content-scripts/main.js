@@ -39,6 +39,19 @@ function installMainWorldProtections(
   const debugWarn = (...args) => debug("warn", ...args);
   const debugError = (...args) => console.error(...args);
 
+  let getCurrentUserAgentProfile = function () {
+    return null;
+  };
+  let getCurrentLanguageIdentity = function () {
+    return null;
+  };
+  let getCurrentTimezoneName = function () {
+    return null;
+  };
+  let getCurrentWebGLIdentity = function () {
+    return null;
+  };
+
   const sendFingerprintAlert = function (feature) {
     window.postMessage(
       {
@@ -108,11 +121,88 @@ function installMainWorldProtections(
         featureConfig &&
         featureConfig.enabled &&
         !isDomainAllowlisted(config.globalWhitelist || "") &&
-        !isDomainAllowlisted(featureConfig.whitelist || ""),
+      !isDomainAllowlisted(featureConfig.whitelist || ""),
+    );
+  };
+
+  const isWebGLStrict = function () {
+    const webgl = config.webgl;
+    const isCompatibilitySite =
+      webgl &&
+      domainPatterns.isAllowlisted(
+        window.location.hostname,
+        webgl.compatibilityWhitelist || "",
+      );
+    return Boolean(
+      isFeatureActive("webgl") &&
+        webgl &&
+        !isCompatibilitySite &&
+        (webgl.mode === "strict" ||
+          domainPatterns.isAllowlisted(
+            window.location.hostname,
+            webgl.strictWhitelist || "",
+          )),
     );
   };
 
   debugLog("[Stealth Guard] MAIN-world protections activating");
+
+  // CreepJS treats a zero outer dimension or an outer dimension smaller than
+  // the viewport as an impossible browser state. These values belong to the
+  // native browser window and are non-configurable in Chromium/Opera, so they
+  // must not be spoofed with JavaScript getters. Repair only an invalid
+  // top-level window through the native resize API; valid browser geometry is
+  // left completely untouched.
+  const repairInvalidWindowGeometry = function () {
+    try {
+      if (window !== window.top) return;
+
+      const innerWidth = Number(window.innerWidth);
+      const innerHeight = Number(window.innerHeight);
+      const outerWidth = Number(window.outerWidth);
+      const outerHeight = Number(window.outerHeight);
+      const invalidWidth =
+        !Number.isFinite(outerWidth) ||
+        outerWidth <= 0 ||
+        (Number.isFinite(innerWidth) && outerWidth < innerWidth);
+      const invalidHeight =
+        !Number.isFinite(outerHeight) ||
+        outerHeight <= 0 ||
+        (Number.isFinite(innerHeight) && outerHeight < innerHeight);
+
+      if (
+        (!invalidWidth && !invalidHeight) ||
+        typeof window.resizeTo !== "function"
+      ) {
+        return;
+      }
+
+      const targetWidth = Math.max(
+        1,
+        Number.isFinite(innerWidth) ? innerWidth + 1 : 0,
+        Number.isFinite(outerWidth) && outerWidth > 0 ? outerWidth : 0,
+      );
+      const targetHeight = Math.max(
+        1,
+        Number.isFinite(innerHeight) ? innerHeight + 1 : 0,
+        Number.isFinite(outerHeight) && outerHeight > 0 ? outerHeight : 0,
+      );
+      window.resizeTo(targetWidth, targetHeight);
+    } catch (error) {
+      // Regular tabs normally reject resizeTo; there is nothing else that a
+      // content script can safely do to native browser-window dimensions.
+    }
+  };
+
+  window.setTimeout(repairInvalidWindowGeometry, 0);
+  if (document.readyState !== "complete") {
+    window.addEventListener("load", repairInvalidWindowGeometry, {
+      once: true,
+      capture: true,
+    });
+  } else {
+    window.setTimeout(repairInvalidWindowGeometry, 250);
+  }
 
   const isYouTubeHostname = function () {
     const hostname = window.location.hostname.toLowerCase();
@@ -421,6 +511,41 @@ function installMainWorldProtections(
   const webglCanvases = new WeakSet();
   let webglNoiseSeed = 0;
 
+  const advanceWebGLNoiseState = function (state) {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return state >>> 0;
+  };
+
+  const seedWebGLNoiseState = function (...values) {
+    let state = webglNoiseSeed || 1;
+    for (const value of values) {
+      state = advanceWebGLNoiseState((state ^ (Number(value) >>> 0)) >>> 0);
+    }
+    return state;
+  };
+
+  const addSeededWebGLNoise = function (imageData) {
+    const totalPixels = imageData.width * imageData.height;
+    if (!totalPixels || totalPixels > 1000000) return imageData;
+    let state = seedWebGLNoiseState(imageData.width, imageData.height);
+    const samples = Math.min(32, totalPixels);
+    for (let sample = 0; sample < samples; sample++) {
+      state = advanceWebGLNoiseState(state ^ sample);
+      const pixel = state % totalPixels;
+      const channel = (state >>> 8) % 3;
+      const index = pixel * 4 + channel;
+      const value = imageData.data[index];
+      const direction = state & 1 ? 1 : -1;
+      imageData.data[index] =
+        (value === 0 && direction < 0) || (value === 255 && direction > 0)
+          ? value - direction
+          : value + direction;
+    }
+    return imageData;
+  };
+
   if (config.canvas) {
     const getImageData = CanvasRenderingContext2D.prototype.getImageData;
     const getOffscreenImageData =
@@ -491,61 +616,50 @@ function installMainWorldProtections(
       return imageData;
     };
 
-    const addSeededWebGLNoise = function (imageData) {
-      const totalPixels = imageData.width * imageData.height;
-      if (!totalPixels) return imageData;
-      let state = webglNoiseSeed || 1;
-      const samples = Math.min(32, totalPixels);
-      for (let sample = 0; sample < samples; sample++) {
-        state ^= state << 13;
-        state ^= state >>> 17;
-        state ^= state << 5;
-        state >>>= 0;
-        const pixel = state % totalPixels;
-        const channel = (state >>> 8) % 3;
-        const index = pixel * 4 + channel;
-        const value = imageData.data[index];
-        const direction = state & 1 ? 1 : -1;
-        imageData.data[index] =
-          (value === 0 && direction < 0) || (value === 255 && direction > 0)
-            ? value - direction
-            : value + direction;
-      }
-      return imageData;
-    };
-
     const exportNoisedCanvas = function (canvas, originalMethod, args) {
       const isWebGLCanvas = webglCanvases.has(canvas);
-      const feature = isWebGLCanvas ? "webgl" : "canvas";
-      if (!isFeatureActive(feature) || !canvas.width || !canvas.height) {
-        return originalMethod.apply(canvas, args);
-      }
-
-      let imageData;
+      // WebGL exports are rendering output, not a safe place to inject
+      // fingerprint noise in compatibility mode. Editors and design tools
+      // commonly use these exports for textures, thumbnails, and clipboard
+      // data. Strict mode is opt-in per site and operates on a copy only.
       if (isWebGLCanvas) {
+        if (!isFeatureActive("webgl") || !canvas.width || !canvas.height) {
+          return originalMethod.apply(canvas, args);
+        }
+        if (!isWebGLStrict()) {
+          sendFingerprintAlert("webgl");
+          return originalMethod.apply(canvas, args);
+        }
         const snapshot = createCanvasLike(canvas);
         const snapshotContext = snapshot.getContext("2d");
+        if (!snapshotContext) return originalMethod.apply(canvas, args);
         snapshotContext.drawImage(canvas, 0, 0);
-        imageData = readCanvasImageData(
+        const imageData = readCanvasImageData(
           snapshotContext,
           canvas.width,
           canvas.height,
         );
         addSeededWebGLNoise(imageData);
-      } else {
-        const context = canvas.getContext("2d");
-        if (!context) return originalMethod.apply(canvas, args);
-        imageData = readCanvasImageData(
-          context,
-          canvas.width,
-          canvas.height,
-        );
-        addCanvasNoise(imageData);
+        const tempCanvas = createCanvasLike(canvas);
+        const tempContext = tempCanvas.getContext("2d");
+        if (!tempContext) return originalMethod.apply(canvas, args);
+        tempContext.putImageData(imageData, 0, 0);
+        sendFingerprintAlert("webgl");
+        return originalMethod.apply(tempCanvas, args);
       }
+      if (!isFeatureActive("canvas") || !canvas.width || !canvas.height) {
+        return originalMethod.apply(canvas, args);
+      }
+
+      let imageData;
+      const context = canvas.getContext("2d");
+      if (!context) return originalMethod.apply(canvas, args);
+      imageData = readCanvasImageData(context, canvas.width, canvas.height);
+      addCanvasNoise(imageData);
 
       const tempCanvas = createCanvasLike(canvas);
       tempCanvas.getContext("2d").putImageData(imageData, 0, 0);
-      sendFingerprintAlert(feature);
+      sendFingerprintAlert("canvas");
       return originalMethod.apply(tempCanvas, args);
     };
 
@@ -595,62 +709,102 @@ function installMainWorldProtections(
     debugLog("[Stealth Guard] Canvas protection activated");
   }
 
+  const getConfiguredGpuProfile = function () {
+    return config.gpuProfile && typeof config.gpuProfile === "object"
+      ? config.gpuProfile
+      : null;
+  };
+  const getConfiguredWebGLSurfaceProfile = function (version) {
+    const profile = getConfiguredGpuProfile();
+    if (!profile || !profile.webgl) return null;
+    return version === 2
+      ? profile.webgl.webgl2 || profile.webgl.webgl1
+      : profile.webgl.webgl1 || profile.webgl.webgl2;
+  };
+  const getConfiguredWebGPUProfile = function () {
+    const profile = getConfiguredGpuProfile();
+    return profile && profile.webgpu ? profile.webgpu : null;
+  };
+  const isWebGPUProfileActive = function () {
+    return Boolean(
+      getConfiguredWebGPUProfile() &&
+        isFeatureActive("webgpu") &&
+        (!config.webgl || isWebGLStrict()),
+    );
+  };
+
   if (config.webgl) {
-    const webglPresets = {
+    const webglProfiles = {
       apple: {
-        unmaskedVendor: "Google Inc. (Apple)",
+        maskedVendor: "WebKit",
+        maskedRenderer: "WebKit WebGL",
+        unmaskedVendor: "Google Inc. (WebKit, Apple)",
         unmaskedRenderer:
           "ANGLE (Apple, ANGLE Metal Renderer: Apple GPU, Unspecified Version)",
       },
       safari_apple: {
-        unmaskedVendor: "Apple Inc.",
+        maskedVendor: "WebKit",
+        maskedRenderer: "WebKit WebGL",
+        unmaskedVendor: "Apple Inc. (WebKit)",
         unmaskedRenderer: "Apple GPU",
       },
       iphone: {
-        unmaskedVendor: "Apple Inc.",
+        maskedVendor: "WebKit",
+        maskedRenderer: "WebKit WebGL",
+        unmaskedVendor: "Apple Inc. (WebKit)",
         unmaskedRenderer: "Apple GPU",
       },
       pixel_4: {
-        unmaskedVendor: "Google Inc. (Qualcomm)",
+        maskedVendor: "WebKit",
+        maskedRenderer: "WebKit WebGL",
+        unmaskedVendor: "Google Inc. (WebKit, Qualcomm)",
         unmaskedRenderer:
           "ANGLE (Qualcomm, Adreno (TM) 640, OpenGL ES 3.2)",
       },
       surface_pro_7: {
-        unmaskedVendor: "Google Inc. (Intel)",
+        maskedVendor: "WebKit",
+        maskedRenderer: "WebKit WebGL",
+        unmaskedVendor: "Google Inc. (WebKit, Intel)",
         unmaskedRenderer:
           "ANGLE (Intel, Intel(R) Iris(R) Plus Graphics 640 Direct3D11 vs_5_0 ps_5_0, D3D11)",
       },
     };
-    const presetByUserAgent = {
+    const defaultProfileByUserAgent = {
       macos: "safari_apple",
       macos_chrome: "apple",
       windows: "surface_pro_7",
       iphone: "iphone",
       android: "pixel_4",
     };
-    const parameterCaps = new Map([
-      [3379, 16384],
-      [34024, 16384],
-      [34047, 16],
-      [34076, 16384],
-      [34930, 16],
-      [34921, 16],
-      [35660, 16],
-      [35661, 32],
-      [36347, 1024],
-      [36348, 15],
-      [36349, 1024],
-    ]);
-    const precisionValues = new Map([
-      [36336, [15, 15, 10]],
-      [36337, [15, 15, 10]],
-      [36338, [127, 127, 23]],
-      [36339, [15, 14, 0]],
-      [36340, [15, 14, 0]],
-      [36341, [31, 30, 0]],
-    ]);
-    const identityParameters = new Set([7936, 7937, 7938, 35724, 37445, 37446]);
-    webglNoiseSeed = crypto.getRandomValues(new Uint32Array(1))[0];
+    const compatibleProfilesByUserAgent = {
+      macos: new Set(["auto", "apple"]),
+      macos_chrome: new Set(["auto", "apple"]),
+      windows: new Set(["auto", "surface_pro_7"]),
+      iphone: new Set(["auto", "apple"]),
+      android: new Set(["auto", "pixel_4"]),
+    };
+    const identityParameters = new Set([7936, 7937, 37445, 37446]);
+    const shaderTypeNames = {
+      35632: "FRAGMENT_SHADER",
+      35633: "VERTEX_SHADER",
+    };
+    const shaderPrecisionNames = {
+      36336: "LOW_FLOAT",
+      36337: "MEDIUM_FLOAT",
+      36338: "HIGH_FLOAT",
+      36339: "LOW_INT",
+      36340: "MEDIUM_INT",
+      36341: "HIGH_INT",
+    };
+    const debugRendererInfoContexts = new WeakSet();
+    if (
+      typeof crypto !== "undefined" &&
+      typeof crypto.getRandomValues === "function"
+    ) {
+      webglNoiseSeed = crypto.getRandomValues(new Uint32Array(1))[0] || 1;
+    } else {
+      webglNoiseSeed = (Math.random() * 0xffffffff) >>> 0 || 1;
+    }
     const notifyWebGLAccess = createOneTimeAlert("webgl");
 
     const protectCanvasContext = function (Constructor, label) {
@@ -681,77 +835,210 @@ function installMainWorldProtections(
       "OffscreenCanvas",
     );
 
-    const getWebGLPreset = function () {
-      let preset = config.webgl.preset;
-      if (preset === "auto") {
-        preset = presetByUserAgent[config.useragent.preset] || "apple";
-      } else if (preset === "apple" && config.useragent.preset === "macos") {
-        preset = "safari_apple";
-      } else if (preset === "apple" && config.useragent.preset === "iphone") {
-        preset = "iphone";
+    const getWebGLProfile = function (version = 1) {
+      const importedSurface = getConfiguredWebGLSurfaceProfile(version);
+      const importedDebug = importedSurface && importedSurface.debug;
+      if (
+        importedSurface &&
+        importedDebug &&
+        Object.keys(importedDebug).length > 0
+      ) {
+        return {
+          maskedVendor: importedDebug.VENDOR || "WebKit",
+          maskedRenderer: importedDebug.RENDERER || "WebKit WebGL",
+          unmaskedVendor:
+            importedDebug.UNMASKED_VENDOR_WEBGL || importedDebug.VENDOR || "",
+          unmaskedRenderer:
+            importedDebug.UNMASKED_RENDERER_WEBGL ||
+            importedDebug.RENDERER ||
+            "",
+        };
       }
-      return webglPresets[preset] || webglPresets.apple;
+      const userAgentPreset =
+        (config.useragent && config.useragent.preset) || "macos_chrome";
+      const defaultProfile =
+        defaultProfileByUserAgent[userAgentPreset] || "apple";
+      const requestedProfile =
+        config.webgl && typeof config.webgl.preset === "string"
+          ? config.webgl.preset
+          : "auto";
+      const compatibleProfiles =
+        compatibleProfilesByUserAgent[userAgentPreset];
+      let profileName = requestedProfile;
+      if (
+        requestedProfile === "apple" &&
+        (userAgentPreset === "macos" || userAgentPreset === "iphone")
+      ) {
+        profileName = defaultProfile;
+      } else if (
+        requestedProfile === "auto" ||
+        !compatibleProfiles ||
+        !compatibleProfiles.has(requestedProfile)
+      ) {
+        profileName = defaultProfile;
+      }
+      return webglProfiles[profileName] || webglProfiles.apple;
+    };
+    getCurrentWebGLIdentity = function () {
+      const profile = getWebGLProfile(1);
+      return {
+        maskedVendor: profile.maskedVendor,
+        maskedRenderer: profile.maskedRenderer,
+        unmaskedVendor: profile.unmaskedVendor,
+        unmaskedRenderer: profile.unmaskedRenderer,
+      };
     };
 
-    const capArray = function (nativeValue, limits) {
-      if (!ArrayBuffer.isView(nativeValue) || nativeValue.length !== limits.length) {
-        return nativeValue;
+    const cloneProfileWebGLValue = function (profileValue, nativeValue) {
+      if (ArrayBuffer.isView(nativeValue) && Array.isArray(profileValue)) {
+        try {
+          return new nativeValue.constructor(profileValue);
+        } catch (error) {
+          return nativeValue;
+        }
       }
-      return new nativeValue.constructor(
-        limits.map((limit, index) => Math.min(nativeValue[index], limit)),
+      if (Array.isArray(nativeValue) && Array.isArray(profileValue)) {
+        return profileValue.slice();
+      }
+      if (
+        typeof nativeValue === "number" &&
+        typeof profileValue === "number" &&
+        Number.isFinite(profileValue)
+      ) {
+        return profileValue;
+      }
+      if (typeof nativeValue === typeof profileValue) return profileValue;
+      return nativeValue;
+    };
+
+    const getProfileWebGLParameter = function (
+      parameter,
+      version,
+      nativeValue,
+    ) {
+      if (!isWebGLStrict()) return undefined;
+      const surface = getConfiguredWebGLSurfaceProfile(version);
+      if (!surface || !surface.parameters) return undefined;
+      const Constructor =
+        version === 2 ? WebGL2RenderingContext : WebGLRenderingContext;
+      const parameterName =
+        typeof Constructor !== "undefined"
+          ? Object.getOwnPropertyNames(Constructor).find(
+              (name) =>
+                Constructor[name] === parameter &&
+                Object.prototype.hasOwnProperty.call(
+                  surface.parameters,
+                  name,
+                ),
+            )
+          : undefined;
+      if (!parameterName) return undefined;
+      return cloneProfileWebGLValue(
+        surface.parameters[parameterName],
+        nativeValue,
       );
     };
 
-    const capRange = function (nativeValue, maximum) {
-      if (!ArrayBuffer.isView(nativeValue) || nativeValue.length !== 2) {
-        return nativeValue;
-      }
-      return new nativeValue.constructor([
-        nativeValue[0],
-        Math.min(nativeValue[1], maximum),
-      ]);
-    };
-
-    const getSpoofedParameter = function (parameter, nativeValue, version) {
-      const preset = getWebGLPreset();
-      const safariProfile =
-        config.useragent.preset === "macos" ||
-        config.useragent.preset === "iphone";
-      const versionValues = safariProfile
-        ? {
-            version: version === 2 ? "WebGL 2.0" : "WebGL 1.0",
-            shadingLanguage:
-              version === 2 ? "WebGL GLSL ES 3.00" : "WebGL GLSL ES 1.0",
-          }
-        : {
-            version:
-              version === 2
-                ? "WebGL 2.0 (OpenGL ES 3.0 Chromium)"
-                : "WebGL 1.0 (OpenGL ES 2.0 Chromium)",
-            shadingLanguage:
-              version === 2
-                ? "WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)"
-                : "WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)",
-          };
+    const getSpoofedParameter = function (parameter, version, nativeValue) {
+      const profile = getWebGLProfile(version);
       const presetValues = {
-        7936: "WebKit",
-        37445: preset.unmaskedVendor,
-        7937: "WebKit WebGL",
-        37446: preset.unmaskedRenderer,
-        7938: versionValues.version,
-        35724: versionValues.shadingLanguage,
+        7936: profile.maskedVendor,
+        37445: profile.unmaskedVendor,
+        7937: profile.maskedRenderer,
+        37446: profile.unmaskedRenderer,
       };
       if (Object.prototype.hasOwnProperty.call(presetValues, parameter)) {
         return presetValues[parameter];
       }
-      if (parameter === 3386) return capArray(nativeValue, [16384, 16384]);
-      if (parameter === 33901) return capRange(nativeValue, 1024);
-      if (parameter === 33902) return capRange(nativeValue, 1);
-      const cap = parameterCaps.get(parameter);
-      if (cap !== undefined && typeof nativeValue === "number") {
-        return Math.min(nativeValue, cap);
+      if (parameter === 7938 || parameter === 35724) {
+        const importedSurface = getConfiguredWebGLSurfaceProfile(version);
+        const importedDebug = importedSurface && importedSurface.debug;
+        const debugValue =
+          importedDebug &&
+          (parameter === 7938
+            ? importedDebug.VERSION
+            : importedDebug.SHADING_LANGUAGE_VERSION);
+        if (typeof debugValue === "string" && debugValue) return debugValue;
       }
-      return nativeValue;
+      return getProfileWebGLParameter(parameter, version, nativeValue);
+    };
+
+    const getProfileShaderPrecision = function (version, shader, precision) {
+      if (!isWebGLStrict()) return null;
+      const surface = getConfiguredWebGLSurfaceProfile(version);
+      if (!surface) return null;
+      const shaderName = shaderTypeNames[shader];
+      const precisionName = shaderPrecisionNames[precision];
+      if (!shaderName || !precisionName) return null;
+      const key = `${shaderName}:${precisionName}`;
+      const entry =
+        (surface.shaderPrecision && surface.shaderPrecision[key]) ||
+        (surface.parameters &&
+          surface.parameters[`PRECISION_${shaderName}_${precisionName}`]);
+      if (!entry || typeof entry !== "object") return null;
+      const values = {
+        rangeMin: Number(entry.rangeMin ?? entry.RANGE_MIN),
+        rangeMax: Number(entry.rangeMax ?? entry.RANGE_MAX),
+        precision: Number(entry.precision ?? entry.PRECISION),
+      };
+      return Object.values(values).every(Number.isFinite) ? values : null;
+    };
+
+    const getReadbackChannelCount = function (format) {
+      if (format === 6407 || format === 36248) return 3;
+      if (format === 33319 || format === 33320) return 2;
+      if (format === 6408 || format === 36249) return 4;
+      return 1;
+    };
+
+    const getIntegerArrayMaximum = function (output) {
+      if (output instanceof Uint8Array || output instanceof Uint8ClampedArray) {
+        return 255;
+      }
+      if (output instanceof Uint16Array) return 65535;
+      if (output instanceof Uint32Array) return 4294967295;
+      return null;
+    };
+
+    const addSeededWebGLReadbackNoise = function (
+      output,
+      width,
+      height,
+      format,
+      type,
+      offset,
+    ) {
+      if (!isWebGLStrict() || !ArrayBuffer.isView(output) || !output.length) {
+        return;
+      }
+      const available = output.length - offset;
+      if (available <= 0) return;
+      const channels = getReadbackChannelCount(format);
+      const pixelCount = Math.floor(available / channels);
+      if (!pixelCount) return;
+      let state = seedWebGLNoiseState(width, height, format, type, offset);
+      const samples = Math.min(8, pixelCount);
+      const maximum = getIntegerArrayMaximum(output);
+      const isFloat = output instanceof Float32Array || output instanceof Float64Array;
+      for (let sample = 0; sample < samples; sample++) {
+        state = advanceWebGLNoiseState(state ^ sample);
+        const pixel = state % pixelCount;
+        const channel = (state >>> 8) % Math.min(3, channels);
+        const index = offset + pixel * channels + channel;
+        const value = output[index];
+        if (typeof value !== "number") continue;
+        if (isFloat) {
+          const delta = value === 0 ? 1e-7 : Math.max(Math.abs(value), 1) * 1e-7;
+          output[index] = value + (state & 1 ? delta : -delta);
+          continue;
+        }
+        const direction = state & 1 ? 1 : -1;
+        const nextValue = value + direction;
+        output[index] =
+          maximum === null
+            ? nextValue
+            : Math.max(0, Math.min(maximum, nextValue));
+      }
     };
 
     const protectWebGL = function (Constructor, version) {
@@ -761,16 +1048,43 @@ function installMainWorldProtections(
         Constructor.prototype,
         "getParameter",
         (target, self, args) => {
-          if (isFeatureActive("webgl") && identityParameters.has(args[0])) {
-            notifyWebGLAccess();
-            return getSpoofedParameter(args[0], undefined, version);
-          }
           const nativeValue = Reflect.apply(target, self, args);
-          if (!isFeatureActive("webgl")) {
+          const isDebugRendererParameter =
+            (args[0] === 37445 || args[0] === 37446) &&
+            debugRendererInfoContexts.has(self);
+          if (
+            !isFeatureActive("webgl") ||
+            (args[0] >= 37445 && !isDebugRendererParameter)
+          ) {
+            return nativeValue;
+          }
+          const isProfileParameter =
+            isWebGLStrict() &&
+            getProfileWebGLParameter(args[0], version, nativeValue) !==
+              undefined;
+          const importedSurface = getConfiguredWebGLSurfaceProfile(version);
+          const importedDebug = importedSurface && importedSurface.debug;
+          const isProfileDebugParameter =
+            isWebGLStrict() &&
+            (args[0] === 7938 || args[0] === 35724) &&
+            importedDebug &&
+            typeof
+              importedDebug[args[0] === 7938 ? "VERSION" : "SHADING_LANGUAGE_VERSION"] ===
+              "string";
+          if (
+            !identityParameters.has(args[0]) &&
+            !isProfileParameter &&
+            !isProfileDebugParameter
+          ) {
             return nativeValue;
           }
           notifyWebGLAccess();
-          return getSpoofedParameter(args[0], nativeValue, version);
+          const spoofedValue = getSpoofedParameter(
+            args[0],
+            version,
+            nativeValue,
+          );
+          return spoofedValue === undefined ? nativeValue : spoofedValue;
         },
         `${label}.getParameter`,
       );
@@ -779,21 +1093,24 @@ function installMainWorldProtections(
         "getShaderPrecisionFormat",
         (target, self, args) => {
           const format = Reflect.apply(target, self, args);
-          const values = precisionValues.get(args[1]);
-          if (!isFeatureActive("webgl") || !format || !values) {
-            return format;
+          const profilePrecision = getProfileShaderPrecision(
+            version,
+            args[0],
+            args[1],
+          );
+          if (profilePrecision && format && isWebGLStrict()) {
+            notifyWebGLAccess();
+            return new Proxy(format, {
+              get(targetFormat, property, receiver) {
+                if (property in profilePrecision) {
+                  return profilePrecision[property];
+                }
+                return Reflect.get(targetFormat, property, receiver);
+              },
+            });
           }
-          notifyWebGLAccess();
-          return new Proxy(format, {
-            get(targetFormat, property) {
-              if (isFeatureActive("webgl")) {
-                if (property === "rangeMin") return values[0];
-                if (property === "rangeMax") return values[1];
-                if (property === "precision") return values[2];
-              }
-              return Reflect.get(targetFormat, property, targetFormat);
-            },
-          });
+          if (isFeatureActive("webgl")) notifyWebGLAccess();
+          return format;
         },
         `${label}.getShaderPrecisionFormat`,
       );
@@ -802,28 +1119,31 @@ function installMainWorldProtections(
         "getSupportedExtensions",
         (target, self, args) => {
           const extensions = Reflect.apply(target, self, args);
-          if (
-            !isFeatureActive("webgl") ||
-            !Array.isArray(extensions) ||
-            extensions.length < 2
-          ) {
-            return extensions;
+          if (isWebGLStrict() && Array.isArray(extensions)) {
+            const importedSurface = getConfiguredWebGLSurfaceProfile(version);
+            const importedExtensions =
+              importedSurface && Array.isArray(importedSurface.extensions)
+                ? importedSurface.extensions.filter((extension) =>
+                    extensions.includes(extension),
+                  )
+                : [];
+            const shuffled = (
+              importedExtensions.length ? importedExtensions : extensions
+            ).slice();
+            let state = seedWebGLNoiseState(version, shuffled.length);
+            for (let index = shuffled.length - 1; index > 0; index--) {
+              state = advanceWebGLNoiseState(state ^ index);
+              const swapIndex = state % (index + 1);
+              [shuffled[index], shuffled[swapIndex]] = [
+                shuffled[swapIndex],
+                shuffled[index],
+              ];
+            }
+            notifyWebGLAccess();
+            return shuffled;
           }
-          const shuffled = extensions.slice();
-          let state = (webglNoiseSeed ^ version) >>> 0;
-          for (let index = shuffled.length - 1; index > 0; index--) {
-            state ^= state << 13;
-            state ^= state >>> 17;
-            state ^= state << 5;
-            state >>>= 0;
-            const swapIndex = state % (index + 1);
-            [shuffled[index], shuffled[swapIndex]] = [
-              shuffled[swapIndex],
-              shuffled[index],
-            ];
-          }
-          notifyWebGLAccess();
-          return shuffled;
+          if (isFeatureActive("webgl")) notifyWebGLAccess();
+          return extensions;
         },
         `${label}.getSupportedExtensions`,
       );
@@ -833,11 +1153,12 @@ function installMainWorldProtections(
         (target, self, args) => {
           const extension = Reflect.apply(target, self, args);
           if (
-            isFeatureActive("webgl") &&
             typeof args[0] === "string" &&
-            args[0].toLowerCase() === "webgl_debug_renderer_info"
+            args[0].toLowerCase() === "webgl_debug_renderer_info" &&
+            extension
           ) {
-            notifyWebGLAccess();
+            debugRendererInfoContexts.add(self);
+            if (isFeatureActive("webgl")) notifyWebGLAccess();
           }
           return extension;
         },
@@ -848,31 +1169,19 @@ function installMainWorldProtections(
         "readPixels",
         (target, self, args) => {
           const result = Reflect.apply(target, self, args);
-          const output = args[6];
-          if (
-            !isFeatureActive("webgl") ||
-            !Number.isInteger(args[2]) ||
-            args[2] <= 0 ||
-            !Number.isInteger(args[3]) ||
-            args[3] <= 0 ||
-            !ArrayBuffer.isView(output) ||
-            typeof output.length !== "number" ||
-            !output.length
-          ) {
-            return result;
+          if (isWebGLStrict()) {
+            addSeededWebGLReadbackNoise(
+              args[6],
+              args[2],
+              args[3],
+              args[4],
+              args[5],
+              Number.isInteger(args[7]) ? args[7] : 0,
+            );
+            notifyWebGLAccess();
+          } else if (isFeatureActive("webgl")) {
+            notifyWebGLAccess();
           }
-          const offset = Number.isInteger(args[7]) ? args[7] : 0;
-          const available = output.length - offset;
-          if (available <= 0) return result;
-          const pixelCount = Math.max(1, Math.floor(available / 4));
-          const pixel = (webglNoiseSeed + args[2] + args[3]) % pixelCount;
-          const index = offset + pixel * 4 + (webglNoiseSeed % Math.min(3, available));
-          if (index < output.length && typeof output[index] === "number") {
-            const value = output[index];
-            const delta = output instanceof Float32Array ? 1e-7 : 1;
-            output[index] = value > 0 ? value - delta : value + delta;
-          }
-          notifyWebGLAccess();
           return result;
         },
         `${label}.readPixels`,
@@ -895,20 +1204,176 @@ function installMainWorldProtections(
 
   if (config.font) {
     const notifyFontAccess = createOneTimeAlert("font");
-    const shouldPerturb = () => Math.floor(Math.random() * 10) === 6;
     const pixelNoise = () => (Math.random() < 0.5 ? -1 : 1);
+    let measurementNoise;
+
+    const getMeasurementNoise = function () {
+      if (measurementNoise === undefined) {
+        measurementNoise =
+          Math.floor(Math.random() * 10) === 6 ? pixelNoise() : 0;
+      }
+      return measurementNoise;
+    };
+
+    const normalizeFontFamily = function (value) {
+      return String(value || "")
+        .trim()
+        .replace(/^["']|["']$/g, "")
+        .replace(/\s+/g, " ")
+        .toLowerCase();
+    };
+
+    const fontFamiliesByPlatform = {
+      windows: new Set([
+        "calibri",
+        "cambria",
+        "cambria math",
+        "candara",
+        "consolas",
+        "constantia",
+        "corbel",
+        "ebrima",
+        "gabriola",
+        "leelawadee ui",
+        "malgun gothic",
+        "meiryo",
+        "microsoft jhenghei",
+        "microsoft sans serif",
+        "microsoft yahei",
+        "mingliu",
+        "ms gothic",
+        "ms pgothic",
+        "ms reference sans serif",
+        "ms serif",
+        "ms ui gothic",
+        "mv boli",
+        "nirmala ui",
+        "pmingliu",
+        "segoe print",
+        "segoe script",
+        "segoe ui",
+        "segoe ui symbol",
+        "simsun",
+        "tahoma",
+        "wingdings",
+        "wingdings 2",
+        "wingdings 3",
+      ]),
+      macos: new Set([
+        "american typewriter",
+        "apple braille",
+        "apple chancery",
+        "apple sd gothic neo",
+        "avenir",
+        "avenir next",
+        "baskerville",
+        "copperplate",
+        "didot",
+        "futura",
+        "gill sans",
+        "helvetica neue",
+        "menlo",
+        "monaco",
+        "optima",
+        "san francisco",
+      ]),
+      linux: new Set(["dejavu sans", "freesans", "ubuntu"]),
+      android: new Set(["android emoji", "droid sans", "droid serif", "roboto"]),
+    };
+
+    const getUserAgentPlatform = function () {
+      if (!config.useragent || !config.useragent.enabled) return null;
+      if (!isFeatureActive("useragent")) return null;
+      switch (config.useragent.preset) {
+        case "macos":
+        case "macos_chrome":
+          return "macos";
+        case "windows":
+          return "windows";
+        case "iphone":
+          return "macos";
+        case "android":
+          return "android";
+        default:
+          return null;
+      }
+    };
+
+    const getMaskedFontFamily = function (element) {
+      const inlineFamily =
+        element && element.style && typeof element.style.fontFamily === "string"
+          ? element.style.fontFamily
+          : "";
+      if (!inlineFamily) return null;
+
+      const families = inlineFamily
+        .split(",")
+        .map(normalizeFontFamily)
+        .filter(Boolean);
+      const requestedFamily = families[0];
+      const targetPlatform = getUserAgentPlatform();
+      if (!requestedFamily || !targetPlatform) return null;
+
+      const requestedPlatform = Object.keys(fontFamiliesByPlatform).find(
+        (platform) => fontFamiliesByPlatform[platform].has(requestedFamily),
+      );
+      if (!requestedPlatform || requestedPlatform === targetPlatform) {
+        return null;
+      }
+
+      return families.slice(1).join(", ") || "sans-serif";
+    };
+
+    const measureWithFontFallback = function (target, element, args, family) {
+      if (!element || !element.style) {
+        return Reflect.apply(target, element, args);
+      }
+      const originalFamily = element.style.fontFamily;
+      const originalStyle =
+        typeof element.getAttribute === "function"
+          ? element.getAttribute("style")
+          : null;
+      try {
+        element.style.fontFamily = family;
+        return Reflect.apply(target, element, args);
+      } finally {
+        if (typeof element.setAttribute === "function") {
+          if (originalStyle === null) {
+            element.removeAttribute("style");
+          } else {
+            element.setAttribute("style", originalStyle);
+          }
+        } else {
+          element.style.fontFamily = originalFamily;
+        }
+      }
+    };
 
     for (const property of ["offsetWidth", "offsetHeight"]) {
       protectGetter(
         HTMLElement.prototype,
         property,
         (target, self, args) => {
-          const value = Reflect.apply(target, self, args);
-          if (!isFeatureActive("font") || !value || !shouldPerturb()) {
+          if (!isFeatureActive("font")) {
+            return Reflect.apply(target, self, args);
+          }
+          const nativeValue = Reflect.apply(target, self, args);
+          if (!nativeValue) {
+            return nativeValue;
+          }
+          const maskedFamily = getMaskedFontFamily(self);
+          const value = maskedFamily
+            ? measureWithFontFallback(target, self, args, maskedFamily)
+            : nativeValue;
+          const noise = getMeasurementNoise();
+          if (!maskedFamily && !noise) {
             return value;
           }
           notifyFontAccess();
-          return value + pixelNoise();
+          if (!noise) {
+            return value;
+          }
+          return value + noise;
         },
         `HTMLElement.${property}`,
       );
@@ -919,10 +1384,13 @@ function installMainWorldProtections(
       "measureText",
       (target, self, args) => {
         const metrics = Reflect.apply(target, self, args);
-        if (!isFeatureActive("font") || !shouldPerturb()) {
+        if (!isFeatureActive("font")) {
           return metrics;
         }
-        const noise = pixelNoise();
+        const noise = getMeasurementNoise();
+        if (!noise) {
+          return metrics;
+        }
         notifyFontAccess();
         return new Proxy(metrics, {
           get(targetMetrics, property) {
@@ -973,6 +1441,9 @@ function installMainWorldProtections(
             timezoneConfig.name ||
             new NativeIntlDateTimeFormat().resolvedOptions().timeZone,
         };
+      };
+      getCurrentTimezoneName = function () {
+        return getTimezoneOptions().name;
       };
 
       const getSpoofedTimezoneOffset = function (dateObj) {
@@ -1303,6 +1774,39 @@ function installMainWorldProtections(
       "maxStorageBufferBindingSize",
       "maxComputeWorkgroupStorageSize",
     ]);
+    const getProfiledLimit = function (property, nativeValue) {
+      if (!isWebGPUProfileActive() || typeof nativeValue !== "number") {
+        return undefined;
+      }
+      const profile = getConfiguredWebGPUProfile();
+      const candidate = Number(profile && profile.limits[property]);
+      if (!Number.isFinite(candidate) || candidate < 0) return undefined;
+      if (String(property).startsWith("min")) {
+        return Math.max(nativeValue, candidate);
+      }
+      return Math.min(nativeValue, candidate);
+    };
+    const createProfiledAdapterInfo = function (nativeInfo) {
+      const profile = getConfiguredWebGPUProfile();
+      const profileInfo = profile && profile.info;
+      if (!profileInfo || !nativeInfo || typeof nativeInfo !== "object") {
+        return nativeInfo;
+      }
+      return new Proxy(nativeInfo, {
+        get(targetInfo, property, receiver) {
+          if (
+            ["vendor", "architecture", "device", "description"].includes(
+              property,
+            ) &&
+            typeof profileInfo[property] === "string" &&
+            profileInfo[property]
+          ) {
+            return profileInfo[property];
+          }
+          return Reflect.get(targetInfo, property, receiver);
+        },
+      });
+    };
 
     const protectGpuLimits = function (Constructor, label) {
       if (typeof Constructor === "undefined") return;
@@ -1315,9 +1819,17 @@ function installMainWorldProtections(
           return new Proxy(limits, {
             get(targetLimits, property) {
               const value = Reflect.get(targetLimits, property, targetLimits);
-              if (protectedLimitNames.has(property) && typeof value === "number") {
+              const profiledValue = getProfiledLimit(property, value);
+              if (profiledValue !== undefined) {
                 notifyWebGpuAccess();
-                return value - (Math.random() < 0.5 ? 1 : 2);
+                return profiledValue;
+              }
+              if (
+                protectedLimitNames.has(property) &&
+                typeof value === "number"
+              ) {
+                notifyWebGpuAccess();
+                return Math.max(1, value - (Math.random() < 0.5 ? 1 : 2));
               }
               return value;
             },
@@ -1336,102 +1848,81 @@ function installMainWorldProtections(
       "GPUDevice",
     );
 
-    if (typeof GPUCommandEncoder !== "undefined") {
+    if (typeof GPUAdapter !== "undefined") {
       protectMethod(
-        GPUCommandEncoder.prototype,
-        "beginRenderPass",
+        GPUAdapter.prototype,
+        "requestAdapterInfo",
         (target, self, args) => {
-          const descriptor = args[0];
-          const attachment =
-            descriptor && descriptor.colorAttachments && descriptor.colorAttachments[0];
+          const result = Reflect.apply(target, self, args);
+          if (!isWebGPUProfileActive()) return result;
+          notifyWebGpuAccess();
+          return Promise.resolve(result).then(createProfiledAdapterInfo);
+        },
+        "GPUAdapter.requestAdapterInfo",
+      );
+      protectGetter(
+        GPUAdapter.prototype,
+        "info",
+        (target, self, args) => {
+          const info = Reflect.apply(target, self, args);
+          if (!isWebGPUProfileActive()) return info;
+          notifyWebGpuAccess();
+          return createProfiledAdapterInfo(info);
+        },
+        "GPUAdapter.info",
+      );
+      protectGetter(
+        GPUAdapter.prototype,
+        "isFallbackAdapter",
+        (target, self, args) => {
+          const value = Reflect.apply(target, self, args);
+          const profile = getConfiguredWebGPUProfile();
           if (
-            isFeatureActive("webgpu") &&
-            attachment &&
-            attachment.clearValue
+            !isWebGPUProfileActive() ||
+            !profile ||
+            typeof profile.isFallbackAdapter !== "boolean"
           ) {
-            const clearValue = Array.isArray(attachment.clearValue)
-              ? [...attachment.clearValue]
-              : { ...attachment.clearValue };
-            for (const key of Object.keys(clearValue)) {
-              if (typeof clearValue[key] === "number") {
-                clearValue[key] *= Math.random() < 0.5 ? 0.99 : 1.01;
-              }
-            }
-            args[0] = {
-              ...descriptor,
-              colorAttachments: [
-                { ...attachment, clearValue },
-                ...descriptor.colorAttachments.slice(1),
-              ],
-            };
-            notifyWebGpuAccess();
+            return value;
           }
-          return Reflect.apply(target, self, args);
+          notifyWebGpuAccess();
+          return profile.isFallbackAdapter;
         },
-        "GPUCommandEncoder.beginRenderPass",
+        "GPUAdapter.isFallbackAdapter",
       );
     }
 
-    const cloneBufferRange = function (source, offsetValue, sizeValue) {
-      const offset = Number.isFinite(Number(offsetValue))
-        ? Math.max(0, Math.floor(Number(offsetValue)))
-        : 0;
-      const size = Number.isFinite(Number(sizeValue))
-        ? Math.max(0, Math.floor(Number(sizeValue)))
-        : null;
-      if (source instanceof ArrayBuffer) {
-        const copy = source.slice(0);
-        const start = Math.min(offset, copy.byteLength);
-        const length = Math.min(size ?? copy.byteLength - start, copy.byteLength - start);
-        return { copy, values: new Uint8Array(copy, start, length) };
-      }
-      if (!ArrayBuffer.isView(source)) return null;
-      if (typeof source.subarray === "function") {
-        const copy = new source.constructor(source);
-        const start = Math.min(offset, copy.length);
-        const end = Math.min(copy.length, start + (size ?? copy.length - start));
-        return { copy, values: copy.subarray(start, end) };
-      }
-      const copiedBuffer = source.buffer.slice(
-        source.byteOffset,
-        source.byteOffset + source.byteLength,
-      );
-      const copy = new DataView(copiedBuffer);
-      const start = Math.min(offset, copy.byteLength);
-      const length = Math.min(size ?? copy.byteLength - start, copy.byteLength - start);
-      return { copy, values: new Uint8Array(copiedBuffer, start, length) };
-    };
-
-    if (typeof GPUQueue !== "undefined") {
+    const gpuConstructor =
+      typeof GPU !== "undefined"
+        ? GPU
+        : typeof navigator !== "undefined" && navigator.gpu
+          ? navigator.gpu.constructor
+          : undefined;
+    if (gpuConstructor) {
       protectMethod(
-        GPUQueue.prototype,
-        "writeBuffer",
+        gpuConstructor.prototype,
+        "getPreferredCanvasFormat",
         (target, self, args) => {
-          const range = isFeatureActive("webgpu")
-            ? cloneBufferRange(args[2], args[3], args[4])
-            : null;
-          if (range && range.values.length) {
-            const count = Math.ceil(range.values.length * 0.1);
-            const step = Math.max(1, Math.floor(range.values.length / count));
-            for (
-              let index = 0, changed = 0;
-              index < range.values.length && changed < count;
-              index += step, changed++
-            ) {
-              const value = range.values[index];
-              if (typeof value === "number") {
-                const delta = Math.max(1, Math.abs(value) * 0.0001);
-                range.values[index] = value + (Math.random() < 0.5 ? -delta : delta);
-              }
-            }
-            args[2] = range.copy;
-            notifyWebGpuAccess();
+          const format = Reflect.apply(target, self, args);
+          const profile = getConfiguredWebGPUProfile();
+          const preferred = profile && profile.preferredCanvasFormat;
+          if (
+            !isWebGPUProfileActive() ||
+            !["bgra8unorm", "rgba8unorm"].includes(preferred)
+          ) {
+            return format;
           }
-          return Reflect.apply(target, self, args);
+          notifyWebGpuAccess();
+          return preferred;
         },
-        "GPUQueue.writeBuffer",
+        "GPU.getPreferredCanvasFormat",
       );
     }
+
+    // Keep command descriptors and upload buffers native. These methods are
+    // part of the rendering path, so changing their values changes application
+    // output or can make an otherwise valid WebGPU resource invalid. Adapter
+    // identity and limits above are passive fingerprint surfaces; render
+    // commands are not.
   }
 
   if (config.audiocontext) {
@@ -1533,6 +2024,7 @@ function installMainWorldProtections(
         }
         return { locale, languages: cachedLanguages };
       };
+      getCurrentLanguageIdentity = getLanguageIdentity;
 
       protectGetter(
         Navigator.prototype,
@@ -1658,23 +2150,38 @@ function installMainWorldProtections(
         clientHints: clientHintProfiles.android,
       },
     };
-    let cachedPreset = null;
+    let cachedProfileKey = null;
     let cachedProfile = null;
     const getUserAgentProfile = function () {
       const preset = config.useragent.preset || "macos";
-      if (cachedPreset === preset) return cachedProfile;
-      const userAgent = userAgentStrings[preset] || userAgentStrings.macos;
-      const metadata = metadataByPreset[preset] || metadataByPreset.macos;
+      const configuredProfile =
+        config.useragent.profile &&
+        typeof config.useragent.profile === "object"
+          ? config.useragent.profile
+          : null;
+      const profileKey = `${preset}:${configuredProfile?.target || ""}:${configuredProfile?.version || ""}:${configuredProfile?.updatedAt || ""}`;
+      if (cachedProfileKey === profileKey) return cachedProfile;
+      const userAgent =
+        configuredProfile?.userAgent ||
+        userAgentStrings[preset] ||
+        userAgentStrings.macos;
+      const metadata =
+        configuredProfile?.navigator ||
+        metadataByPreset[preset] ||
+        metadataByPreset.macos;
+      const clientHints =
+        configuredProfile?.clientHints || metadata.clientHints || null;
       const slash = userAgent.indexOf("/");
       const versionPattern =
-        metadata.clientHints && metadata.clientHints.brand === "Microsoft Edge"
+        clientHints && clientHints.brand === "Microsoft Edge"
           ? /Edg\/([\d.]+)/
           : /Chrome\/([\d.]+)/;
       const versionMatch = userAgent.match(versionPattern);
       const fullVersion = versionMatch ? versionMatch[1] : "0.0.0.0";
-      cachedPreset = preset;
+      cachedProfileKey = profileKey;
       cachedProfile = {
         ...metadata,
+        clientHints,
         userAgent,
         appVersion: slash === -1 ? "5.0" : userAgent.slice(slash + 1),
         fullVersion,
@@ -1682,6 +2189,7 @@ function installMainWorldProtections(
       };
       return cachedProfile;
     };
+    getCurrentUserAgentProfile = getUserAgentProfile;
 
     const notifyUserAgentAccess = createOneTimeAlert("user-agent");
     const protectNavigatorValue = function (property, getSpoofedValue) {
@@ -1709,21 +2217,25 @@ function installMainWorldProtections(
         Object.freeze(brands.map((entry) => Object.freeze(entry)));
       cachedClientHintProfile = profile;
       cachedClientHintValues = {
-        brands: freezeBrands([
-          { brand: "Not_A Brand", version: "99" },
-          { brand: "Chromium", version: profile.majorVersion },
-          { brand: hints.brand, version: profile.majorVersion },
-        ]),
+        brands: freezeBrands(
+          hints.brands || [
+            { brand: "Not_A Brand", version: "99" },
+            { brand: "Chromium", version: profile.majorVersion },
+            { brand: hints.brand, version: profile.majorVersion },
+          ],
+        ),
         mobile: hints.mobile,
         platform: hints.platform,
         architecture: hints.architecture,
         bitness: hints.bitness,
         formFactors: hints.formFactors.slice(),
-        fullVersionList: freezeBrands([
-          { brand: "Not_A Brand", version: "99.0.0.0" },
-          { brand: "Chromium", version: profile.fullVersion },
-          { brand: hints.brand, version: profile.fullVersion },
-        ]),
+        fullVersionList: freezeBrands(
+          hints.fullVersionList || [
+            { brand: "Not_A Brand", version: "99.0.0.0" },
+            { brand: "Chromium", version: profile.fullVersion },
+            { brand: hints.brand, version: profile.fullVersion },
+          ],
+        ),
         model: hints.model,
         platformVersion: hints.platformVersion,
         uaFullVersion: profile.fullVersion,
@@ -1888,6 +2400,776 @@ function installMainWorldProtections(
       debugWarn("[Stealth Guard] Could not setup WebRTC detection:", error);
     }
   }
+
+  const installWorkerWorldProtections = function installWorkerWorldProtections(
+    payload,
+  ) {
+    "use strict";
+
+    const scope = self;
+    const features = payload && payload.features ? payload.features : {};
+    const identity = payload && payload.identity ? payload.identity : {};
+    const language = payload && payload.language ? payload.language : null;
+    const timezone = payload && payload.timezone ? payload.timezone : null;
+    const webgl = payload && payload.webgl ? payload.webgl : null;
+    const webglSeed = Number(payload && payload.webglSeed) >>> 0 || 1;
+
+    const isActive = function (feature) {
+      return Boolean(features[feature]);
+    };
+
+    const defineNavigatorValue = function (property, value) {
+      if (!scope.navigator) return;
+      const prototype = Object.getPrototypeOf(scope.navigator);
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
+      if (!descriptor || typeof descriptor.get !== "function") return;
+      try {
+        Object.defineProperty(prototype, property, {
+          ...descriptor,
+          get() {
+            return value;
+          },
+        });
+      } catch (error) {}
+    };
+
+    if (isActive("useragent")) {
+      for (const property of [
+        "userAgent",
+        "platform",
+        "appVersion",
+        "vendor",
+        "hardwareConcurrency",
+        "deviceMemory",
+        "maxTouchPoints",
+        "oscpu",
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(identity, property)) {
+          defineNavigatorValue(property, identity[property]);
+        }
+      }
+
+      const clientHints = identity.clientHints;
+      if (
+        clientHints &&
+        scope.navigator &&
+        Object.getOwnPropertyDescriptor(
+          Object.getPrototypeOf(scope.navigator),
+          "userAgentData",
+        )
+      ) {
+        const nativeUserAgentData = scope.navigator.userAgentData;
+        const majorVersion = String(identity.majorVersion || "0");
+        const fullVersion = String(identity.fullVersion || "0.0.0.0");
+        const brands = Object.freeze(
+          (
+            clientHints.brands || [
+              { brand: "Not_A Brand", version: "99" },
+              { brand: "Chromium", version: majorVersion },
+              { brand: clientHints.brand, version: majorVersion },
+            ]
+          ).map((entry) => Object.freeze({ ...entry })),
+        );
+        const fullVersionList = Object.freeze(
+          (
+            clientHints.fullVersionList || [
+              { brand: "Not_A Brand", version: "99.0.0.0" },
+              { brand: "Chromium", version: fullVersion },
+              { brand: clientHints.brand, version: fullVersion },
+            ]
+          ).map((entry) => Object.freeze({ ...entry })),
+        );
+        const values = {
+          brands,
+          mobile: Boolean(clientHints.mobile),
+          platform: clientHints.platform,
+          architecture: clientHints.architecture,
+          bitness: clientHints.bitness,
+          formFactors: Object.freeze(
+            Array.isArray(clientHints.formFactors)
+              ? clientHints.formFactors.slice()
+              : [],
+          ),
+          fullVersionList,
+          model: clientHints.model,
+          platformVersion: clientHints.platformVersion,
+          uaFullVersion: fullVersion,
+          wow64: Boolean(clientHints.wow64),
+        };
+        const source =
+          nativeUserAgentData && typeof nativeUserAgentData === "object"
+            ? nativeUserAgentData
+            : {};
+        const facade = new Proxy(source, {
+          get(target, property, receiver) {
+            if (property === "brands") return values.brands;
+            if (property === "mobile") return values.mobile;
+            if (property === "platform") return values.platform;
+            if (property === "getHighEntropyValues") {
+              return function () {
+                return Promise.resolve({ ...values });
+              };
+            }
+            if (property === "toJSON") {
+              return function () {
+                return {
+                  brands: values.brands.map((entry) => ({ ...entry })),
+                  mobile: values.mobile,
+                  platform: values.platform,
+                };
+              };
+            }
+            return Reflect.get(target, property, receiver);
+          },
+        });
+        defineNavigatorValue("userAgentData", facade);
+      }
+    }
+
+    if (isActive("language") && language) {
+      defineNavigatorValue("language", language.locale);
+      defineNavigatorValue(
+        "languages",
+        Object.freeze(
+          Array.isArray(language.languages)
+            ? language.languages.slice()
+            : [language.locale],
+        ),
+      );
+    }
+
+    const nativeIntlDateTimeFormat =
+      typeof Intl !== "undefined" ? Intl.DateTimeFormat : null;
+
+    if (isActive("language") || isActive("timezone")) {
+      const locale = language && language.locale ? language.locale : null;
+      const nativeConstructors = {
+        Collator: Intl.Collator,
+        DateTimeFormat: Intl.DateTimeFormat,
+        DisplayNames: Intl.DisplayNames,
+        ListFormat: Intl.ListFormat,
+        NumberFormat: Intl.NumberFormat,
+        PluralRules: Intl.PluralRules,
+        RelativeTimeFormat: Intl.RelativeTimeFormat,
+        Segmenter: Intl.Segmenter,
+      };
+      for (const [name, nativeConstructor] of Object.entries(
+        nativeConstructors,
+      )) {
+        if (typeof nativeConstructor !== "function") continue;
+        const descriptor = Object.getOwnPropertyDescriptor(Intl, name);
+        if (!descriptor) continue;
+        const proxy = new Proxy(nativeConstructor, {
+          apply(target, thisArg, args) {
+            const nextArgs = Array.from(args || []);
+            if (
+              isActive("language") &&
+              locale &&
+              (nextArgs.length === 0 || nextArgs[0] === undefined)
+            ) {
+              nextArgs[0] = locale;
+            }
+            if (name === "DateTimeFormat" && isActive("timezone")) {
+              nextArgs[1] = {
+                ...(nextArgs[1] && typeof nextArgs[1] === "object"
+                  ? nextArgs[1]
+                  : {}),
+                timeZone: timezone,
+              };
+            }
+            return Reflect.apply(target, thisArg, nextArgs);
+          },
+          construct(target, args, newTarget) {
+            const nextArgs = Array.from(args || []);
+            if (
+              isActive("language") &&
+              locale &&
+              (nextArgs.length === 0 || nextArgs[0] === undefined)
+            ) {
+              nextArgs[0] = locale;
+            }
+            if (name === "DateTimeFormat" && isActive("timezone")) {
+              nextArgs[1] = {
+                ...(nextArgs[1] && typeof nextArgs[1] === "object"
+                  ? nextArgs[1]
+                  : {}),
+                timeZone: timezone,
+              };
+            }
+            return Reflect.construct(target, nextArgs, newTarget);
+          },
+        });
+        try {
+          Object.defineProperty(Intl, name, { ...descriptor, value: proxy });
+        } catch (error) {}
+      }
+    }
+
+    if (isActive("timezone") && timezone && nativeIntlDateTimeFormat) {
+      const nativeGetTimezoneOffset = Date.prototype.getTimezoneOffset;
+      const parseOffset = function (value) {
+        if (!value) return null;
+        const normalized = String(value)
+          .replace(/−/g, "-")
+          .replace(/^UTC/, "GMT");
+        if (normalized === "GMT") return 0;
+        const match = normalized.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/);
+        if (!match) return null;
+        const sign = match[1] === "+" ? -1 : 1;
+        return (
+          sign *
+          (parseInt(match[2], 10) * 60 + parseInt(match[3] || "0", 10))
+        );
+      };
+      const getSpoofedOffset = function (date) {
+        try {
+          const parts = new nativeIntlDateTimeFormat("en-US", {
+            timeZone: timezone,
+            timeZoneName: "longOffset",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+          }).formatToParts(date);
+          const zonePart = parts.find((part) => part.type === "timeZoneName");
+          const offset = parseOffset(zonePart && zonePart.value);
+          if (offset !== null) return offset;
+        } catch (error) {}
+        return Reflect.apply(nativeGetTimezoneOffset, date, []);
+      };
+      const offsetDescriptor = Object.getOwnPropertyDescriptor(
+        Date.prototype,
+        "getTimezoneOffset",
+      );
+      if (offsetDescriptor && typeof offsetDescriptor.value === "function") {
+        try {
+          Object.defineProperty(Date.prototype, "getTimezoneOffset", {
+            ...offsetDescriptor,
+            value: function () {
+              return Number.isNaN(this.getTime())
+                ? Reflect.apply(nativeGetTimezoneOffset, this, [])
+                : getSpoofedOffset(this);
+            },
+          });
+        } catch (error) {}
+      }
+    }
+
+    const patchedWebGLPrototypes = new WeakSet();
+    const debugRendererInfoContexts = new WeakSet();
+    const advanceWebGLNoiseState = function (state) {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      return state >>> 0;
+    };
+    const seedWebGLNoiseState = function (...values) {
+      let state = webglSeed;
+      for (const value of values) {
+        state = advanceWebGLNoiseState((state ^ (Number(value) >>> 0)) >>> 0);
+      }
+      return state;
+    };
+    const getReadbackChannelCount = function (format) {
+      if (format === 6407 || format === 36248) return 3;
+      if (format === 33319 || format === 33320) return 2;
+      if (format === 6408 || format === 36249) return 4;
+      return 1;
+    };
+    const addSeededWebGLReadbackNoise = function (
+      output,
+      width,
+      height,
+      format,
+      type,
+      offset,
+    ) {
+      if (
+        !isActive("webglStrict") ||
+        !ArrayBuffer.isView(output) ||
+        !output.length
+      ) {
+        return;
+      }
+      const available = output.length - offset;
+      if (available <= 0) return;
+      const channels = getReadbackChannelCount(format);
+      const pixelCount = Math.floor(available / channels);
+      if (!pixelCount) return;
+      let state = seedWebGLNoiseState(width, height, format, type, offset);
+      const samples = Math.min(8, pixelCount);
+      const isFloat = output instanceof Float32Array || output instanceof Float64Array;
+      const maximum =
+        output instanceof Uint8Array || output instanceof Uint8ClampedArray
+          ? 255
+          : output instanceof Uint16Array
+            ? 65535
+            : output instanceof Uint32Array
+              ? 4294967295
+              : null;
+      for (let sample = 0; sample < samples; sample++) {
+        state = advanceWebGLNoiseState(state ^ sample);
+        const pixel = state % pixelCount;
+        const channel = (state >>> 8) % Math.min(3, channels);
+        const index = offset + pixel * channels + channel;
+        const value = output[index];
+        if (typeof value !== "number") continue;
+        if (isFloat) {
+          const delta = value === 0 ? 1e-7 : Math.max(Math.abs(value), 1) * 1e-7;
+          output[index] = value + (state & 1 ? delta : -delta);
+          continue;
+        }
+        const nextValue = value + (state & 1 ? 1 : -1);
+        output[index] =
+          maximum === null
+            ? nextValue
+            : Math.max(0, Math.min(maximum, nextValue));
+      }
+    };
+    const addSeededWebGLCanvasNoise = function (imageData) {
+      const totalPixels = imageData.width * imageData.height;
+      if (!totalPixels || totalPixels > 1000000) return;
+      let state = seedWebGLNoiseState(imageData.width, imageData.height);
+      const samples = Math.min(32, totalPixels);
+      for (let sample = 0; sample < samples; sample++) {
+        state = advanceWebGLNoiseState(state ^ sample);
+        const pixel = state % totalPixels;
+        const channel = (state >>> 8) % 3;
+        const index = pixel * 4 + channel;
+        const value = imageData.data[index];
+        const direction = state & 1 ? 1 : -1;
+        imageData.data[index] =
+          (value === 0 && direction < 0) || (value === 255 && direction > 0)
+            ? value - direction
+            : value + direction;
+      }
+    };
+    const webglCanvases = new WeakSet();
+    const patchWebGLContext = function (context) {
+      if (!context || !webgl) return;
+      const prototype = Object.getPrototypeOf(context);
+      if (!prototype || patchedWebGLPrototypes.has(prototype)) return;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        prototype,
+        "getParameter",
+      );
+      if (!descriptor || typeof descriptor.value !== "function") return;
+      const nativeGetParameter = descriptor.value;
+      try {
+        Object.defineProperty(prototype, "getParameter", {
+          ...descriptor,
+          value: function (parameter) {
+            const values = {
+              7936: webgl.maskedVendor,
+              7937: webgl.maskedRenderer,
+              37445: webgl.unmaskedVendor,
+              37446: webgl.unmaskedRenderer,
+            };
+            const debugParameter = parameter === 37445 || parameter === 37446;
+            if (
+              isActive("webgl") &&
+              Object.prototype.hasOwnProperty.call(values, parameter) &&
+              (!debugParameter || debugRendererInfoContexts.has(this))
+            ) {
+              return values[parameter];
+            }
+            return Reflect.apply(nativeGetParameter, this, [parameter]);
+          },
+        });
+
+        const extensionDescriptor = Object.getOwnPropertyDescriptor(
+          prototype,
+          "getExtension",
+        );
+        if (
+          extensionDescriptor &&
+          typeof extensionDescriptor.value === "function"
+        ) {
+          const nativeGetExtension = extensionDescriptor.value;
+          Object.defineProperty(prototype, "getExtension", {
+            ...extensionDescriptor,
+            value: function (name) {
+              const extension = Reflect.apply(nativeGetExtension, this, [name]);
+              if (
+                typeof name === "string" &&
+                name.toLowerCase() === "webgl_debug_renderer_info" &&
+                extension
+              ) {
+                debugRendererInfoContexts.add(this);
+              }
+              return extension;
+            },
+          });
+        }
+        const extensionsDescriptor = Object.getOwnPropertyDescriptor(
+          prototype,
+          "getSupportedExtensions",
+        );
+        if (
+          extensionsDescriptor &&
+          typeof extensionsDescriptor.value === "function"
+        ) {
+          const nativeGetSupportedExtensions = extensionsDescriptor.value;
+          Object.defineProperty(prototype, "getSupportedExtensions", {
+            ...extensionsDescriptor,
+            value: function (...args) {
+              const extensions = Reflect.apply(
+                nativeGetSupportedExtensions,
+                this,
+                args,
+              );
+              if (!isActive("webglStrict") || !Array.isArray(extensions)) {
+                return extensions;
+              }
+              const shuffled = extensions.slice();
+              let state = seedWebGLNoiseState(shuffled.length);
+              for (let index = shuffled.length - 1; index > 0; index--) {
+                state = advanceWebGLNoiseState(state ^ index);
+                const swapIndex = state % (index + 1);
+                [shuffled[index], shuffled[swapIndex]] = [
+                  shuffled[swapIndex],
+                  shuffled[index],
+                ];
+              }
+              return shuffled;
+            },
+          });
+        }
+        const readPixelsDescriptor = Object.getOwnPropertyDescriptor(
+          prototype,
+          "readPixels",
+        );
+        if (
+          readPixelsDescriptor &&
+          typeof readPixelsDescriptor.value === "function"
+        ) {
+          const nativeReadPixels = readPixelsDescriptor.value;
+          Object.defineProperty(prototype, "readPixels", {
+            ...readPixelsDescriptor,
+            value: function (...args) {
+              const result = Reflect.apply(nativeReadPixels, this, args);
+              addSeededWebGLReadbackNoise(
+                args[6],
+                args[2],
+                args[3],
+                args[4],
+                args[5],
+                Number.isInteger(args[7]) ? args[7] : 0,
+              );
+              return result;
+            },
+          });
+        }
+        patchedWebGLPrototypes.add(prototype);
+      } catch (error) {}
+    };
+
+    if (isActive("webgl") && typeof OffscreenCanvas !== "undefined") {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        OffscreenCanvas.prototype,
+        "getContext",
+      );
+      if (descriptor && typeof descriptor.value === "function") {
+        const nativeGetContext = descriptor.value;
+        try {
+          Object.defineProperty(OffscreenCanvas.prototype, "getContext", {
+            ...descriptor,
+            value: function (type, ...args) {
+              const context = Reflect.apply(nativeGetContext, this, [
+                type,
+                ...args,
+              ]);
+              const normalizedType =
+                typeof type === "string" ? type.toLowerCase() : "";
+              if (
+                normalizedType === "webgl" ||
+                normalizedType === "experimental-webgl"
+              ) {
+                if (context) webglCanvases.add(this);
+                patchWebGLContext(context);
+              } else if (normalizedType === "webgl2") {
+                if (context) webglCanvases.add(this);
+                patchWebGLContext(context);
+              }
+              return context;
+            },
+          });
+        } catch (error) {}
+      }
+
+      const convertDescriptor = Object.getOwnPropertyDescriptor(
+        OffscreenCanvas.prototype,
+        "convertToBlob",
+      );
+      if (convertDescriptor && typeof convertDescriptor.value === "function") {
+        const nativeConvertToBlob = convertDescriptor.value;
+        try {
+          Object.defineProperty(OffscreenCanvas.prototype, "convertToBlob", {
+            ...convertDescriptor,
+            value: function (...args) {
+              if (
+                !isActive("webglStrict") ||
+                !webglCanvases.has(this) ||
+                !this.width ||
+                !this.height
+              ) {
+                return Reflect.apply(nativeConvertToBlob, this, args);
+              }
+              const snapshot = new OffscreenCanvas(this.width, this.height);
+              const snapshotContext = snapshot.getContext("2d");
+              if (!snapshotContext) {
+                return Reflect.apply(nativeConvertToBlob, this, args);
+              }
+              snapshotContext.drawImage(this, 0, 0);
+              const imageData = snapshotContext.getImageData(
+                0,
+                0,
+                this.width,
+                this.height,
+              );
+              addSeededWebGLCanvasNoise(imageData);
+              const temp = new OffscreenCanvas(this.width, this.height);
+              const tempContext = temp.getContext("2d");
+              if (!tempContext) {
+                return Reflect.apply(nativeConvertToBlob, this, args);
+              }
+              tempContext.putImageData(imageData, 0, 0);
+              return Reflect.apply(nativeConvertToBlob, temp, args);
+            },
+          });
+        } catch (error) {}
+      }
+    }
+
+    if (!(
+      isActive("useragent") ||
+      isActive("language") ||
+      isActive("timezone") ||
+      isActive("webgl")
+    )) {
+      return;
+    }
+
+    const createWrappedWorkerUrl = function (scriptUrl, type, nextPayload) {
+      const serializedPayload = JSON.stringify(nextPayload);
+      const installSource = `(${installWorkerWorldProtections.toString()})`;
+      const bootstrap = `${installSource}(${serializedPayload});`;
+      const originalUrl = JSON.stringify(scriptUrl);
+      const source =
+        type === "module"
+          ? `${bootstrap}\nimport(${originalUrl});`
+          : `${bootstrap}
+const __sgOriginalWorkerUrl = ${originalUrl};
+const __sgNativeImportScripts = self.importScripts.bind(self);
+let __sgImportBase = __sgOriginalWorkerUrl;
+self.importScripts = function (...urls) {
+  const previousBase = __sgImportBase;
+  try {
+    for (const url of urls) {
+      const resolvedUrl = new URL(String(url), __sgImportBase).href;
+      __sgImportBase = resolvedUrl;
+      __sgNativeImportScripts(resolvedUrl);
+    }
+  } finally {
+    __sgImportBase = previousBase;
+  }
+};
+self.importScripts(__sgOriginalWorkerUrl);`;
+      return URL.createObjectURL(
+        new Blob([source], { type: "application/javascript" }),
+      );
+    };
+
+    const getWorkerType = function (args) {
+      const options = args && args[1];
+      return options && typeof options === "object" && options.type === "module"
+        ? "module"
+        : "classic";
+    };
+
+    const wrapWorkerConstructor = function (name) {
+      const nativeConstructor = scope[name];
+      if (typeof nativeConstructor !== "function") return;
+      if (nativeConstructor.__stealthGuardWorkerWrapper) return;
+      const wrapped = new Proxy(nativeConstructor, {
+        construct(target, args, newTarget) {
+          const originalArgs = Array.from(args || []);
+          if (!originalArgs.length) {
+            return Reflect.construct(target, originalArgs, newTarget);
+          }
+          let originalUrl;
+          try {
+            originalUrl = new URL(
+              String(originalArgs[0]),
+              payload.baseUrl || (scope.location && scope.location.href),
+            ).href;
+          } catch (error) {
+            return Reflect.construct(target, originalArgs, newTarget);
+          }
+          const nextPayload = {
+            ...payload,
+            baseUrl: originalUrl,
+          };
+          try {
+            const wrappedUrl = createWrappedWorkerUrl(
+              originalUrl,
+              getWorkerType(originalArgs),
+              nextPayload,
+            );
+            originalArgs[0] = wrappedUrl;
+            const worker = Reflect.construct(target, originalArgs, newTarget);
+            scope.setTimeout(() => URL.revokeObjectURL(wrappedUrl), 60000);
+            return worker;
+          } catch (error) {
+            return Reflect.construct(target, originalArgs, newTarget);
+          }
+        },
+      });
+      try {
+        Object.defineProperty(wrapped, "__stealthGuardWorkerWrapper", {
+          value: true,
+        });
+        scope[name] = wrapped;
+      } catch (error) {}
+    };
+
+    wrapWorkerConstructor("Worker");
+    wrapWorkerConstructor("SharedWorker");
+  };
+
+  const createWorkerProtectionPayload = function () {
+    const profile = getCurrentUserAgentProfile();
+    const language = getCurrentLanguageIdentity();
+    const timezone = getCurrentTimezoneName();
+    const webgl = getCurrentWebGLIdentity();
+    return {
+      features: {
+        useragent: isFeatureActive("useragent") && Boolean(profile),
+        language: isFeatureActive("language") && Boolean(language),
+        timezone: isFeatureActive("timezone") && Boolean(timezone),
+        webgl: isFeatureActive("webgl") && Boolean(webgl),
+        webglStrict: isWebGLStrict(),
+      },
+      identity: profile
+        ? {
+            userAgent: profile.userAgent,
+            platform: profile.platform,
+            appVersion: profile.appVersion,
+            vendor: profile.vendor,
+            oscpu: profile.oscpu,
+            hardwareConcurrency: profile.hardwareConcurrency,
+            deviceMemory: profile.deviceMemory,
+            maxTouchPoints: profile.maxTouchPoints,
+            majorVersion: profile.majorVersion,
+            fullVersion: profile.fullVersion,
+            clientHints: profile.clientHints,
+          }
+        : null,
+      language: language
+        ? { locale: language.locale, languages: language.languages }
+        : null,
+      timezone,
+      webgl,
+      webglSeed: webglNoiseSeed,
+    };
+  };
+
+  const installWorkerConstructors = function () {
+    if (!isFeatureActive("worker")) return;
+    if (typeof Worker === "undefined" && typeof SharedWorker === "undefined") {
+      return;
+    }
+    const nativeWorker =
+      typeof Worker === "undefined" ? null : Worker;
+    const nativeSharedWorker =
+      typeof SharedWorker === "undefined" ? null : SharedWorker;
+    const getWorkerType = function (args) {
+      const options = args && args[1];
+      return options && typeof options === "object" && options.type === "module"
+        ? "module"
+        : "classic";
+    };
+    const createWrappedWorkerUrl = function (scriptUrl, type, nextPayload) {
+      const serializedPayload = JSON.stringify({
+        ...nextPayload,
+        baseUrl: scriptUrl,
+      });
+      const installSource = `(${installWorkerWorldProtections.toString()})`;
+      const bootstrap = `${installSource}(${serializedPayload});`;
+      const originalUrl = JSON.stringify(scriptUrl);
+      const source =
+        type === "module"
+          ? `${bootstrap}\nimport(${originalUrl});`
+          : `${bootstrap}
+const __sgOriginalWorkerUrl = ${originalUrl};
+const __sgNativeImportScripts = self.importScripts.bind(self);
+let __sgImportBase = __sgOriginalWorkerUrl;
+self.importScripts = function (...urls) {
+  const previousBase = __sgImportBase;
+  try {
+    for (const url of urls) {
+      const resolvedUrl = new URL(String(url), __sgImportBase).href;
+      __sgImportBase = resolvedUrl;
+      __sgNativeImportScripts(resolvedUrl);
+    }
+  } finally {
+    __sgImportBase = previousBase;
+  }
+};
+self.importScripts(__sgOriginalWorkerUrl);`;
+      return URL.createObjectURL(
+        new Blob([source], { type: "application/javascript" }),
+      );
+    };
+    const wrapConstructor = function (name, nativeConstructor) {
+      if (!nativeConstructor || nativeConstructor.__stealthGuardWorkerWrapper) {
+        return;
+      }
+      const wrapped = new Proxy(nativeConstructor, {
+        construct(target, args, newTarget) {
+          const originalArgs = Array.from(args || []);
+          if (!originalArgs.length) {
+            return Reflect.construct(target, originalArgs, newTarget);
+          }
+          const payload = createWorkerProtectionPayload();
+          if (!Object.values(payload.features).some(Boolean)) {
+            return Reflect.construct(target, originalArgs, newTarget);
+          }
+          let originalUrl;
+          try {
+            originalUrl = new URL(
+              String(originalArgs[0]),
+              document.baseURI,
+            ).href;
+          } catch (error) {
+            return Reflect.construct(target, originalArgs, newTarget);
+          }
+          try {
+            const wrappedUrl = createWrappedWorkerUrl(
+              originalUrl,
+              getWorkerType(originalArgs),
+              payload,
+            );
+            originalArgs[0] = wrappedUrl;
+            const worker = Reflect.construct(target, originalArgs, newTarget);
+            setTimeout(() => URL.revokeObjectURL(wrappedUrl), 60000);
+            return worker;
+          } catch (error) {
+            return Reflect.construct(target, originalArgs, newTarget);
+          }
+        },
+      });
+      try {
+        Object.defineProperty(wrapped, "__stealthGuardWorkerWrapper", {
+          value: true,
+        });
+        window[name] = wrapped;
+      } catch (error) {}
+    };
+    wrapConstructor("Worker", nativeWorker);
+    wrapConstructor("SharedWorker", nativeSharedWorker);
+  };
+
+  installWorkerConstructors();
 
   if (
     bridge.diagnosticRequestEvent &&

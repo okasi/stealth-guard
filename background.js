@@ -20,6 +20,15 @@ let proxyRuntimeStatus = {
 };
 const PROXY_CONNECTION_HISTORY_KEY = "stealth-guard-proxy-history";
 const MAX_PROXY_CONNECTION_HISTORY = 100;
+const PROXY_HISTORY_STATES = new Set([
+  "idle",
+  "connecting",
+  "connected",
+  "routing",
+  "degraded",
+  "error",
+  "conflict",
+]);
 let proxyConnectionHistory = [];
 let proxyHistoryInitialized = false;
 let proxyHistoryWriteQueue = Promise.resolve();
@@ -28,6 +37,8 @@ let adblockCache = { version: ADBLOCK_CACHE_VERSION, lists: {} };
 const adblockCompiledById = new Map();
 let adblockEngine = createAdblockEngine(createEmptyCompiledRules());
 let adblockUpdatePromise = null;
+let curlProfileCatalog = normalizeCurlProfileCatalog(null);
+let curlProfileUpdatePromise = null;
 let adblockStatus = {
   updating: false,
   lastUpdate: null,
@@ -36,10 +47,21 @@ let adblockStatus = {
   cosmeticRules: 0,
   error: null,
 };
+let curlProfileStatus = {
+  updating: false,
+  lastUpdate: null,
+  nextUpdate: null,
+  profileCount: curlProfileCatalog.profiles.length,
+  error: null,
+  source: CURL_PROFILE_DIRECTORY_URL,
+};
 
 const NOTIFICATION_THROTTLE_MS = 3770;
 const PROXY_VERIFICATION_TIMEOUT_MS = 5000;
+const PROXY_RETRY_ALARM = "stealth-guard-proxy-retry";
+const PROXY_RETRY_PERIOD_MINUTES = 5;
 const ADBLOCK_UPDATE_ALARM = "stealth-guard-filter-update";
+const CURL_PROFILE_UPDATE_ALARM = "stealth-guard-curl-profile-update";
 const YOUTUBE_FILTER_MAX_AGE_MS = 45 * 60 * 1000;
 const PROXY_INDICATOR_COLORS = {
   active: "#188038",
@@ -108,16 +130,7 @@ function normalizeProxyHistoryEntry(value) {
     return null;
   }
   const timestamp = Number(value.timestamp);
-  const allowedStates = new Set([
-    "idle",
-    "connecting",
-    "connected",
-    "routing",
-    "degraded",
-    "error",
-    "conflict",
-  ]);
-  if (!Number.isFinite(timestamp) || !allowedStates.has(value.state)) {
+  if (!Number.isFinite(timestamp) || !PROXY_HISTORY_STATES.has(value.state)) {
     return null;
   }
   return {
@@ -735,8 +748,148 @@ async function loadAdblockCache() {
   adblockCache = normalizeAdblockCache(stored[ADBLOCK_CACHE_KEY]);
 }
 
+async function loadCurlProfileCache() {
+  const stored = await storage.read(CURL_PROFILE_CACHE_KEY);
+  curlProfileCatalog = normalizeCurlProfileCatalog(
+    stored[CURL_PROFILE_CACHE_KEY],
+  );
+  curlProfileStatus = {
+    ...curlProfileStatus,
+    lastUpdate: curlProfileCatalog.updatedAt || null,
+    profileCount: curlProfileCatalog.profiles.length,
+  };
+}
+
+function scheduleCurlProfileUpdates() {
+  if (!chrome.alarms) return;
+  chrome.alarms.create(CURL_PROFILE_UPDATE_ALARM, {
+    delayInMinutes: CURL_PROFILE_UPDATE_PERIOD_MINUTES,
+    periodInMinutes: CURL_PROFILE_UPDATE_PERIOD_MINUTES,
+  });
+  curlProfileStatus.nextUpdate =
+    Date.now() + CURL_PROFILE_UPDATE_PERIOD_MINUTES * 60000;
+}
+
+function isCurlProfileWrapperName(name) {
+  const target = String(name || "").replace(/^curl_/, "");
+  return /^curl_(?:chrome\d+(?:_android)?|edge\d+|safari\d+(?:_ios)?)$/.test(String(name || "")) &&
+    isModernCurlProfileTarget(target);
+}
+
+async function downloadCurlProfileWrapper(entry) {
+  const target = String(entry.name || "");
+  const url = `${CURL_PROFILE_RAW_BASE_URL}${encodeURIComponent(target)}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url, {
+      cache: "no-cache",
+      credentials: "omit",
+      redirect: "follow",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status || "error"}`);
+    const text = await response.text();
+    if (text.length > CURL_PROFILE_MAX_SOURCE_LENGTH) {
+      throw new Error("curl-impersonate wrapper exceeds the safety limit");
+    }
+    return text;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchCurlProfileCatalog() {
+  const response = await fetch(CURL_PROFILE_UPDATE_SOURCE, {
+    cache: "no-cache",
+    credentials: "omit",
+    headers: {
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (!response.ok) throw new Error(`GitHub API returned HTTP ${response.status || "error"}`);
+  const entries = await response.json();
+  if (!Array.isArray(entries)) throw new Error("GitHub bin listing was not an array");
+
+  const candidates = entries
+    .filter(
+      (entry) =>
+        entry &&
+        entry.type === "file" &&
+        isCurlProfileWrapperName(entry.name),
+    )
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    .slice(0, CURL_PROFILE_MAX_COUNT);
+  const profiles = [];
+  for (const entry of candidates) {
+    try {
+      const source = await downloadCurlProfileWrapper(entry);
+      const profile = createCurlProfileFromWrapper(entry.name, source);
+      if (profile) profiles.push(profile);
+    } catch (error) {
+      debugWarn(`[curl-impersonate] Could not load ${entry.name}:`, error);
+    }
+  }
+  if (!profiles.length) throw new Error("No supported browser profiles were found in bin");
+  return normalizeCurlProfileCatalog({
+    version: CURL_PROFILE_CACHE_VERSION,
+    updatedAt: Date.now(),
+    profiles,
+  });
+}
+
+function getCurlProfileStatus() {
+  return {
+    ...curlProfileStatus,
+    profileCount: curlProfileCatalog.profiles.length,
+    profiles: getCurlProfileEntries(curlProfileCatalog).map(
+      createCurlProfilePublicEntry,
+    ),
+  };
+}
+
+function refreshCurlProfiles(force = false) {
+  if (curlProfileUpdatePromise) return curlProfileUpdatePromise;
+  if (!force && !isCurlProfileCatalogStale(curlProfileCatalog)) {
+    return Promise.resolve({ success: true, updated: false, status: getCurlProfileStatus() });
+  }
+  curlProfileUpdatePromise = (async () => {
+    curlProfileStatus = { ...curlProfileStatus, updating: true, error: null };
+    try {
+      const nextCatalog = await fetchCurlProfileCatalog();
+      curlProfileCatalog = nextCatalog;
+      await storage.write({ [CURL_PROFILE_CACHE_KEY]: nextCatalog });
+      curlProfileStatus = {
+        ...curlProfileStatus,
+        updating: false,
+        lastUpdate: nextCatalog.updatedAt,
+        profileCount: nextCatalog.profiles.length,
+        error: null,
+      };
+      if (currentConfig) {
+        broadcastConfigUpdated(currentConfig, curlProfileCatalog).catch((error) => {
+          debugWarn("[curl-impersonate] Could not broadcast updated profiles:", error);
+        });
+      }
+      return { success: true, updated: true, status: getCurlProfileStatus() };
+    } catch (error) {
+      curlProfileStatus = {
+        ...curlProfileStatus,
+        updating: false,
+        error: error.message || String(error),
+      };
+      return { success: false, updated: false, error: curlProfileStatus.error, status: getCurlProfileStatus() };
+    } finally {
+      curlProfileUpdatePromise = null;
+    }
+  })();
+  return curlProfileUpdatePromise;
+}
+
 function createLocalAdblockRules(config) {
   const sources = [];
+  sources.push(parseFilterList(BUILTIN_ADBLOCK_COMPATIBILITY_FILTERS.join("\n")));
   if (config.tracker.useBuiltIn) {
     sources.push(
       parseFilterList(
@@ -834,6 +987,18 @@ function scheduleAdblockUpdates(config) {
     periodInMinutes: intervalMinutes,
   });
   adblockStatus.nextUpdate = Date.now() + Math.min(5, intervalMinutes) * 60000;
+}
+
+function scheduleProxyRetries(config) {
+  if (!chrome.alarms) return;
+  if (!config || !config.enabled || !config.proxy || !config.proxy.enabled) {
+    chrome.alarms.clear(PROXY_RETRY_ALARM);
+    return;
+  }
+  chrome.alarms.create(PROXY_RETRY_ALARM, {
+    delayInMinutes: PROXY_RETRY_PERIOD_MINUTES,
+    periodInMinutes: PROXY_RETRY_PERIOD_MINUTES,
+  });
 }
 
 async function downloadFilterSubscription(subscription) {
@@ -969,7 +1134,9 @@ function applyTrackerBlocking(config) {
   }
 
   rebuildAdblockEngine(config);
-  if (!adblockStatus.networkRules) {
+  // Compatibility exceptions are network rules too, but they do not require
+  // a blocking listener when no block rules are active.
+  if (!adblockEngine.compiled.network.block.length) {
     return;
   }
 
@@ -980,7 +1147,7 @@ function applyTrackerBlocking(config) {
       isExtensionInitiatedRequest(details) ||
       !requestHostname ||
       !pageHostname ||
-      !isFeatureActiveForHostname(config, "tracker", pageHostname) ||
+      !isAdblockFeatureActiveForHostname(config, pageHostname) ||
       !shouldBlockRequest(
         adblockEngine,
         details,
@@ -1076,7 +1243,7 @@ function sendMessageToTabIgnoringErrors(tabId, message) {
   });
 }
 
-async function broadcastConfigUpdated(config) {
+async function broadcastConfigUpdated(config, profileCatalog = curlProfileCatalog) {
   const tabs = await queryTabs({ url: ["http://*/*", "https://*/*"] });
   await Promise.all(
     tabs
@@ -1085,6 +1252,7 @@ async function broadcastConfigUpdated(config) {
         sendMessageToTabIgnoringErrors(tab.id, {
           type: "config-updated",
           config,
+          profileCatalog,
         }),
       ),
   );
@@ -1099,26 +1267,59 @@ async function applyCurrentConfig(config) {
   refreshToolbarIndicators();
 }
 
-async function initializeBackground() {
+async function initializeProxyCredentialSupport() {
   try {
     await proxyCredentialManager.initialize();
     setupProxyAuthentication();
   } catch (error) {
     debugWarn("[Proxy] Credential support failed to initialize:", error);
   }
+}
+
+async function initializeProxyHistoryCache() {
   try {
     await initializeProxyConnectionHistory();
   } catch (error) {
     proxyHistoryInitialized = true;
     debugWarn("[Proxy] Connection history failed to initialize:", error);
   }
+}
+
+async function initializeAdblockCache() {
   try {
     await loadAdblockCache();
   } catch (error) {
     adblockCache = { version: ADBLOCK_CACHE_VERSION, lists: {} };
     debugWarn("[Adblock] Filter cache failed to load:", error);
   }
-  const config = await loadConfig();
+}
+
+async function initializeCurlProfileCache() {
+  try {
+    await loadCurlProfileCache();
+  } catch (error) {
+    curlProfileCatalog = normalizeCurlProfileCatalog(null);
+    curlProfileStatus = {
+      ...curlProfileStatus,
+      profileCount: curlProfileCatalog.profiles.length,
+      error: error.message || String(error),
+    };
+    debugWarn("[curl-impersonate] Profile cache failed to load:", error);
+  }
+}
+
+async function initializeBackground() {
+  // These storage-backed bootstrap tasks have no dependency on one another.
+  // Start them together so slow storage reads do not add up during startup.
+  const [config] = await Promise.all([
+    loadConfig(),
+    initializeProxyCredentialSupport(),
+    initializeProxyHistoryCache(),
+    initializeAdblockCache(),
+    initializeCurlProfileCache(),
+  ]);
+  scheduleProxyRetries(config);
+  scheduleCurlProfileUpdates();
   await applyCurrentConfig(config);
   scheduleAdblockUpdates(config);
   refreshAdblockFilters(config).catch((error) => {
@@ -1150,7 +1351,10 @@ function quoteClientHint(value) {
   return `"${String(value).replace(/(["\\])/g, "\\$1")}"`;
 }
 
-function getUserAgentClientHintHeaders(preset, userAgent) {
+function getUserAgentClientHintHeaders(preset, userAgent, curlProfile = null) {
+  if (curlProfile && curlProfile.httpHeaders) {
+    return { ...curlProfile.httpHeaders };
+  }
   const hints = USER_AGENT_CLIENT_HINTS[preset];
   if (!hints) return null;
   const versionToken = hints.brand === "Microsoft Edge" ? "Edg" : "Chrome";
@@ -1209,14 +1413,21 @@ async function applyUserAgentSpoofing(configOverride) {
     return;
   }
 
+  const curlProfile = config.useragent.enabled
+    ? getCurlProfileForConfig(config, curlProfileCatalog)
+    : null;
   const userAgent = config.useragent.enabled
-    ? getUserAgentString(config.useragent.preset)
+    ? curlProfile?.userAgent || getUserAgentString(config.useragent.preset)
     : null;
   if (config.useragent.enabled && !userAgent) {
     throw new Error(`Invalid User-Agent preset: ${config.useragent.preset}`);
   }
   const clientHintHeaders = userAgent
-    ? getUserAgentClientHintHeaders(config.useragent.preset, userAgent)
+    ? getUserAgentClientHintHeaders(
+        config.useragent.preset,
+        userAgent,
+        curlProfile,
+      )
     : null;
   const languageCache = new Map();
 
@@ -1232,6 +1443,7 @@ async function applyUserAgentSpoofing(configOverride) {
     if (
       !hostname ||
       isCloudflareChallengeHostname(hostname) ||
+      isDataDomeChallengeHostname(hostname) ||
       (!userAgentActive && !languageActive)
     ) {
       return { requestHeaders };
@@ -1381,7 +1593,39 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 if (chrome.alarms && chrome.alarms.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
-    if (!alarm || alarm.name !== ADBLOCK_UPDATE_ALARM) return;
+    if (!alarm) return;
+    if (alarm.name === PROXY_RETRY_ALARM) {
+      enqueueConfigMutation(async () => {
+        await ensureBackgroundInitialized();
+        const config = currentConfig;
+        if (
+          !config ||
+          !config.enabled ||
+          !config.proxy ||
+          !config.proxy.enabled ||
+          !["error", "degraded"].includes(proxyRuntimeStatus.state)
+        ) {
+          return;
+        }
+        try {
+          await applyProxyPolicy(config);
+        } catch (error) {
+          debugWarn("[Proxy] Scheduled retry failed:", error);
+        }
+      }).catch((error) => {
+        debugWarn("[Proxy] Scheduled retry could not run:", error);
+      });
+      return;
+    }
+    if (alarm.name === CURL_PROFILE_UPDATE_ALARM) {
+      ensureBackgroundInitialized()
+        .then(() => refreshCurlProfiles(true))
+        .catch((error) => {
+          debugWarn("[curl-impersonate] Scheduled profile update failed:", error);
+        });
+      return;
+    }
+    if (alarm.name !== ADBLOCK_UPDATE_ALARM) return;
     ensureBackgroundInitialized()
       .then(() => refreshAdblockFilters(currentConfig))
       .catch((error) => {
@@ -1481,6 +1725,7 @@ async function applyConfigChanges(changeFlags, config) {
   }
 
   if (changeFlags.proxyChanged) {
+    scheduleProxyRetries(config);
     await applyProxyPolicy(config);
   }
 }
@@ -1646,13 +1891,68 @@ async function handleUpdateAdblockFiltersMessage(request, sender) {
   return { ...result, status: { ...adblockStatus } };
 }
 
+function handleGetCurlProfileStatusMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  return {
+    success: true,
+    status: getCurlProfileStatus(),
+    catalog: curlProfileCatalog,
+  };
+}
+
+async function handleUpdateCurlProfilesMessage(request, sender) {
+  assertExtensionPageSender(sender);
+  const result = await refreshCurlProfiles(true);
+  return { ...result, catalog: curlProfileCatalog };
+}
+
+async function handleRepairWindowGeometryMessage(request, sender) {
+  const windowId = Number(sender && sender.tab && sender.tab.windowId);
+  const width = Number(request && request.width);
+  const height = Number(request && request.height);
+  if (
+    !Number.isInteger(windowId) ||
+    windowId < 0 ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width < 1 ||
+    height < 1 ||
+    !chrome.windows
+  ) {
+    return { success: false, error: "Native window geometry is unavailable" };
+  }
+
+  try {
+    const current = await callChromeApi(chrome.windows, "get", windowId);
+    const update = {
+      width: Math.max(
+        Math.round(width),
+        Number.isFinite(Number(current && current.width))
+          ? Number(current.width)
+          : 0,
+      ),
+      height: Math.max(
+        Math.round(height),
+        Number.isFinite(Number(current && current.height))
+          ? Number(current.height)
+          : 0,
+      ),
+    };
+    await callChromeApi(chrome.windows, "update", windowId, update);
+    return { success: true };
+  } catch (error) {
+    debugWarn("[Window] Could not repair native geometry:", error);
+    return { success: false, error: error.message || String(error) };
+  }
+}
+
 function handleGetCosmeticRulesMessage(request, sender) {
   const hostname = resolveTabHostname(sender, request && request.hostname);
   const config = currentConfig;
   if (
     !config ||
     !hostname ||
-    !isFeatureActiveForHostname(config, "tracker", hostname) ||
+    !isAdblockFeatureActiveForHostname(config, hostname) ||
     !config.tracker.cosmeticFiltering ||
     isDomainAllowlisted(hostname, config.tracker.cosmeticWhitelist)
   ) {
@@ -1766,6 +2066,7 @@ function handleGetProxyRuntimeStatusMessage(request, sender) {
 async function handleGetIdentityDiagnosticsMessage(request, sender) {
   assertExtensionPageSender(sender);
   const config = await getConfig();
+  const curlProfile = getCurlProfileForConfig(config, curlProfileCatalog);
   const hostname = normalizeHostname(request && request.hostname);
   const tabId = Number(request && request.tabId);
   const vpnLocation = resolveContentVpnLocation(config, hostname);
@@ -1803,7 +2104,9 @@ async function handleGetIdentityDiagnosticsMessage(request, sender) {
       userAgent: {
         enabled: activeForSite("useragent"),
         preset: config.useragent.preset,
-        value: getUserAgentString(config.useragent.preset),
+        curlProfile: curlProfile ? curlProfile.target : null,
+        value:
+          curlProfile?.userAgent || getUserAgentString(config.useragent.preset),
       },
       language: {
         enabled: activeForSite("language"),
@@ -1952,6 +2255,9 @@ const messageHandlers = {
   "get-triggered-features": handleGetTriggeredFeaturesMessage,
   "get-adblock-status": handleGetAdblockStatusMessage,
   "update-adblock-filters": handleUpdateAdblockFiltersMessage,
+  "get-curl-profile-status": handleGetCurlProfileStatusMessage,
+  "update-curl-profiles": handleUpdateCurlProfilesMessage,
+  "repair-window-geometry": handleRepairWindowGeometryMessage,
   "get-cosmetic-rules": handleGetCosmeticRulesMessage,
   "add-cosmetic-rule": handleAddCosmeticRuleMessage,
   "prepare-proxy-profile": handlePrepareProxyProfileMessage,

@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Stealth Guard</title>
     <link rel="stylesheet" href="popup.css" />
+    <script src="../lib/filterLists.js"></script>
     <script src="../lib/domainFilter.js"></script>
+    <script src="../lib/gpuProfiles.js"></script>
+    <script src="../lib/config.js"></script>
+    <script src="../lib/curlProfiles.js"></script>
     <script src="../lib/runtime.js"></script>
   </head>
   <body>
@@ -147,13 +151,9 @@
           <select
             id="useragent-quick-select"
             class="feature-select"
-            aria-label="User-Agent preset"
+            aria-label="User-Agent and browser/API profile"
           >
             <option value="macos">macOS Safari</option>
-            <option value="macos_chrome">macOS Chrome</option>
-            <option value="windows">Windows Edge</option>
-            <option value="iphone">iPhone Safari</option>
-            <option value="android">Android Chrome</option>
           </select>
           <label class="switch">
             <input
@@ -161,6 +161,24 @@
               id="useragent-enabled"
               data-feature-toggle="useragent"
               aria-label="Enable User-Agent protection"
+            />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div
+          class="feature-row"
+          data-feature="worker"
+          data-section="worker-section"
+        >
+          <div class="feature-icon">🧵</div>
+          <div class="feature-name">Workers</div>
+          <label class="switch">
+            <input
+              type="checkbox"
+              id="worker-enabled"
+              data-feature-toggle="worker"
+              aria-label="Enable Worker identity protection"
             />
             <span class="slider"></span>
           </label>
@@ -383,6 +401,13 @@
         >
           <div class="feature-icon">🎮</div>
           <div class="feature-name">WebGPU</div>
+          <select
+            id="gpu-profile-quick-select"
+            class="feature-select"
+            aria-label="Combined WebGL and WebGPU profile"
+          >
+            <option value="">No GPU profile</option>
+          </select>
           <label class="switch">
             <input
               type="checkbox"

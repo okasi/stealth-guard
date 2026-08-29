@@ -21,6 +21,12 @@ const {
   generateProfileName,
   normalizeBypassList,
   normalizeIpApiLocation,
+  normalizeIpWhoLocation,
+  normalizeIpSbLocation,
+  normalizeIpApiComLocation,
+  normalizeProxyAsn,
+  normalizeProxyOrganizationName,
+  countryCodeToFlag,
   normalizeIpInfoLocation,
   normalizeProxyHost,
   normalizeProxyName,
@@ -96,6 +102,15 @@ test("normalizes proxy values and strips unsupported profile fields", () => {
   expect(normalizeProxyHost("bad host")).toBeNull();
   expect(normalizeProxyName("  Main  ")).toBe("Main");
   expect(normalizeProxyName(" ")).toBeNull();
+  expect(normalizeProxyAsn("AS123 Example ISP")).toBe("AS123");
+  expect(normalizeProxyAsn({ asn: "AS789" })).toBe("AS789");
+  expect(normalizeProxyAsn(456)).toBe("AS456");
+  expect(normalizeProxyAsn("not-an-asn")).toBe("");
+  expect(normalizeProxyOrganizationName("AS197540 netcup GmbH")).toBe(
+    "netcup",
+  );
+  expect(countryCodeToFlag("de")).toBe("🇩🇪");
+  expect(countryCodeToFlag("Germany")).toBe("");
   expect(profile).toEqual({
     name: "Main",
     scheme: "socks5",
@@ -123,6 +138,7 @@ test("normalizes locations and generates useful profile names", () => {
     }),
   ).toMatchObject({
     city: "Paris",
+    asn: "AS123",
     country: "FR",
     countryCode: "FR",
     org: "Example Org",
@@ -133,11 +149,13 @@ test("normalizes locations and generates useful profile names", () => {
       city: "Berlin",
       country_name: "Germany",
       country_code: "DE",
+      asn: "AS456",
       latitude: 1,
       longitude: 2,
     }),
   ).toMatchObject({
     city: "Berlin",
+    asn: "AS456",
     country: "Germany",
     countryCode: "DE",
     loc: "1,2",
@@ -145,14 +163,89 @@ test("normalizes locations and generates useful profile names", () => {
   });
   expect(normalizeIpApiLocation({}).loc).toBe("");
   expect(
+    normalizeIpWhoLocation({
+      city: "Nuremberg",
+      country: "Germany",
+      country_code: "DE",
+      latitude: 49.45,
+      longitude: 11.07,
+      connection: { asn: 197540, org: "netcup GmbH" },
+      timezone: { id: "Europe/Berlin" },
+    }),
+  ).toMatchObject({
+    asn: "AS197540",
+    city: "Nuremberg",
+    countryCode: "DE",
+    loc: "49.45,11.07",
+    org: "netcup GmbH",
+    source: "ipwho.is",
+    timezone: "Europe/Berlin",
+  });
+  expect(normalizeIpWhoLocation({}).asn).toBe("");
+  expect(
+    normalizeIpSbLocation({
+      city: "Nuremberg",
+      country: "Germany",
+      country_code: "DE",
+      latitude: 49.4527,
+      longitude: 11.0783,
+      asn: 197540,
+      asn_organization: "netcup GmbH",
+      timezone: "Europe/Berlin",
+    }),
+  ).toMatchObject({
+    asn: "AS197540",
+    city: "Nuremberg",
+    countryCode: "DE",
+    org: "netcup GmbH",
+    source: "api.ip.sb",
+  });
+  expect(normalizeIpSbLocation({}).city).toBe("Unknown");
+  expect(normalizeIpSbLocation({ isp: "Fallback ISP" }).org).toBe(
+    "Fallback ISP",
+  );
+  expect(
+    normalizeIpApiComLocation({
+      as: "AS197540 netcup GmbH",
+      city: "Nuremberg",
+      country: "Germany",
+      countryCode: "DE",
+      lat: 49.4527,
+      lon: 11.0783,
+      org: "netcup GmbH",
+      regionName: "Bavaria",
+      timezone: "Europe/Berlin",
+    }),
+  ).toMatchObject({
+    asn: "AS197540",
+    city: "Nuremberg",
+    countryCode: "DE",
+    org: "netcup GmbH",
+    source: "ip-api.com",
+  });
+  expect(normalizeIpApiComLocation({}).city).toBe("Unknown");
+  expect(normalizeIpApiComLocation({ region: "BY" }).region).toBe("BY");
+  expect(normalizeIpApiComLocation({ isp: "Fallback ISP" }).org).toBe(
+    "Fallback ISP",
+  );
+  expect(
+    generateProfileName(
+      { asn: "AS123", city: "Paris", countryCode: "FR", org: "Example" },
+      "proxy.test",
+    ),
+  ).toBe("Example, Paris 🇫🇷");
+  expect(
     generateProfileName(
       { city: "Paris", countryCode: "FR", org: "Example" },
       "proxy.test",
     ),
-  ).toBe("Paris, FR (Example)");
+  ).toBe("Example, Paris 🇫🇷");
   expect(
     generateProfileName({ city: "Paris", country: "FR" }, "proxy.test"),
-  ).toBe("Paris, FR");
+  ).toBe("Paris 🇫🇷");
+  expect(generateProfileName({ org: "netcup GmbH" }, "proxy.test")).toBe(
+    "netcup",
+  );
   expect(
     generateProfileName({ city: "Paris", country: "France" }, "proxy.test"),
   ).toBe("Paris");
@@ -204,7 +297,7 @@ test("fetchProxyLocation tries providers in order and tolerates failures", async
     .fn()
     .mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ city: "Paris", country: "FR" }),
+      json: async () => ({ city: "Paris", country: "FR", org: "AS1 Example" }),
     })
     .mockRejectedValueOnce(new Error("ipinfo down"))
     .mockResolvedValueOnce({
@@ -235,10 +328,69 @@ test("fetchProxyLocation tries providers in order and tolerates failures", async
   );
 });
 
+test("fetchProxyLocation uses the ASN fallback provider", async () => {
+  globalThis.fetch = vi
+    .fn()
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        country: "DE",
+        org: "AS197540 netcup GmbH",
+      }),
+    })
+    .mockResolvedValueOnce({ ok: false })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        city: "Nuremberg",
+        country: "Germany",
+        country_code: "DE",
+        latitude: 49.45,
+        longitude: 11.07,
+        connection: { asn: 197540, org: "netcup GmbH" },
+        timezone: { id: "Europe/Berlin" },
+      }),
+    });
+
+  await expect(fetchProxyLocation("89.58.34.228")).resolves.toMatchObject({
+    asn: "AS197540",
+    source: "ipwho.is",
+  });
+});
+
+test("fetchProxyLocation uses api.ip.sb when earlier providers lack a city", async () => {
+  globalThis.fetch = vi
+    .fn()
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ country: "DE", org: "AS197540 netcup GmbH" }),
+    })
+    .mockResolvedValueOnce({ ok: false })
+    .mockResolvedValueOnce({ ok: false })
+    .mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        city: "Nuremberg",
+        country: "Germany",
+        country_code: "DE",
+        latitude: 49.4527,
+        longitude: 11.0783,
+        asn: 197540,
+        asn_organization: "netcup GmbH",
+        timezone: "Europe/Berlin",
+      }),
+    });
+
+  await expect(fetchProxyLocation("89.58.34.228")).resolves.toMatchObject({
+    city: "Nuremberg",
+    source: "api.ip.sb",
+  });
+});
+
 test("prepareProxyProfile validates and auto-names unnamed profiles", async () => {
   globalThis.fetch = vi.fn().mockResolvedValue({
     ok: true,
-    json: async () => ({ city: "Paris", country: "FR" }),
+    json: async () => ({ city: "Paris", country: "FR", asn: "AS64500" }),
   });
 
   await expect(
@@ -258,6 +410,7 @@ test("prepareProxyProfile validates and auto-names unnamed profiles", async () =
     port: 8080,
     scheme: "http",
     location: {
+      asn: "AS64500",
       city: "Saved",
       region: "",
       country: "FR",
@@ -275,9 +428,20 @@ test("prepareProxyProfile validates and auto-names unnamed profiles", async () =
       scheme: "socks5",
     }),
   ).toMatchObject({
-    name: "Paris, FR",
+    name: "Paris 🇫🇷",
     location: { city: "Paris" },
   });
+  expect(
+    generateProfileName(
+      {
+        asn: "AS197540",
+        city: "Nuremberg",
+        countryCode: "DE",
+        org: "netcup GmbH",
+      },
+      "89.58.34.228",
+    ),
+  ).toBe("netcup, Nuremberg 🇩🇪");
   globalThis.fetch.mockClear();
   expect(
     await prepareProxyProfile({
@@ -293,6 +457,36 @@ test("prepareProxyProfile validates and auto-names unnamed profiles", async () =
     }),
   ).toMatchObject({ name: "Complete", location: { city: "Tokyo" } });
   expect(globalThis.fetch).not.toHaveBeenCalled();
+});
+
+test("refreshes incomplete automatic names with the proxy city", async () => {
+  globalThis.fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      city: "Nuremberg",
+      country: "DE",
+      loc: "49.4542,11.0775",
+      org: "AS197540 netcup GmbH",
+      timezone: "Europe/Berlin",
+    }),
+  });
+
+  await expect(
+    prepareProxyProfile({
+      name: "netcup, 🇩🇪",
+      host: "89.58.34.228",
+      port: 1080,
+      scheme: "socks5",
+      location: {
+        country: "Germany",
+        countryCode: "DE",
+        city: "Unknown",
+        loc: "49.4542,11.0775",
+        org: "netcup GmbH",
+        timezone: "Europe/Berlin",
+      },
+    }),
+  ).resolves.toMatchObject({ name: "netcup, Nuremberg 🇩🇪" });
 });
 
 test("normalizes domain patterns and bypass lists", () => {
@@ -342,6 +536,9 @@ test("builds PAC conditions and scripts for every pattern type", () => {
     'shExpMatch(host, "*.example.com")',
   );
   expect(buildPacCondition("*local*")).toBe('shExpMatch(host, "*local*")');
+  expect(buildPacCondition("*ads.example*")).toBe(
+    'shExpMatch(host, "*ads.example*")',
+  );
   expect(buildPacCondition("example.com")).toContain(
     'host === "www.example.com"',
   );

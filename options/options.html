@@ -367,95 +367,122 @@
             to network requests and page elements. Site and cosmetic
             allowlists provide quick recovery if a page breaks.
           </p>
-          <div class="field checkbox">
-            <label>
-              <input type="checkbox" id="tracker-enabled" />
-              Enable ad and tracker blocking
-            </label>
-          </div>
-          <div class="field">
-            <label for="tracker-whitelist"
-              >Blocking Allowlist (comma-separated domains)</label
-            >
-            <textarea id="tracker-whitelist" rows="2"></textarea>
-            <small>Disables network and cosmetic blocking on matching sites.</small>
-          </div>
-          <div class="field checkbox">
-            <label>
-              <input type="checkbox" id="tracker-cosmetic-filtering" />
-              Hide ad slots, cookie banners, and other filtered elements
-            </label>
-          </div>
-          <div class="field">
-            <label for="tracker-cosmetic-whitelist"
-              >Cosmetic-Only Allowlist (comma-separated domains)</label
-            >
-            <textarea id="tracker-cosmetic-whitelist" rows="2"></textarea>
-            <small>Keeps request blocking active but stops element hiding.</small>
-          </div>
-          <div class="field checkbox">
-            <label>
-              <input type="checkbox" id="tracker-youtube-enhancements" />
-              Enable minimal YouTube ad-slot cleanup and skip controls
-            </label>
-          </div>
-          <div class="field checkbox">
-            <label>
-              <input type="checkbox" id="tracker-auto-update" />
-              Download and update enabled filter lists automatically
-            </label>
-          </div>
-          <div class="field">
-            <label for="tracker-update-interval">Update interval (hours)</label>
-            <input id="tracker-update-interval" type="number" min="1" max="168" />
-          </div>
-          <div class="field filter-list-settings">
-            <label>Filter subscriptions</label>
-            <label class="inline-check"><input type="checkbox" data-filter-list-id="adguard-base" /> AdGuard Base</label>
-            <label class="inline-check"><input type="checkbox" data-filter-list-id="adguard-tracking" /> AdGuard Tracking Protection</label>
-            <label class="inline-check"><input type="checkbox" data-filter-list-id="adguard-cookies" /> AdGuard Cookie Notices</label>
-            <label for="tracker-custom-subscriptions">Custom HTTPS subscriptions (one URL per line)</label>
-            <textarea id="tracker-custom-subscriptions" rows="3" placeholder="https://example.com/filter.txt"></textarea>
-            <div class="filter-update-row">
-              <button id="update-filter-lists" class="btn-secondary btn-compact" type="button">Update now</button>
-              <span id="filter-update-status" role="status">Waiting for status…</span>
+          <details class="tracker-group" id="tracker-core-group" open>
+            <summary>Blocking and site allowlists</summary>
+            <div class="tracker-group-panel">
+              <div class="field checkbox">
+                <label>
+                  <input type="checkbox" id="tracker-enabled" />
+                  Enable ad and tracker blocking
+                </label>
+              </div>
+              <div class="field">
+                <label for="tracker-whitelist"
+                  >Blocking Allowlist (comma-separated domains)</label
+                >
+                <textarea id="tracker-whitelist" rows="2"></textarea>
+                <small
+                  >Disables network and cosmetic blocking on matching sites.</small
+                >
+              </div>
             </div>
-          </div>
-          <div class="field checkbox">
-            <label>
-              <input type="checkbox" id="tracker-use-built-in" />
-              Use the bundled, locally stored tracker domain set
-            </label>
-          </div>
-          <div class="field">
-            <label for="tracker-custom-domains"
-              >Custom Tracker Domains (comma-separated patterns)</label
-            >
-            <textarea
-              id="tracker-custom-domains"
-              rows="4"
-              maxlength="16384"
-              placeholder="*.analytics.example, metrics.example"
-            ></textarea>
-            <small
-              >Uses the same wildcard semantics as Stealth Guard allowlists.
-              Invalid patterns are ignored and the value is capped at 16 KB.</small
-            >
-          </div>
-          <div class="field">
-            <label for="tracker-custom-filters">User filtering rules</label>
-            <textarea
-              id="tracker-custom-filters"
-              rows="7"
-              maxlength="131072"
-              placeholder="||ads.example^&#10;@@||needed.example^$domain=site.example&#10;site.example##.cookie-banner&#10;site.example#@#.needed-widget"
-            ></textarea>
-            <small
-              >Supports a safe subset of AdGuard/uBlock network rules,
-              exceptions, CSS hiding rules, and cosmetic exceptions. Rules
-              created by the element picker appear here.</small
-            >
-          </div>
+          </details>
+
+          <details class="tracker-group" id="tracker-cleanup-group">
+            <summary>Page cleanup</summary>
+            <div class="tracker-group-panel">
+              <div class="field checkbox">
+                <label>
+                  <input type="checkbox" id="tracker-cosmetic-filtering" />
+                  Hide ad slots, cookie banners, and other filtered elements
+                </label>
+              </div>
+              <div class="field">
+                <label for="tracker-cosmetic-whitelist"
+                  >Cosmetic-Only Allowlist (comma-separated domains)</label
+                >
+                <textarea id="tracker-cosmetic-whitelist" rows="2"></textarea>
+                <small
+                  >Keeps request blocking active but stops element hiding.</small
+                >
+              </div>
+              <div class="field checkbox">
+                <label>
+                  <input type="checkbox" id="tracker-youtube-enhancements" />
+                  Enable minimal YouTube ad-slot cleanup and skip controls
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <details class="tracker-group" id="tracker-lists-group">
+            <summary>Filter lists and update schedule</summary>
+            <div class="tracker-group-panel">
+              <div class="field checkbox">
+                <label>
+                  <input type="checkbox" id="tracker-auto-update" />
+                  Download and update enabled filter lists automatically
+                </label>
+              </div>
+              <div class="field">
+                <label for="tracker-update-interval">Update interval (hours)</label>
+                <input id="tracker-update-interval" type="number" min="1" max="168" />
+              </div>
+              <div class="field filter-list-settings">
+                <label>Filter subscriptions</label>
+                <label class="inline-check"><input type="checkbox" data-filter-list-id="adguard-base" /> AdGuard Base</label>
+                <label class="inline-check"><input type="checkbox" data-filter-list-id="adguard-tracking" /> AdGuard Tracking Protection</label>
+                <label class="inline-check"><input type="checkbox" data-filter-list-id="adguard-cookies" /> AdGuard Cookie Notices</label>
+                <label for="tracker-custom-subscriptions">Custom HTTPS subscriptions (one URL per line)</label>
+                <textarea id="tracker-custom-subscriptions" rows="3" placeholder="https://example.com/filter.txt"></textarea>
+                <div class="filter-update-row">
+                  <button id="update-filter-lists" class="btn-secondary btn-compact" type="button">Update now</button>
+                  <span id="filter-update-status" role="status">Waiting for status…</span>
+                </div>
+              </div>
+              <div class="field checkbox">
+                <label>
+                  <input type="checkbox" id="tracker-use-built-in" />
+                  Use the bundled, locally stored tracker domain set
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <details class="tracker-group" id="tracker-custom-group">
+            <summary>Custom tracker rules and domains</summary>
+            <div class="tracker-group-panel">
+              <div class="field">
+                <label for="tracker-custom-domains"
+                  >Custom Tracker Domains (comma-separated patterns)</label
+                >
+                <textarea
+                  id="tracker-custom-domains"
+                  rows="4"
+                  maxlength="16384"
+                  placeholder="*.analytics.example, metrics.example"
+                ></textarea>
+                <small
+                  >Uses the same wildcard semantics as Stealth Guard allowlists.
+                  Invalid patterns are ignored and the value is capped at 16 KB.</small
+                >
+              </div>
+              <div class="field">
+                <label for="tracker-custom-filters">User filtering rules</label>
+                <textarea
+                  id="tracker-custom-filters"
+                  rows="7"
+                  maxlength="131072"
+                  placeholder="||ads.example^&#10;@@||needed.example^$domain=site.example&#10;site.example##.cookie-banner&#10;site.example#@#.needed-widget"
+                ></textarea>
+                <small
+                  >Supports a safe subset of AdGuard/uBlock network rules,
+                  exceptions, CSS hiding rules, and cosmetic exceptions. Rules
+                  created by the element picker appear here.</small
+                >
+              </div>
+            </div>
+          </details>
         </section>
 
         <section class="card" id="useragent-section">
@@ -486,14 +513,29 @@
             <textarea id="useragent-whitelist" rows="2"></textarea>
           </div>
           <div class="field">
-            <label for="useragent-preset">User-Agent Preset</label>
+            <label for="useragent-preset">User-Agent and browser/API profile</label>
             <select id="useragent-preset">
               <option value="macos">macOS Safari</option>
-              <option value="macos_chrome">macOS Chrome</option>
-              <option value="windows">Windows Edge</option>
-              <option value="iphone">iPhone Safari</option>
-              <option value="android">Android Chrome</option>
             </select>
+            <small
+              >Choose one complete identity. Chromium entries combine the
+              operating-system preset and modern browser/API target; Safari
+              entries use their native browser/API profile. TLS and
+              HTTP/2 remain owned by the browser. Profiles refresh every 4
+              hours.</small
+            >
+            <div class="filter-update-row">
+              <button
+                id="update-curl-profiles"
+                class="btn-secondary btn-compact"
+                type="button"
+              >
+                Update profiles now
+              </button>
+              <span id="curl-profile-status" role="status"
+                >Bundled fallback profiles</span
+              >
+            </div>
           </div>
           <div class="field">
             <label for="useragent-string">User-Agent String</label>
@@ -505,7 +547,37 @@
             ></textarea>
             <small
               >This is the user-agent string that will be used for the selected
-              preset.</small
+              identity.</small
+            >
+          </div>
+        </section>
+
+        <section class="card" id="worker-section">
+          <h2><span>🧵 Worker Identity Protection</span></h2>
+          <p class="section-desc">
+            Align dedicated Worker and SharedWorker identity surfaces with the
+            selected browser profile, language, timezone, and WebGL settings.
+            Some applications depend on native worker URLs and shared-worker
+            naming, so those sites can remain native through the allowlist.
+          </p>
+          <div class="field checkbox">
+            <label>
+              <input type="checkbox" id="worker-enabled" />
+              Enable Worker Identity Protection
+            </label>
+          </div>
+          <div class="field">
+            <label for="worker-whitelist"
+              >Compatibility Allowlist (comma-separated domains)</label
+            >
+            <textarea
+              id="worker-whitelist"
+              rows="2"
+              placeholder="web.telegram.org"
+            ></textarea>
+            <small
+              >Worker bootstrapping stays native on these sites so their worker
+              URLs and shared state remain compatible.</small
             >
           </div>
         </section>
@@ -814,7 +886,8 @@
             >
           </h2>
           <p class="section-desc">
-            Hide specific GPU models and rotate report/image fingerprints per page load.
+            Strict mode masks GPU identity and adds deterministic readback and
+            export noise. Compatibility sites keep rendering data native.
           </p>
           <div class="field checkbox">
             <label>
@@ -837,6 +910,40 @@
               <option value="surface_pro_7">Surface Pro 7</option>
             </select>
           </div>
+          <div class="field">
+            <label for="webgl-mode">Protection Mode</label>
+            <select id="webgl-mode">
+              <option value="strict">Strict (recommended)</option>
+              <option value="compatibility">Compatibility (all sites)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="webgl-compatibility-whitelist"
+              >Compatibility-mode sites (comma-separated domains)</label
+            >
+            <textarea
+              id="webgl-compatibility-whitelist"
+              rows="2"
+              placeholder="figma.com, *.miro.com, *.canva.com"
+            ></textarea>
+            <small class="field-help"
+              >These sites keep rendering, exports, capabilities, and pixel
+              readback native while still using identity masking.</small
+            >
+          </div>
+          <div class="field">
+            <label for="webgl-strict-whitelist"
+              >Strict-mode sites when global mode is Compatibility</label
+            >
+            <textarea
+              id="webgl-strict-whitelist"
+              rows="2"
+              placeholder="fingerprint.test, *.example.com"
+            ></textarea>
+            <small class="field-help"
+              >Ignored while global Strict mode is selected.</small
+            >
+          </div>
         </section>
 
         <section class="card" id="webgpu-section">
@@ -851,7 +958,15 @@
             >
           </h2>
           <p class="section-desc">
-            Add noise to GPUAdapter limits and buffer operations.
+            Use a local profile containing matching WebGL and WebGPU data.
+            Imported limits are clamped to the native capability envelope;
+            compatibility-mode sites remain native. <a
+              href="https://github.com/apify/fingerprint-suite"
+              target="_blank"
+              rel="noopener noreferrer"
+              >Apify Fingerprint Suite</a
+            > JSON exports are also accepted for WebGL identity; they do not
+            claim WebGPU data unless the export contains it.
           </p>
           <div class="field checkbox">
             <label>
@@ -864,6 +979,55 @@
               >Per-Feature Allowlist (comma-separated domains)</label
             >
             <textarea id="webgpu-whitelist" rows="2"></textarea>
+          </div>
+          <div class="field">
+            <label for="gpu-profile-preset"
+              >Bundled ClearCote WebGL/WebGPU profile</label
+            >
+            <select id="gpu-profile-preset">
+              <option value="">No bundled profile</option>
+            </select>
+            <small class="field-help"
+              >Includes the curated 72-profile GPL dataset shipped with this
+              extension; 64 profiles contain both WebGL and WebGPU data.</small
+            >
+          </div>
+          <div class="field">
+            <label for="gpu-profile-file">Combined GPU profile</label>
+            <input
+              type="file"
+              id="gpu-profile-file"
+              accept=".json,application/json"
+            />
+            <small class="field-help"
+              >Import a ClearCote capture or an Apify Fingerprint Suite JSON
+              export. ClearCote captures can be exported by
+              <a
+                href="https://github.com/clearcotelabs/clearcote-browser/tree/main/tools/fingerprint-collect"
+                target="_blank"
+                rel="noopener noreferrer"
+                >clearcote-browser</a
+              >. Only its WebGL and WebGPU sections are retained.</small
+            >
+            <div class="profile-import-actions">
+              <button
+                type="button"
+                id="import-gpu-profile"
+                class="btn-secondary btn-compact"
+              >
+                Import profile
+              </button>
+              <button
+                type="button"
+                id="clear-gpu-profile"
+                class="btn-danger btn-compact"
+              >
+                Clear profile
+              </button>
+            </div>
+            <small id="gpu-profile-status" class="field-help" role="status"
+              >No combined profile loaded.</small
+            >
           </div>
         </section>
 
@@ -993,7 +1157,10 @@
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
     <script src="../lib/domainFilter.js"></script>
+    <script src="../lib/filterLists.js"></script>
+    <script src="../lib/gpuProfiles.js"></script>
     <script src="../lib/config.js"></script>
+    <script src="../lib/curlProfiles.js"></script>
     <script src="../lib/runtime.js"></script>
     <script src="options.js"></script>
   </body>

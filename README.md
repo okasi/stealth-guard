@@ -10,252 +10,146 @@
 
 </div>
 
-Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL, fonts, AudioContext, ClientRects, WebGPU, timezone, language, geolocation, User-Agent, and WebRTC surfaces. Settings, tracker rules, bounded proxy connection history, and optional saved site sessions stay in local extension storage; there is no telemetry or analytics.
+Stealth Guard reduces passive browser fingerprinting across Canvas, WebGL,
+fonts, audio, ClientRects, WebGPU, timezone, language, geolocation,
+User-Agent, and WebRTC surfaces. It also blocks selected ads and trackers,
+supports proxy routing and split tunneling, and can save per-site sessions.
+
+Settings, filter rules, proxy history, and sessions stay in local extension
+storage. There is no account, telemetry, analytics, or Stealth Guard server.
 
 > [!IMPORTANT]
-> Stealth Guard currently uses Manifest V2. Standard Google Chrome releases have disabled MV2, and most Chromium forks followed upstream. Opera is the primary current target because it still supports existing MV2 extensions. See [Browser compatibility](#-browser-compatibility) before installing.
+> Stealth Guard intentionally uses Manifest V2. Current standard Google Chrome
+> releases do not support it; Opera is the primary current target. Use an
+> unpacked installation in a browser that still supports MV2.
 
-## Why Stealth Guard?
+## Features
 
-- **Fail-closed startup:** browser API wrappers install at `document_start` with safe defaults, then receive trusted local configuration.
-- **Compatibility controls:** global and per-feature allowlists make protection practical on complex web apps.
-- **Local-first operation:** no accounts, telemetry, analytics, or Stealth Guard servers.
-- **Auditable source:** plain JavaScript with no production dependencies and no opaque build artifacts.
-- **Quality gates:** manifest validation, syntax checks, 100% deterministic-core coverage, background integration tests, and Chrome-driven end-to-end checks.
+- Fingerprinting protection for browser identity, graphics, media, layout,
+  locale, timezone, geolocation, and WebRTC surfaces.
+- SOCKS4/5 and HTTP/HTTPS proxy profiles with credentials, fallback order,
+  split tunneling, location synchronization, and local diagnostics.
+- AdGuard-compatible subscription lists with request blocking, cosmetic rules,
+  element picking, and YouTube ad-response sanitization.
+- Global and per-feature domain allowlists, pause controls, and Cloudflare
+  challenge-frame compatibility.
+- Strict WebGL identity/readback protection by default, with a curated
+  compatibility allowlist for graphics editors and interactive WebGL apps.
+- Optional ClearCote combined GPU-profile import for matching WebGL 1/2 and
+  WebGPU adapter data; only the graphics sections are retained locally.
+- Bundled curated ClearCote profile set with 72 GPL-licensed real-device
+  profiles, selectable from the popup or Advanced Settings.
+- Apify Fingerprint Suite import support for generated browser/OS fingerprints
+  covering Windows Edge, macOS Chrome/Safari, iOS Safari, and Android Chrome.
+- Per-site cookie and storage sessions that can be saved, renamed, switched,
+  cleared, or deleted.
+- Combined User-Agent/browser profiles, locale presets, timezone presets,
+  WebGL presets, combined GPU-profile import, export/import, notifications,
+  and an identity self-test.
 
-## ✨ Features
+## Installation
 
-### 🔒 Fingerprinting Protection
+1. Download or clone this repository.
+2. Open `opera://extensions/` or the equivalent page in an MV2-compatible
+   Chromium browser.
+3. Enable Developer mode, choose **Load unpacked**, and select this folder.
 
-| Protection          | Description                                                                           |
-| ------------------- | ------------------------------------------------------------------------------------- |
-| **🌍 Proxy**        | Masks your IP address by routing traffic through SOCKS4/5 or HTTP/HTTPS proxy servers |
-| **🌐 User-Agent**   | Keeps HTTP/JavaScript UA, client hints, touch, CPU, and memory claims aligned          |
-| **🗣️ Language**    | Aligns Navigator, default Intl locale, and the HTTP Accept-Language header             |
-| **🕐 Timezone**     | Spoofs timezone information using automatic regional DST rules (default: Paris)       |
-| **📍 Geolocation**  | Replaces permitted HTML geolocation results with coarse proxy-location coordinates   |
-| **📡 WebRTC**       | Prevents IP address leaks through WebRTC connections                                  |
-| **🎨 Canvas**       | Adds imperceptible noise to HTML and OffscreenCanvas reads and exports                 |
-| **📐 ClientRects**  | Adds noise to element bounding rectangle measurements                                 |
-| **🔤 Font**         | Randomizes font measurement values to prevent font enumeration                        |
-| **🔊 AudioContext** | Injects noise into buffer copies and float/byte analyser readouts                      |
-| **🕹️ WebGL**       | Hides GPU identity and protects extension, capability, pixel, and export probes        |
-| **🎮 WebGPU**       | Spoofs WebGPU adapter limits and buffer operations                                    |
-| **🛑 Ads & trackers** | Updates AdGuard-compatible lists, blocks requests, hides filtered elements, and sanitizes YouTube player ad responses |
+The extension has no production build step. Reload the unpacked extension after
+changing source files.
 
-### 🚀 Additional Features
+### Automatic updates from GitHub
 
-- **🔌 SOCKS5/HTTP/HTTPS Proxy Support** - Route browser traffic through raw proxy endpoints with optional credentials and ordered fallback profiles
-- **🔄 Per-Site Session Switcher** - Save, rename, delete, clear, and switch login sessions (cookies + local/session storage) from the popup
-- **🗺️ Split Tunneling** - Choose protect-all, bypass-selected, or protect-selected behavior with deterministic PAC-based per-site routes
-- **📍 Location Synchronization** - Match timezone and permission-approved HTML geolocation to each site's effective proxy profile
-- **📊 Local Diagnostics** - Inspect, export, or clear a bounded 100-event proxy connection history without exposing passwords
-- **🧭 Identity Self-Test** - Compare configured identity policy with live protected-page values and open the repeatable detector suite
-- **✅ Global & Per-Feature Allowlists** - Allow sites globally or per protection feature
-- **🎯 Wildcard Domain Patterns** - Support for `*.example.com` and `webmail.*` patterns
-- **☁️ Cloudflare Challenge Compatibility** - Leaves Cloudflare-owned challenge frames unmodified without granting the embedding page a UA bypass
-- **🔔 Real-time Notifications** - Optional alerts when fingerprinting attempts are blocked
-- **💾 Export/Import Settings** - Backup and restore your configuration
-- **📦 No Build System Required** - Pure vanilla JavaScript, ready to use
+GitHub Releases publish a signed `.crx` package and the update manifest used by
+MV2-compatible browsers that support self-hosted extension updates. Install the
+`.crx` release asset for browser-managed updates; unpacked developer installs
+must still be reloaded manually.
 
-## 📥 Installation
+The release workflow signs every package with the same private key. Before the
+first release, generate a key once and store its base64 contents as the
+`STEALTH_GUARD_EXTENSION_KEY_B64` GitHub Actions repository secret. Keep the
+private key safe and reuse it for every release:
 
-### 🔧 Manual Installation (Developer Mode)
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out release-key.pem
+base64 < release-key.pem | tr -d '\n' | gh secret set STEALTH_GUARD_EXTENSION_KEY_B64
+```
 
-1. Download or clone this repository
-2. In Opera, navigate to `opera://extensions/` (or open the equivalent extensions page in another explicitly MV2-enabled Chromium build)
-3. Enable **Developer mode** (toggle in top-right corner)
-4. Click **Load unpacked**
-5. Select the extension folder
+The workflow runs for `v*` tags and publishes the signed CRX, its update XML,
+and a source ZIP. The browser checks the update URL in `manifest.json` on its
+normal extension-update schedule.
 
-## 📖 Usage
+The bundled GPU profiles are derived from
+[clearcote-profiles](https://github.com/clearcotelabs/clearcote-profiles) and
+remain under GNU GPL-3.0; see
+[profiles/clearcote/NOTICE.md](/Users/osim/Developer/wiz/Stealth-Guard-by-okasi/profiles/clearcote/NOTICE.md)
+and the included license file.
 
-### ⚡ Quick Access (Popup)
+Apify's `fingerprint-generator` output can be generated with
+`node tools/generate-apify-profile.mjs <preset>` after installing the package,
+then imported from Advanced Settings. The extension maps the generator's
+`videoCard` data into WebGL identity surfaces. Apify does not provide WebGPU
+adapter captures, so no sourced WebGPU adapter profile is applied unless the
+JSON also contains an explicit WebGPU section; the existing generic WebGPU
+protection can still apply.
 
-Click the Stealth Guard icon in your browser toolbar to:
+## Usage
 
-- Toggle protection on/off globally
-- Enable/disable individual protection features
-- Select User-Agent presets (macOS Safari, Chrome, Windows Edge, iPhone, Android)
-- Select language/locale presets and view identity diagnostics
-- Choose timezone presets
-- View proxy status
-- See which protections were triggered on the current page
+Use the toolbar popup for quick protection, identity, timezone, proxy, and
+current-page controls. Open **Advanced Settings** for allowlists, proxy
+profiles, filters, sessions, diagnostics, import/export, and self-test.
 
-### ⚙️ Advanced Settings
+Right-click a page to manage its global allowlist or open the self-test section.
 
-Open **Advanced Settings** from the popup to access:
+Domain controls accept exact domains and wildcards such as `*.example.com`,
+`webmail.*`, and `*pattern*`. User-Agent settings select one aligned browser/API
+profile; they do not replace the browser's native TLS or HTTP/2 stack.
 
-- Per-feature allowlists
-- Proxy profile management
-- Proxy profiles, credentials, fallback order, and split-tunneling modes
-- Proxy-location timezone/geolocation synchronization
-- Proxy-country language synchronization and local tracker rules
-- Automatic AdGuard Base, Tracking Protection, and Cookie Notices subscriptions
-- Network exceptions, cosmetic filtering, per-site pause controls, and an element picker
-- Connection diagnostics and local history
-- WebGL presets (Apple, Pixel 4, Surface Pro 7)
-- Export/import configuration
-- WebRTC policy settings
+## Development
 
-### 🖱️ Context Menu
-
-Right-click on any webpage to quickly add or remove the current domain from the global allowlist, or open the Self-Test section of the settings page for that tab.
-
-## 🔧 Configuration
-
-### 🎯 Domain Patterns
-
-Stealth Guard supports flexible domain matching:
-
-| Pattern         | Matches                                                     |
-| --------------- | ----------------------------------------------------------- |
-| `example.com`   | `example.com` and `www.example.com`                         |
-| `*.example.com` | All subdomains (`sub.example.com`, `deep.sub.example.com`)  |
-| `webmail.*`     | Any domain starting with `webmail.` (`webmail.company.com`) |
-| `*pattern*`     | Generic wildcard matching (`foo-localhost-bar`)             |
-
-### 🌐 User-Agent Presets
-
-Choose from predefined User-Agent strings:
-
-- macOS Safari
-- macOS Chrome
-- Windows Edge
-- iPhone Safari
-- Android Chrome
-
-### 🕐 Timezone Presets
-
-Available timezones use IANA regional rules, so their UTC offsets adjust automatically for daylight saving time and historical changes:
-
-- Los Angeles (Pacific)
-- Denver (Mountain)
-- Chicago (Central)
-- New York (Eastern)
-- London
-- Paris - _Default_
-- Athens
-- Istanbul
-- Dubai
-- Jakarta
-- Shanghai
-- Tokyo
-
-## 🧪 Testing Your Protection
-
-Visit these sites to verify your fingerprinting protection:
-
-- <https://browserleaks.com/> - Comprehensive fingerprint testing
-- <https://webbrowsertools.com/> - AudioContext testing
-- <https://amiunique.org/> - Browser uniqueness analysis
-- <https://dnscheck.tools/> - WebRTC and DNS leak testing
-
-For the repeatable manual detector suite and result template, see
-[Browser Privacy Benchmarks](BENCHMARKS.md). CreepJS Checker is the recurring
-reference benchmark.
-
-## 🧑‍💻 Development Checks
-
-Use Node.js 20.19+ or 22.12+ and install Chrome/Chromium for the browser harness. Set `CHROME_PATH` when it is not in a standard location. Install the dev dependencies once:
+Requirements: Node.js 20.19+ or 22.12+, plus Chrome/Chromium for the browser
+harness. Set `CHROME_PATH` if the browser is not installed in a standard path.
 
 ```bash
 npm ci
-```
-
-Run the local quality gate:
-
-```bash
 npm run check
 ```
 
-This validates source syntax and manifest integrity, enforces 100% statements, branches, functions, and lines coverage for deterministic core modules, runs background integration tests, and drives Chrome through every protection plus popup/options workflows. Current Chrome cannot load this MV2 extension, so the harness injects the same classic-script bundles and mocked extension APIs; release validation still requires an unpacked-extension smoke test in an MV2-capable Opera build.
+`npm run check` validates syntax and manifest order, runs deterministic-core
+coverage, exercises background integration, and runs the browser-driven
+protection, popup, options, and failure-path checks. The harness uses the same
+classic-script bundles with mocked extension APIs because current Chrome cannot
+load MV2. Release validation should also include an unpacked smoke test in an
+MV2-capable Opera build.
 
-The content script installs wrappers immediately at `document_start` with embedded safe defaults, then applies trusted `chrome.storage.local` config through a private authenticated MAIN-world update channel. This fail-closed design avoids a pre-patch fingerprinting window; if storage is slow, default protections may apply briefly before stored disables or allowlists take effect.
+For repeatable manual detector checks, see
+[BENCHMARKS.md](BENCHMARKS.md). Project structure and runtime contracts are
+documented for coding agents in [AGENTS.md](AGENTS.md).
 
-## 🏗️ Technical Details
+## Privacy and permissions
 
-### 📁 Architecture
+Stealth Guard does not collect browsing history or send telemetry. Optional
+background requests are limited to proxy location services and the configured
+curl-impersonate profile source. All user settings remain local.
 
-```
-background.js              → Runtime orchestrator (config, headers, ad blocking, WebRTC, proxy, messages)
-lib/adblock.js             → Safe filter parser, matcher, and cosmetic selector engine
-    ↓
-content-scripts/
-  injector.js              → Isolated bootstrap, trusted config updates, alerts, diagnostics
-  main.js                  → Testable MAIN-world browser API protections
-    ↓
-lib/
-  config.js                → Defaults, normalization, persistence, UA presets, content projection
-  domainFilter.js          → Canonical domain and wildcard allowlist matching
-  proxy.js                 → Proxy validation, location lookup, PAC generation, browser settings
-  runtime.js               → Promise-based popup/options messaging
-  session.js               → Serialized session lifecycle and cookie/site-scope helpers
-  storage.js               → Promise wrapper for chrome.storage.local
-```
+The extension requests storage, cookies, privacy, proxy, webRequest,
+webRequestBlocking, alarms, unlimitedStorage, tabs, contextMenus,
+notifications, and `<all_urls>` for its protection and session features.
 
-### 📋 Manifest Version
+## Browser compatibility
 
-This extension intentionally remains on **Manifest V2** because its persistent background page and blocking header-modification architecture depend on MV2 APIs. A Manifest V3 port would require a separate runtime design.
+Opera is the primary supported browser. Current Google Chrome is unsupported
+because MV2 is disabled. Brave, Vivaldi, and Edge are not currently validated
+as MV2 targets; Firefox uses a different extension format.
 
-> [!WARNING]
-> Because of Manifest V2, **this extension does not work on current standard versions of Google Chrome**. A separate Manifest V3 architecture is required for broad Chrome, Brave, Vivaldi, and Edge support.
+See the vendor references for [Chrome](https://developer.chrome.com/docs/extensions/develop/migrate/mv2-deprecation-timeline),
+[Opera](https://blogs.opera.com/news/2025/09/mv2-extensions-opera/),
+[Brave](https://brave.com/blog/brave-shields-manifest-v3/), and
+[Vivaldi](https://vivaldi.com/blog/manifest-v3-update-vivaldi-is-future-proofed-with-its-built-in-functionality/).
 
-### 🔐 Permissions
+## Contributing and license
 
-| Permission                          | Purpose                                                                            |
-| ----------------------------------- | ---------------------------------------------------------------------------------- |
-| `storage`                           | Save user settings                                                                 |
-| `cookies`                           | Save and restore per-site login sessions                                           |
-| `privacy`                           | Control WebRTC IP handling policy                                                  |
-| `proxy`                             | Configure SOCKS5/HTTP proxy                                                        |
-| `webRequest` / `webRequestBlocking` | Align identity headers and synchronously block matched ad/tracker requests          |
-| `alarms`                            | Refresh enabled filter subscriptions automatically                                  |
-| `unlimitedStorage`                  | Cache downloaded filter subscriptions locally                                       |
-| `tabs`                              | Identify active tabs, reload updated tabs, and track per-tab protection state      |
-| `contextMenus`                      | Right-click menu integration                                                       |
-| `notifications`                     | Fingerprint detection alerts                                                       |
-| `<all_urls>`                        | Apply protections, header spoofing, proxy rules, and session tools across websites |
-
-## 🔒 Privacy
-
-Stealth Guard:
-
-- **Does not collect telemetry, analytics, or browsing history**
-- **Makes no background service calls** except optional proxy location checks via `ipinfo.io`/`ipapi.co`
-- **Stores all settings locally** in browser storage
-- **Is fully open source** - audit the code yourself
-
-## 🌐 Browser Compatibility
-
-| Browser        | Support           | Notes                                                                                                                                        |
-| -------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Opera          | ✅ Primary target | Opera states that existing MV2 extensions remain supported; its store no longer accepts new MV2 uploads, so use developer-mode installation. |
-| Brave          | ❌ Unsupported    | Brave limits post-phase-out MV2 support to four specifically maintained extensions; Stealth Guard is not one of them.                        |
-| Vivaldi        | ❌ Unsupported    | Vivaldi announced that MV2 extensions would stop working as Chromium removed the platform.                                                   |
-| Microsoft Edge | ❌ Unsupported    | Current project releases are not validated against an MV2-capable Edge channel.                                                              |
-| Google Chrome  | ❌ Unsupported    | Chrome disabled MV2 everywhere starting with Chrome 138/139.                                                                                 |
-
-_Note: Firefox uses a different extension format and is not currently supported._
-
-Vendor references: [Chrome MV2 timeline](https://developer.chrome.com/docs/extensions/develop/migrate/mv2-deprecation-timeline), [Opera MV2 status](https://blogs.opera.com/news/2025/09/mv2-extensions-opera/), [Brave MV2 policy](https://brave.com/blog/brave-shields-manifest-v3/), and [Vivaldi MV3 update](https://vivaldi.com/blog/manifest-v3-update-vivaldi-is-future-proofed-with-its-built-in-functionality/).
-
-## 🤝 Contributing
-
-Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, privacy, and pull-request expectations. Please report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
-
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request
+expectations. Report vulnerabilities privately according to [SECURITY.md](SECURITY.md).
 Release changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 👤 Author
-
-**okasi** - [okasi.me](https://okasi.me) - [GitHub](https://github.com/okasi)
-
-## 🙏 Acknowledgments
-
-- Inspired by the need for better privacy tools in an increasingly tracked web
-- Fingerprinting surface coverage was informed by the public detector definitions in [Scrapfly Anti-bot Detector](https://github.com/scrapfly/Antibot-Detector); Stealth Guard's implementation is independent to preserve this project's MIT licensing.
-- Thanks to the browser fingerprinting research community for documenting these techniques
+Stealth Guard is licensed under the MIT License; see [LICENSE](LICENSE).

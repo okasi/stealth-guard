@@ -8,6 +8,9 @@ let proxyCredentialStatuses = new Map();
 let proxyRuntimeStatus = null;
 let proxyDiagnostics = null;
 let adblockStatus = null;
+let curlProfileStatus = null;
+let curlProfileCatalog = normalizeCurlProfileCatalog(null);
+let bundledGpuProfiles = [];
 
 const AUTO_SAVE_DELAY_MS = 1000;
 const MAX_CONFIG_FILE_SIZE = 1024 * 1024;
@@ -42,15 +45,96 @@ function serializeConfig(config) {
 
 async function loadOptionsConfig() {
   currentConfig = await loadRuntimeConfig();
+  await loadBundledGpuProfiles();
+  await refreshStoredProxyProfiles();
   await Promise.all([
     refreshProxyCredentialStatuses(),
     refreshProxyRuntimeStatus(),
     refreshProxyDiagnostics(),
     refreshAdblockStatus(),
+    refreshCurlProfileStatus(),
   ]);
   lastSavedSnapshot = serializeConfig(currentConfig);
   saveInFlightSnapshot = null;
   populateForm();
+}
+
+async function loadBundledGpuProfiles() {
+  try {
+    const response = await fetch(
+      chrome.runtime.getURL(`${GPU_PROFILE_BUNDLE_PATH}/index.json`),
+    );
+    if (!response.ok) throw new Error("Bundled GPU profile index unavailable");
+    bundledGpuProfiles = normalizeGpuProfileIndex(await response.json()).filter(
+      (profile) => profile.webgpuAvailable,
+    );
+  } catch (error) {
+    console.warn("Failed to load bundled GPU profiles:", error);
+    bundledGpuProfiles = [];
+  }
+}
+
+async function refreshStoredProxyProfiles() {
+  const profiles = currentConfig?.proxy?.profiles;
+  if (!Array.isArray(profiles) || profiles.length === 0) {
+    return false;
+  }
+
+  const nextConfig = normalizeConfig(JSON.parse(JSON.stringify(currentConfig)));
+  const refreshedProfiles = [];
+  const renames = new Map();
+
+  for (const profile of profiles) {
+    try {
+      const response = await sendRuntimeMessage({
+        type: "prepare-proxy-profile",
+        profile,
+      });
+      const prepared = assertRuntimeResponse(
+        response,
+        "Invalid proxy profile",
+      ).profile;
+      if (!prepared || typeof prepared !== "object") {
+        throw new Error("Invalid proxy profile");
+      }
+      refreshedProfiles.push(prepared);
+      if (profile.name && prepared.name && profile.name !== prepared.name) {
+        renames.set(profile.name, prepared.name);
+      }
+    } catch (error) {
+      console.warn("Failed to refresh proxy profile metadata:", error);
+      refreshedProfiles.push(profile);
+    }
+  }
+
+  nextConfig.proxy.profiles = refreshedProfiles;
+  const renameProfile = (name) => renames.get(name) || name;
+  nextConfig.proxy.activeProfile = renameProfile(nextConfig.proxy.activeProfile);
+  nextConfig.proxy.fallbackProfiles = nextConfig.proxy.fallbackProfiles.map(
+    renameProfile,
+  );
+  nextConfig.proxy.domainRoutes = nextConfig.proxy.domainRoutes.map((route) => ({
+    ...route,
+    profile: renameProfile(route.profile),
+  }));
+
+  const normalizedNextConfig = normalizeConfig(nextConfig);
+  if (serializeConfig(normalizedNextConfig) === serializeConfig(currentConfig)) {
+    return false;
+  }
+
+  try {
+    const response = await sendRuntimeMessage({
+      type: "update-config",
+      config: normalizedNextConfig,
+    });
+    assertRuntimeResponse(response, "Failed to save proxy profile metadata");
+    currentConfig = normalizedNextConfig;
+    return true;
+  } catch (error) {
+    console.warn("Failed to save refreshed proxy profile metadata:", error);
+    return false;
+  }
 }
 
 function populateForm() {
@@ -68,13 +152,19 @@ function populateForm() {
   }
 
   document.getElementById("webgl-preset").value = currentConfig.webgl.preset;
+  document.getElementById("webgl-mode").value = currentConfig.webgl.mode;
+  document.getElementById("webgl-compatibility-whitelist").value =
+    currentConfig.webgl.compatibilityWhitelist;
+  document.getElementById("webgl-strict-whitelist").value =
+    currentConfig.webgl.strictWhitelist;
+  populateGpuProfileOptions();
+  renderGpuProfileStatus();
   document.getElementById("canvas-noise-level").value =
     currentConfig.canvas.noiseLevel;
   const timezoneSelect = document.getElementById("timezone-select");
   updateTimeZoneSelectLabels(timezoneSelect);
   timezoneSelect.value = currentConfig.timezone.name;
-  document.getElementById("useragent-preset").value =
-    currentConfig.useragent.preset;
+  populateUserAgentOptions();
   document.getElementById("language-preset").value =
     currentConfig.language.preset;
   document.getElementById("webrtc-policy").value = currentConfig.webrtc.policy;
@@ -129,10 +219,50 @@ function populateForm() {
     currentConfig.proxy.syncLanguage;
 
   updateUserAgentString();
+  renderCurlProfileStatus();
   populateProxyProfiles();
   updateProxyRoutingModeUi();
   renderProxyRuntimeStatus();
   renderProxyDiagnostics();
+}
+
+function renderGpuProfileStatus() {
+  const status = document.getElementById("gpu-profile-status");
+  const clearButton = document.getElementById("clear-gpu-profile");
+  if (!status || !clearButton) return;
+  const summary = getGpuProfileSummary(currentConfig && currentConfig.gpuProfile);
+  clearButton.disabled = !summary;
+  if (!summary) {
+    status.textContent = "No combined profile loaded.";
+    return;
+  }
+  const surfaceText =
+    summary.webgpuAvailable === null
+      ? `${summary.webglSurfaces} WebGL surface(s), WebGPU not included`
+      : `${summary.webglSurfaces} WebGL surface(s), ${summary.webgpuLimits} WebGPU limits`;
+  status.textContent = `${summary.id} · ${summary.vendor}${summary.family ? ` ${summary.family}` : ""} · ${surfaceText}`;
+}
+
+function populateGpuProfileOptions() {
+  const select = document.getElementById("gpu-profile-preset");
+  if (!select) return;
+  const selectedId = currentConfig?.gpuProfile?.id || "";
+  const options = [new Option("No bundled profile", "")];
+  for (const profile of bundledGpuProfiles) {
+    const label = [
+      profile.id,
+      profile.gpuVendor,
+      profile.gpuFamily,
+      profile.screen,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    options.push(new Option(label, profile.id, false, profile.id === selectedId));
+  }
+  if (selectedId && !bundledGpuProfiles.some((entry) => entry.id === selectedId)) {
+    options.push(new Option(`${selectedId} · Imported profile`, selectedId, true, true));
+  }
+  select.replaceChildren(...options);
 }
 
 function getProxyEndpoint(profile) {
@@ -343,12 +473,22 @@ function collectForm(options = {}) {
   }
 
   currentConfig.webgl.preset = document.getElementById("webgl-preset").value;
+  currentConfig.webgl.mode = document.getElementById("webgl-mode").value;
+  currentConfig.webgl.compatibilityWhitelist = document.getElementById(
+    "webgl-compatibility-whitelist",
+  ).value;
+  currentConfig.webgl.strictWhitelist = document.getElementById(
+    "webgl-strict-whitelist",
+  ).value;
   currentConfig.canvas.noiseLevel =
     document.getElementById("canvas-noise-level").value;
   currentConfig.timezone.name =
     document.getElementById("timezone-select").value;
-  currentConfig.useragent.preset =
-    document.getElementById("useragent-preset").value;
+  const selectedUserAgent = parseUserAgentSelection(
+    document.getElementById("useragent-preset").value,
+  );
+  currentConfig.useragent.preset = selectedUserAgent.preset;
+  currentConfig.useragent.curlProfile = selectedUserAgent.curlProfile;
   currentConfig.language.preset =
     document.getElementById("language-preset").value;
   currentConfig.webrtc.policy = document.getElementById("webrtc-policy").value;
@@ -556,9 +696,18 @@ function scrollToSection(sectionId) {
 }
 
 function updateUserAgentString() {
-  const preset = document.getElementById("useragent-preset").value;
+  const selectedUserAgent = parseUserAgentSelection(
+    document.getElementById("useragent-preset").value,
+  );
+  const previewConfig = {
+    useragent: selectedUserAgent,
+  };
+  const curlProfile = getCurlProfileForConfig(
+    previewConfig,
+    curlProfileCatalog,
+  );
   document.getElementById("useragent-string").value =
-    USER_AGENT_STRINGS[preset] || "";
+    curlProfile?.userAgent || USER_AGENT_STRINGS[selectedUserAgent.preset] || "";
 }
 
 function populateProxyProfiles() {
@@ -955,6 +1104,80 @@ async function refreshAdblockStatus() {
   }
 }
 
+async function refreshCurlProfileStatus() {
+  try {
+    const response = await sendRuntimeMessage({ type: "get-curl-profile-status" });
+    assertRuntimeResponse(response, "curl-impersonate profile status is unavailable");
+    curlProfileStatus = response.status;
+    curlProfileCatalog = normalizeCurlProfileCatalog(response.catalog);
+  } catch (error) {
+    curlProfileStatus = null;
+    curlProfileCatalog = normalizeCurlProfileCatalog(null);
+  }
+}
+
+function populateUserAgentOptions() {
+  const userAgentSelect = document.getElementById("useragent-preset");
+  if (!userAgentSelect) return;
+  const options = getUserAgentSelectionOptions(
+    curlProfileCatalog,
+    currentConfig.useragent,
+    USER_AGENT_STRINGS,
+  );
+  userAgentSelect.replaceChildren(
+    ...options.map((option) => new Option(option.label, option.value)),
+  );
+  userAgentSelect.value = getUserAgentSelectionValue(
+    curlProfileCatalog,
+    currentConfig.useragent.preset,
+    currentConfig.useragent.curlProfile,
+  );
+}
+
+function renderCurlProfileStatus() {
+  const status = document.getElementById("curl-profile-status");
+  if (!status) return;
+  if (!curlProfileStatus) {
+    status.textContent = "Status unavailable";
+    return;
+  }
+  const updated = curlProfileStatus.lastUpdate
+    ? new Date(curlProfileStatus.lastUpdate).toLocaleString()
+    : "bundled fallback profiles";
+  status.textContent = `${curlProfileStatus.profileCount || 0} browser/API profiles · ${updated}${
+    curlProfileStatus.error ? ` · ${curlProfileStatus.error}` : ""
+  }`;
+}
+
+async function updateCurlProfilesNow() {
+  const button = document.getElementById("update-curl-profiles");
+  button.disabled = true;
+  try {
+    const response = await sendRuntimeMessage({ type: "update-curl-profiles" });
+    if (!response || (!response.status && response.success === false)) {
+      throw new Error((response && response.error) || "Profile update failed");
+    }
+    curlProfileStatus = response.status;
+    if (response.status && response.status.profiles) {
+      curlProfileCatalog = normalizeCurlProfileCatalog(response.catalog);
+    }
+    populateUserAgentOptions();
+    updateUserAgentString();
+    renderCurlProfileStatus();
+    showToast(
+      response.updated ? "Updated curl-impersonate profiles" : "Profiles are current",
+      response.success === false ? "error" : "success",
+    );
+  } catch (error) {
+    await refreshCurlProfileStatus();
+    populateUserAgentOptions();
+    renderCurlProfileStatus();
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function renderAdblockStatus() {
   const status = document.getElementById("filter-update-status");
   if (!status) return;
@@ -1007,6 +1230,7 @@ function setupEventListeners() {
   for (const input of document.querySelectorAll("input, select, textarea")) {
     if (
       input.id === "import-file" ||
+      input.id === "gpu-profile-file" ||
       input.closest(".proxy-editor") ||
       input.closest(".proxy-route-editor") ||
       input.closest("#selftest-section")
@@ -1072,6 +1296,9 @@ function setupEventListeners() {
     .getElementById("update-filter-lists")
     .addEventListener("click", updateAdblockFiltersNow);
   document
+    .getElementById("update-curl-profiles")
+    .addEventListener("click", updateCurlProfilesNow);
+  document
     .getElementById("export-config")
     .addEventListener("click", exportConfig);
   document.getElementById("import-config").addEventListener("click", () => {
@@ -1084,6 +1311,91 @@ function setupEventListeners() {
       importConfig(file);
     }
   });
+  document.getElementById("import-gpu-profile").addEventListener("click", () => {
+    document.getElementById("gpu-profile-file").click();
+  });
+  document
+    .getElementById("gpu-profile-file")
+    .addEventListener("change", (event) => {
+      const file = event.target.files[0];
+      event.target.value = "";
+      if (file) importGpuProfile(file);
+    });
+  document
+    .getElementById("clear-gpu-profile")
+    .addEventListener("click", clearGpuProfile);
+  document
+    .getElementById("gpu-profile-preset")
+    .addEventListener("change", selectBundledGpuProfile);
+}
+
+async function selectBundledGpuProfile(event) {
+  const profileId = event.target.value;
+  if (!profileId) {
+    await clearGpuProfile();
+    return;
+  }
+  const assetPath = getGpuProfileAssetPath(profileId);
+  if (!assetPath) {
+    showToast("Invalid bundled GPU profile", "error");
+    return;
+  }
+  try {
+    const response = await fetch(chrome.runtime.getURL(assetPath));
+    if (!response.ok) throw new Error("Bundled GPU profile unavailable");
+    const profile = normalizeGpuProfile(await response.json());
+    if (!profile) throw new Error("Bundled GPU profile is invalid");
+    currentConfig.gpuProfile = profile;
+    renderGpuProfileStatus();
+    await saveOptionsConfig();
+    showToast(`GPU profile ${profileId} selected`, "success");
+  } catch (error) {
+    showToast(error.message, "error");
+    populateGpuProfileOptions();
+  }
+}
+
+function importGpuProfile(file) {
+  if (file.size > MAX_GPU_PROFILE_FILE_SIZE) {
+    showToast("GPU profile files must be smaller than 512 KB", "error");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = async (event) => {
+    try {
+      const parsed = JSON.parse(event.target.result);
+      const normalized = normalizeGpuProfile(parsed);
+      if (!normalized) {
+        throw new Error(
+          "Invalid profile. Import a ClearCote capture or an Apify Fingerprint Suite JSON export.",
+        );
+      }
+      currentConfig.gpuProfile = normalized;
+      renderGpuProfileStatus();
+      if (await saveOptionsConfig()) {
+        showToast(
+          normalized.webgpu
+            ? "WebGL/WebGPU profile imported"
+            : "Apify WebGL profile imported; WebGPU remains unprofiled",
+          "success",
+        );
+      }
+    } catch (error) {
+      console.error("Failed to import GPU profile:", error);
+      showToast(error.message || "Failed to import GPU profile", "error");
+    }
+  };
+  reader.onerror = () => showToast("Failed to read GPU profile", "error");
+  reader.readAsText(file);
+}
+
+async function clearGpuProfile() {
+  if (!currentConfig.gpuProfile) return;
+  currentConfig.gpuProfile = null;
+  renderGpuProfileStatus();
+  if (await saveOptionsConfig()) {
+    showToast("Combined GPU profile cleared", "success");
+  }
 }
 
 async function resetSettings() {

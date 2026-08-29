@@ -34,21 +34,61 @@ jobs:
       - name: Resolve release tag
         id: version
         run: |
+          VERSION=$(jq -r '.version' manifest.json)
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            TAG="${GITHUB_REF_NAME}"
           else
-            VERSION=$(jq -r '.version' manifest.json)
-            echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+            TAG="v${VERSION}"
           fi
+          if [ "$TAG" != "v${VERSION}" ]; then
+            echo "Release tag $TAG does not match manifest version $VERSION"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Package extension
+      - name: Decode extension signing key
+        env:
+          EXTENSION_KEY_B64: ${{ secrets.STEALTH_GUARD_EXTENSION_KEY_B64 }}
         run: |
-          zip -r stealth-guard.zip manifest.json background.js content-scripts guide icons lib options popup README.md BENCHMARKS.md LICENSE PRIVACY.md CHANGELOG.md
+          if [ -z "$EXTENSION_KEY_B64" ]; then
+            echo "Missing STEALTH_GUARD_EXTENSION_KEY_B64 repository secret"
+            exit 1
+          fi
+          printf '%s' "$EXTENSION_KEY_B64" | base64 --decode > extension-key.pem
+          chmod 600 extension-key.pem
+
+      - name: Package signed CRX and source ZIP
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          rm -rf build
+          mkdir -p build/extension
+          cp manifest.json background.js build/extension/
+          cp -R content-scripts icons lib options popup profiles build/extension/
+          CHROME_PATH=$(node --input-type=module -e 'import { chromium } from "playwright-core"; process.stdout.write(chromium.executablePath())')
+          test -x "$CHROME_PATH"
+          xvfb-run --auto-servernum -- "$CHROME_PATH" \
+            --no-sandbox \
+            --disable-gpu \
+            --no-message-box \
+            --pack-extension="$GITHUB_WORKSPACE/build/extension" \
+            --pack-extension-key="$GITHUB_WORKSPACE/extension-key.pem"
+          mv build/extension.crx "build/stealth-guard-${RELEASE_TAG}.crx"
+          node tools/generate-update-manifest.mjs \
+            --key extension-key.pem \
+            --manifest build/extension/manifest.json \
+            --codebase "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/stealth-guard-${RELEASE_TAG}.crx" \
+            --output build/updates.xml
+          git archive --format=zip --output="stealth-guard-${RELEASE_TAG}-source.zip" "$GITHUB_SHA"
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Release ${{ steps.version.outputs.tag }}
-          files: stealth-guard.zip
+          files: |
+            build/stealth-guard-${{ steps.version.outputs.tag }}.crx
+            build/updates.xml
+            stealth-guard-${{ steps.version.outputs.tag }}-source.zip
           generate_release_notes: true

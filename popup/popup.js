@@ -7,6 +7,8 @@ let pendingReloadTimeout = null;
 let currentProxyRuntimeStatus = null;
 let currentBlockedCount = 0;
 let currentBlockedEntries = [];
+let curlProfileCatalog = normalizeCurlProfileCatalog(null);
+let bundledGpuProfiles = [];
 
 const POPUP_RELOAD_DEBOUNCE_MS = 250;
 const TIMEZONE_LABEL_REFRESH_MS = 60 * 1000;
@@ -20,11 +22,16 @@ setInterval(() => {
 
 async function initializePopup() {
   try {
-    [currentConfig, currentTab, currentProxyRuntimeStatus] = await Promise.all([
+    const [config, tab, proxyStatus] = await Promise.all([
       loadRuntimeConfig(),
       queryCurrentTab(),
       loadProxyRuntimeStatus(),
+      loadCurlProfileCatalog(),
+      loadBundledGpuProfiles(),
     ]);
+    currentConfig = config;
+    currentTab = tab;
+    currentProxyRuntimeStatus = proxyStatus;
     currentSessionHostname = getTabHostname(currentTab);
     renderPopup();
     setupEventListeners();
@@ -33,6 +40,33 @@ async function initializePopup() {
     console.error("Failed to initialize popup:", error);
     document.body.textContent =
       "Failed to load settings. Reload the extension and try again.";
+  }
+}
+
+async function loadBundledGpuProfiles() {
+  try {
+    const response = await fetch(
+      chrome.runtime.getURL(`${GPU_PROFILE_BUNDLE_PATH}/index.json`),
+    );
+    if (!response.ok) throw new Error("Bundled GPU profile index unavailable");
+    bundledGpuProfiles = normalizeGpuProfileIndex(await response.json()).filter(
+      (profile) => profile.webgpuAvailable,
+    );
+  } catch (error) {
+    console.warn("Failed to load bundled GPU profiles:", error);
+    bundledGpuProfiles = [];
+  }
+}
+
+async function loadCurlProfileCatalog() {
+  try {
+    const response = await sendRuntimeMessage({
+      type: "get-curl-profile-status",
+    });
+    assertRuntimeResponse(response, "Failed to load browser/API profiles");
+    curlProfileCatalog = normalizeCurlProfileCatalog(response.catalog);
+  } catch (error) {
+    curlProfileCatalog = normalizeCurlProfileCatalog(null);
   }
 }
 
@@ -100,14 +134,20 @@ function renderPopup() {
   const timezoneSelect = document.getElementById("timezone-quick-select");
   updateTimeZoneSelectLabels(timezoneSelect);
   setSelectValue(timezoneSelect, currentConfig.timezone.name);
+  populateUserAgentQuickSelect();
   setSelectValue(
     document.getElementById("useragent-quick-select"),
-    currentConfig.useragent.preset,
+    getUserAgentSelectionValue(
+      curlProfileCatalog,
+      currentConfig.useragent.preset,
+      currentConfig.useragent.curlProfile,
+    ),
   );
   setSelectValue(
     document.getElementById("language-quick-select"),
     currentConfig.language.preset,
   );
+  populateGpuProfileQuickSelect();
 
   renderProxyStatus();
   renderTrackerStatus();
@@ -118,32 +158,76 @@ function renderPopup() {
   renderSessionList();
 }
 
+function populateGpuProfileQuickSelect() {
+  const select = document.getElementById("gpu-profile-quick-select");
+  if (!select) return;
+  const selectedId = currentConfig?.gpuProfile?.id || "";
+  const options = [new Option("No GPU profile", "")];
+  for (const profile of bundledGpuProfiles) {
+    const label = [profile.id, profile.gpuVendor, profile.gpuFamily]
+      .filter(Boolean)
+      .join(" · ");
+    options.push(new Option(label, profile.id));
+  }
+  if (selectedId && !bundledGpuProfiles.some((entry) => entry.id === selectedId)) {
+    options.push(new Option(`${selectedId} · Imported profile`, selectedId));
+  }
+  select.replaceChildren(...options);
+  setSelectValue(select, selectedId);
+}
+
+function populateUserAgentQuickSelect() {
+  const select = document.getElementById("useragent-quick-select");
+  if (!select) return;
+  const options = getUserAgentSelectionOptions(
+    curlProfileCatalog,
+    currentConfig.useragent,
+    USER_AGENT_STRINGS,
+  );
+  select.replaceChildren(
+    ...options.map((option) => new Option(option.label, option.value)),
+  );
+}
+
 function renderTrackerStatus() {
   const trackerStatus = document.getElementById("tracker-status");
   const hostname = getTabHostname(currentTab);
-  const paused = hostname && isDomainAllowlisted(
-    hostname,
-    currentConfig.tracker.whitelist,
+  const compatibilityMode = Boolean(
+    hostname && isAdblockCompatibilityHostname(hostname),
+  );
+  const paused = Boolean(
+    hostname && isDomainAllowlisted(hostname, currentConfig.tracker.whitelist),
   );
   trackerStatus.textContent = !currentConfig.tracker.enabled
     ? "Off"
     : paused
       ? "Paused here"
-      : currentBlockedCount
-        ? `${currentBlockedCount} blocked`
-        : "Enabled";
-  const cosmeticPaused = hostname && isDomainAllowlisted(
-    hostname,
-    currentConfig.tracker.cosmeticWhitelist,
+      : compatibilityMode
+        ? currentBlockedCount
+          ? `${currentBlockedCount} blocked · Compatibility`
+          : "Compatibility mode"
+        : currentBlockedCount
+          ? `${currentBlockedCount} blocked`
+          : "Enabled";
+  const cosmeticPaused = Boolean(
+    hostname &&
+      isDomainAllowlisted(hostname, currentConfig.tracker.cosmeticWhitelist),
   );
   const siteButton = document.getElementById("toggle-adblock-site");
   const cosmeticButton = document.getElementById("toggle-cosmetic-site");
   const pickerButton = document.getElementById("block-element");
   for (const button of [siteButton, cosmeticButton, pickerButton]) {
-    button.disabled = !hostname || !currentConfig.enabled || !currentConfig.tracker.enabled;
+    button.disabled =
+      !hostname ||
+      !currentConfig.enabled ||
+      !currentConfig.tracker.enabled;
   }
-  siteButton.textContent = paused ? "Resume ads on this site" : "Pause ads on this site";
-  cosmeticButton.textContent = cosmeticPaused ? "Hide filtered items" : "Show hidden items";
+  siteButton.textContent = paused
+    ? "Resume ads on this site"
+    : "Pause ads on this site";
+  cosmeticButton.textContent = cosmeticPaused
+    ? "Hide filtered items"
+    : "Show hidden items";
 }
 
 function renderTrackerDetails() {
@@ -498,9 +582,15 @@ function setupEventListeners() {
     });
 
   document
+    .getElementById("gpu-profile-quick-select")
+    .addEventListener("change", selectBundledGpuProfile);
+
+  document
     .getElementById("useragent-quick-select")
     .addEventListener("change", async (event) => {
-      currentConfig.useragent.preset = event.target.value;
+      const selectedUserAgent = parseUserAgentSelection(event.target.value);
+      currentConfig.useragent.preset = selectedUserAgent.preset;
+      currentConfig.useragent.curlProfile = selectedUserAgent.curlProfile;
       await saveCurrentConfig();
     });
 
@@ -571,6 +661,30 @@ function setupEventListeners() {
   document
     .getElementById("session-list")
     .addEventListener("click", handleSessionAction);
+}
+
+async function selectBundledGpuProfile(event) {
+  const profileId = event.target.value;
+  if (!profileId) {
+    currentConfig.gpuProfile = null;
+    renderPopup();
+    await saveCurrentConfig();
+    return;
+  }
+  const assetPath = getGpuProfileAssetPath(profileId);
+  if (!assetPath) return;
+  try {
+    const response = await fetch(chrome.runtime.getURL(assetPath));
+    if (!response.ok) throw new Error("Bundled GPU profile unavailable");
+    const profile = normalizeGpuProfile(await response.json());
+    if (!profile) throw new Error("Bundled GPU profile is invalid");
+    currentConfig.gpuProfile = profile;
+    renderPopup();
+    await saveCurrentConfig();
+  } catch (error) {
+    console.error("Failed to select GPU profile:", error);
+    renderPopup();
+  }
 }
 
 async function toggleCurrentSiteAllowlist() {

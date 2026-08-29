@@ -6,11 +6,19 @@
   }
   window.__STEALTH_GUARD_INJECTED__ = true;
 
-  if (isCloudflareChallengeHostname(window.location.hostname)) {
+  if (
+    isCloudflareChallengeHostname(window.location.hostname) ||
+    isDataDomeChallengeHostname(window.location.hostname)
+  ) {
     return;
   }
 
-  let config = createContentConfig(DEFAULT_CONFIG, window.location.hostname);
+  let curlProfileCatalog = normalizeCurlProfileCatalog(null);
+  let config = createContentConfig(
+    DEFAULT_CONFIG,
+    window.location.hostname,
+    curlProfileCatalog,
+  );
   let debugEnabled = config.notifications.enabled;
   const bridge = {
     configEvent: `stealth-guard-config-${createPrivateToken()}`,
@@ -84,10 +92,60 @@
   const debugLog = (...args) => debug("log", ...args);
   const debugWarn = (...args) => debug("warn", ...args);
 
+  function requestNativeWindowGeometryRepair() {
+    try {
+      if (window !== window.top) return;
+
+      const innerWidth = Number(window.innerWidth);
+      const innerHeight = Number(window.innerHeight);
+      const outerWidth = Number(window.outerWidth);
+      const outerHeight = Number(window.outerHeight);
+      const invalidWidth =
+        !Number.isFinite(outerWidth) ||
+        outerWidth <= 0 ||
+        (Number.isFinite(innerWidth) && outerWidth < innerWidth);
+      const invalidHeight =
+        !Number.isFinite(outerHeight) ||
+        outerHeight <= 0 ||
+        (Number.isFinite(innerHeight) && outerHeight < innerHeight);
+      if (!invalidWidth && !invalidHeight) return;
+
+      const width = Math.max(
+        1,
+        Number.isFinite(innerWidth) ? innerWidth + 1 : 0,
+        Number.isFinite(outerWidth) && outerWidth > 0 ? outerWidth : 0,
+      );
+      const height = Math.max(
+        1,
+        Number.isFinite(innerHeight) ? innerHeight + 1 : 0,
+        Number.isFinite(outerHeight) && outerHeight > 0 ? outerHeight : 0,
+      );
+      chrome.runtime.sendMessage(
+        { type: "repair-window-geometry", width, height },
+        () => {
+          getRuntimeLastError();
+        },
+      );
+    } catch (error) {
+      if (!isExtensionContextInvalidated(error)) {
+        debugWarn(
+          "[Stealth Guard] Native window geometry repair failed:",
+          error,
+        );
+      }
+    }
+  }
+
+  requestNativeWindowGeometryRepair();
+  window.addEventListener("load", requestNativeWindowGeometryRepair, {
+    once: true,
+    capture: true,
+  });
+
   function loadStoredContentConfig() {
     return new Promise((resolve) => {
       try {
-        chrome.storage.local.get(STORAGE_KEY, (result) => {
+        chrome.storage.local.get([STORAGE_KEY, CURL_PROFILE_CACHE_KEY], (result) => {
           const error = getRuntimeLastError();
           if (error) {
             if (isExtensionContextInvalidated(error)) {
@@ -101,10 +159,14 @@
             resolve(config);
             return;
           }
+          curlProfileCatalog = normalizeCurlProfileCatalog(
+            result && result[CURL_PROFILE_CACHE_KEY],
+          );
           resolve(
             createContentConfig(
               result && result[STORAGE_KEY],
               window.location.hostname,
+              curlProfileCatalog,
             ),
           );
         });
@@ -119,8 +181,15 @@
     });
   }
 
-  function applyTrustedContentConfig(nextConfig) {
-    config = createContentConfig(nextConfig, window.location.hostname);
+  function applyTrustedContentConfig(nextConfig, nextProfileCatalog) {
+    if (nextProfileCatalog) {
+      curlProfileCatalog = normalizeCurlProfileCatalog(nextProfileCatalog);
+    }
+    config = createContentConfig(
+      nextConfig,
+      window.location.hostname,
+      curlProfileCatalog,
+    );
     debugEnabled = config.notifications.enabled;
     window.dispatchEvent(
       new CustomEvent(bridge.configEvent, {
@@ -190,7 +259,7 @@
   runtimeMessageListener = (request, sender, sendResponse) => {
     if (!active) return;
     if (request && request.type === "config-updated") {
-      applyTrustedContentConfig(request.config);
+      applyTrustedContentConfig(request.config, request.profileCatalog);
     }
     if (request && request.type === "run-self-test") {
       requestMainWorldDiagnostics().then((snapshot) => {

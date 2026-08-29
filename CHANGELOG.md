@@ -11,6 +11,7 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - Language and locale alignment across Navigator, default Intl constructors, Accept-Language, and optional proxy-country synchronization.
 - Automatic AdGuard-compatible Base, Tracking Protection, and Cookie Notices subscriptions with local caching, network/cosmetic filtering, user rules, per-site recovery controls, an element picker, and per-tab counts.
 - Eight-hour scheduled filter refreshes plus a YouTube freshness check when enabled lists are more than 45 minutes old.
+- Curated Chrome desktop 131/latest, Android Chrome 131, Edge 101, and Safari 18.4/26 browser/API profiles from curl-impersonate wrappers, cached locally and refreshed from GitHub every four hours; the Firefox target is not surfaced because its wrapper does not provide a User-Agent header.
 - A local Guide & Self-Test page with live identity diagnostics and the repeatable detector suite; CreepJS remains the recurring reference benchmark.
 - Explicit protect-all, bypass-selected, and protect-selected split-tunneling modes with per-site PAC routing.
 - Proxy-location synchronized timezone and permission-preserving coarse HTML geolocation protection.
@@ -18,24 +19,44 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - Pull-request CI for syntax, manifest integrity, and 100% deterministic-core coverage.
 - Dependabot, contribution guidance, security policy, and structured issue templates.
 - Manifest consistency validation and test coverage for session/cookie helpers.
+- Dedicated and shared worker identity bootstrapping for consistent Navigator, locale, timezone, and WebGL values.
+- Worker identity protection now has its own enable toggle and editable compatibility allowlist, with Telegram Web kept safe by default.
+- Expanded the default Worker compatibility allowlist for major real-time, collaborative, graphics, and media web apps, while preserving custom user allowlists.
+- ClearCote-profile import for one coherent WebGL/WebGPU device profile, with native-capability clamping and compatibility-site bypass.
+- Apify Fingerprint Suite JSON import support, including generator presets for Windows Edge, macOS Chrome/Safari, iOS Safari, and Android Chrome.
+- GitHub Release packaging for signed CRX updates, a stable browser update manifest, and a source ZIP download.
 
 ### Changed
 
+- Adblock request matching now reuses normalized request context and scans block candidates once, reducing repeated per-request tokenization and hostname work.
 - Method hooks now install from their property descriptors so writable, enumerable, and configurable flags remain intact across the expanded protection surface.
 - Split isolated-world injection from a directly testable MAIN-world protection runtime.
 - Replaced permissive deep merging with explicit-schema config normalization.
 - Consolidated browser callback errors, allowlist operations, proxy profile indexing, and the serialized session lifecycle.
 - Reduced background and MAIN-world protection code while preserving direct classic-script loading.
 - Browser patches now preserve property descriptors and avoid mutating caller-owned WebGL/WebGPU inputs.
-- WebGL profiles now keep WebGL 1/2 versions, generic GPU identity, capability caps, and shader precision internally consistent while applying stable per-page readback and canvas-export noise.
+- WebGL protection now defaults to strict deterministic readback, export, and extension-order noise, with a curated per-site compatibility allowlist.
+- Bundled ClearCote GPL profiles and imported combined GPU profiles now supply WebGL parameter/precision/extension data and WebGPU adapter metadata/limits only on strict sites.
+- WebGL masked vendor values now share the unmasked vendor family, avoiding false mismatch reports from CreepJS-style consistency checks across Chromium and Safari profiles.
+- Font measurements now remain consistent across reads and suppress OS-incompatible font probes so User-Agent and font analysis stay aligned.
 - Expanded `npm run check` across startup recovery, rollback, browser hooks, every protection surface, and popup/options success and failure flows.
 - Configuration loads, saves, and imports now normalize malformed values to the safe schema.
 - Popup and options surfaces have improved focus visibility, responsive styling, and assistive-technology labels.
 - Popup diagnostics now summarize effective User-Agent, language, timezone, WebRTC, proxy, and tracker state for the current site.
+- User-Agent headers and MAIN-world navigator/client-hint values can share the selected modern curl-impersonate profile, while native TLS and HTTP/2 remain browser-owned.
+- User-Agent and modern browser/API choices now use one combined identity selector.
 - Session operations verify the target tab before mutating cookies or web storage.
 
 ### Fixed
 
+- WebGPU command descriptors and upload buffers now remain native so active
+  WebGPU applications such as vgpu.sh keep rendering correctly while adapter
+  fingerprint surfaces remain protected.
+- X Chat now keeps native Worker and SharedWorker bootstrapping so its real-time
+  conversation state can load and synchronize normally.
+- Facebook pages now keep native Worker and SharedWorker bootstrapping so feed,
+  video-prefetch, and other background page features continue loading normally.
+- Telegram Web now keeps its native Worker and SharedWorker URL/sharing semantics so live message state can synchronize normally.
 - YouTube player responses now remove first-party video-ad payloads before playback, with a server-side ad-segment skip fallback that still respects site and tracker allowlists.
 - Shared Chrome API calls preserve their owning object, preventing `Illegal invocation` failures from storage, tabs, proxy, privacy, cookies, and runtime methods.
 - MAIN-world config no longer receives proxy profiles or unknown imported fields.
@@ -46,10 +67,13 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - Concurrent session saves retain the newest 20 entries without producing a dangling active-session ID.
 - Failed background startup retries cleanly, and failed browser-policy updates restore persisted and live configuration.
 - Timezone spoofing now handles DST offsets, seconds/milliseconds setters, live timezone changes, and leaves `Date.prototype` free of extension-only properties.
-- WebGL no longer corrupts application upload buffers with per-call randomness; readback protection is repeatable within a page and covered in both WebGL versions.
-- Apple profiles no longer claim a specific processor model, and WebGL report hashes rotate across page loads without changing between repeated reads in one page.
+- Compatibility-mode WebGL no longer changes application rendering output, canvas exports, capability detection, or readback buffers, preventing compatibility failures in graphics editors such as Figma.
+- Apple profiles no longer claim a specific processor model, and WebGL profiles keep masked and unmasked GPU identity families coherent.
 - Editing a proxy host no longer retains stale location metadata.
 - Malformed settings imports no longer crash the options page before background validation.
+- DataDome CAPTCHA delivery frames now remain native like Cloudflare challenge frames.
+- Invalid native browser window dimensions now get a bounded top-level resize request, while valid geometry remains native and untouched; this prevents CreepJS zero/outer-smaller-than-inner consistency failures where the browser permits resizing.
+- AdGuard rules with trailing wildcard domain scopes no longer lose their scope and block first-party application bundles such as Prisjakt and Blocket's `/index.js` resources.
 
 ### Removed
 
