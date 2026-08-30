@@ -49,6 +49,8 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Fixed
 
+- Content-script cosmetic filtering now loads its shared runtime helpers in
+  the production manifest bundle and waits for background initialization.
 - WebGPU command descriptors and upload buffers now remain native so active
   WebGPU applications such as vgpu.sh keep rendering correctly while adapter
   fingerprint surfaces remain protected.

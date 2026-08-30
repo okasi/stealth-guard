@@ -68,6 +68,7 @@ assert(contentScript.all_frames === true, "content script must run in every fram
 assertSameArray(
   contentScript.js,
   [
+    "lib/runtime.js",
     "lib/filterLists.js",
     "lib/domainFilter.js",
     "lib/gpuProfiles.js",

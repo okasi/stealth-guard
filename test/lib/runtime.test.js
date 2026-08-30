@@ -6,6 +6,7 @@ const {
   assertRuntimeResponse,
   callChromeApi,
   getChromeError,
+  isExtensionContextInvalidated,
   getTimeZoneGmtOffsetLabel,
   getTimeZoneShortName,
   loadRuntimeConfig,
@@ -47,6 +48,22 @@ test("Chrome callback helpers normalize success and error responses", async () =
   await expect(sendRuntimeMessage({ type: "ping" })).rejects.toThrow("closed");
   chrome.runtime = null;
   expect(getChromeError()).toBeNull();
+});
+
+test("runtime helpers tolerate an invalidated extension context", () => {
+  const contextError = new Error("Extension context invalidated.");
+  globalThis.chrome = {};
+  Object.defineProperty(chrome, "runtime", {
+    get() {
+      throw contextError;
+    },
+  });
+
+  expect(getChromeError()).toBe(contextError);
+  expect(isExtensionContextInvalidated(contextError)).toBe(true);
+  expect(isExtensionContextInvalidated(new Error("other error"))).toBe(false);
+  expect(isExtensionContextInvalidated({ message: "" })).toBe(false);
+  expect(isExtensionContextInvalidated(null)).toBe(false);
 });
 
 test("assertRuntimeResponse returns successes and rejects missing or failed responses", () => {

@@ -10,6 +10,7 @@ import { chromium } from "playwright-core";
 const require = createRequire(import.meta.url);
 const { DEFAULT_CONFIG } = require("../lib/config.js");
 const root = resolve(import.meta.dirname, "..");
+const extensionRoot = "https://stealth-guard.test/";
 const TEST_COMPATIBILITY_CONFIG = structuredClone(DEFAULT_CONFIG);
 TEST_COMPATIBILITY_CONFIG.webgl.mode = "compatibility";
 TEST_COMPATIBILITY_CONFIG.webgl.strictWhitelist = "";
@@ -37,6 +38,9 @@ function readSource(path) {
   return readFileSync(join(root, path), "utf8");
 }
 
+const contentScriptFiles = JSON.parse(readSource("manifest.json"))
+  .content_scripts[0].js;
+
 function setChecked(page, selector, checked) {
   return page.$eval(
     selector,
@@ -48,23 +52,35 @@ function setChecked(page, selector, checked) {
   );
 }
 
-const protectionSources = [
-  "lib/filterLists.js",
-  "lib/domainFilter.js",
-  "lib/gpuProfiles.js",
-  "lib/config.js",
-  "lib/curlProfiles.js",
-  "content-scripts/main.js",
-  "content-scripts/injector.js",
-]
+async function routeExtensionAssets(context) {
+  await context.route(`${extensionRoot}**`, async (route) => {
+    const assetPath = resolve(
+      root,
+      "." + decodeURIComponent(new URL(route.request().url()).pathname),
+    );
+    if (
+      (assetPath !== root && !assetPath.startsWith(root + "/")) ||
+      !existsSync(assetPath)
+    ) {
+      await route.fulfill({ status: 404, body: "Not found" });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: assetPath.endsWith(".json")
+        ? "application/json"
+        : "application/octet-stream",
+      body: readFileSync(assetPath),
+    });
+  });
+}
+
+const protectionSources = contentScriptFiles
+  .filter((file) => file !== "content-scripts/adblock.js")
   .map(readSource)
   .join("\n");
 
-const adblockContentSources = [
-  "lib/runtime.js",
-  "lib/domainFilter.js",
-  "content-scripts/adblock.js",
-]
+const contentScriptSources = contentScriptFiles
   .map(readSource)
   .join("\n");
 
@@ -253,6 +269,7 @@ function uiMockInitScript(config, options = {}) {
         failTabQuery: false,
         proxyCredentials: {},
         proxyHistory: [],
+        tabMessages: [],
         proxyStatus: {
           state: "idle",
           profile: null,
@@ -563,7 +580,7 @@ function uiMockInitScript(config, options = {}) {
             queueMicrotask(() => callback(responseFor(message)));
           },
           getURL(path) {
-            return path;
+            return mockOptions.extensionRoot + path;
           },
           openOptionsPage() {
             state.openedOptions++;
@@ -604,6 +621,7 @@ function uiMockInitScript(config, options = {}) {
           },
           sendMessage(tabId, message, options, callback) {
             if (typeof options === "function") callback = options;
+            state.tabMessages.push({ tabId, message: structuredClone(message) });
             callback(
               message.type === "run-self-test"
                 ? {
@@ -628,6 +646,7 @@ function uiMockInitScript(config, options = {}) {
     }.toString()})(${JSON.stringify(config)}, ${JSON.stringify({
       tabUrl: "https://www.example.com/account",
       ...options,
+      extensionRoot,
     })});
   `;
 }
@@ -2159,30 +2178,26 @@ async function testCosmeticFilteringAndElementPicker(browser, port) {
   const context = await browser.newContext();
   const pageErrors = [];
   await context.addInitScript({
+    content: protectionInitScript(DEFAULT_CONFIG),
+  });
+  await context.addInitScript({
     content: `
       window.__adblockMessages = [];
-      window.__adblockListeners = [];
-      Object.assign(window.chrome || (window.chrome = {}), {
-        runtime: {
-          lastError: null,
-          onMessage: {
-            addListener(listener) { window.__adblockListeners.push(listener); }
-          },
-          sendMessage(message, callback) {
-            window.__adblockMessages.push(structuredClone(message));
-            if (message.type === "get-cosmetic-rules") {
-              callback({
-                success: true,
-                enabled: true,
-                selectors: [".ad-banner"],
-                youtubeEnhancements: false,
-              });
-            } else {
-              callback({ success: true });
-            }
-          }
+      window.__adblockListeners = window.__sgRuntimeListeners;
+      const nativeSendMessage = window.chrome.runtime.sendMessage;
+      window.chrome.runtime.sendMessage = (message, callback) => {
+        window.__adblockMessages.push(structuredClone(message));
+        if (message.type === "get-cosmetic-rules") {
+          callback({
+            success: true,
+            enabled: true,
+            selectors: [".ad-banner"],
+            youtubeEnhancements: false,
+          });
+          return;
         }
-      });
+        nativeSendMessage.call(window.chrome.runtime, message, callback);
+      };
     `,
   });
   await context.route(`http://site.test:${port}/adblock-test`, (route) =>
@@ -2204,7 +2219,7 @@ async function testCosmeticFilteringAndElementPicker(browser, port) {
     pick.style.marginTop = "120px";
     document.body.append(ad, pick);
   });
-  await page.addScriptTag({ content: adblockContentSources });
+  await page.addScriptTag({ content: contentScriptSources });
   const cosmeticState = await page.evaluate(() => ({
     messages: window.__adblockMessages,
     listeners: window.__adblockListeners.length,
@@ -2220,11 +2235,9 @@ async function testCosmeticFilteringAndElementPicker(browser, port) {
     () => getComputedStyle(document.querySelector(".ad-banner")).display === "none",
   );
   await page.evaluate(() => {
-    window.__adblockListeners[0](
-      { type: "start-element-picker" },
-      {},
-      () => {},
-    );
+    for (const listener of window.__sgRuntimeListeners) {
+      listener({ type: "start-element-picker" }, {}, () => {});
+    }
   });
   await page.hover("#pick-me");
   await page.click("#pick-me");
@@ -2378,6 +2391,7 @@ async function testYouTubeVideoAdSanitizer(browser) {
 
 async function testPopup(browser) {
   const context = await browser.newContext();
+  await routeExtensionAssets(context);
   await context.addInitScript({ content: uiMockInitScript(DEFAULT_CONFIG) });
   const page = await context.newPage();
   await page.goto(pathToFileURL(join(root, "popup/popup.html")).href);
@@ -2413,6 +2427,33 @@ async function testPopup(browser) {
   assert.equal(await page.locator("#toggle-adblock-site").isEnabled(), true);
   assert.equal(await page.locator("#toggle-cosmetic-site").isEnabled(), true);
   assert.equal(await page.locator("#block-element").isEnabled(), true);
+  await page.click("#toggle-adblock-site");
+  await page.waitForFunction(
+    () => window.__chromeState.config.tracker.whitelist === "*.example.com",
+  );
+  await page.click("#toggle-adblock-site");
+  await page.waitForFunction(
+    () => window.__chromeState.config.tracker.whitelist === "",
+  );
+  await page.click("#toggle-cosmetic-site");
+  await page.waitForFunction(
+    () =>
+      window.__chromeState.config.tracker.cosmeticWhitelist === "*.example.com",
+  );
+  await page.click("#toggle-cosmetic-site");
+  await page.waitForFunction(
+    () => window.__chromeState.config.tracker.cosmeticWhitelist === "",
+  );
+  const popupGpuOptions = page.locator("#gpu-profile-quick-select option");
+  assert((await popupGpuOptions.count()) > 1);
+  const popupGpuProfileId = await popupGpuOptions.nth(1).getAttribute("value");
+  await page.selectOption("#gpu-profile-quick-select", popupGpuProfileId);
+  await page.waitForFunction(
+    (profileId) => window.__chromeState.config.gpuProfile?.id === profileId,
+    popupGpuProfileId,
+  );
+  await page.selectOption("#gpu-profile-quick-select", "");
+  await page.waitForFunction(() => window.__chromeState.config.gpuProfile === null);
   await page.screenshot({ path: join(tmpdir(), "stealth-guard-popup.png") });
 
   await page.evaluate(() => {
@@ -2457,6 +2498,8 @@ async function testPopup(browser) {
     ),
   );
   assert(await page.evaluate(() => window.__chromeState.reloads > 0));
+  await setChecked(page, "#tracker-enabled", true);
+  await page.waitForFunction(() => window.__chromeState.config.tracker.enabled);
 
   await page.selectOption("#webgl-quick-select", "apple");
   await page.selectOption("#useragent-quick-select", "macos|safari184");
@@ -2501,11 +2544,12 @@ async function testPopup(browser) {
     3,
   );
   assert(
-    await page.evaluate(() =>
-      window.__chromeState.createdTabs.some(
-        (entry) =>
-          entry.url === "options/options.html?tabId=1#selftest-section",
-      ),
+    await page.evaluate(
+      (selfTestUrl) =>
+        window.__chromeState.createdTabs.some(
+          (entry) => entry.url === selfTestUrl,
+        ),
+      `${extensionRoot}options/options.html?tabId=1#selftest-section`,
     ),
   );
 
@@ -2527,9 +2571,16 @@ async function testPopup(browser) {
   );
   await page.click('button[data-action="delete"]');
   await page.waitForSelector(".session-list-empty");
+  await page.click("#block-element");
+  await page.waitForFunction(() =>
+    window.__chromeState.tabMessages.some(
+      (entry) => entry.message.type === "start-element-picker",
+    ),
+  );
   await context.close();
 
   const noSiteContext = await browser.newContext();
+  await routeExtensionAssets(noSiteContext);
   await noSiteContext.addInitScript({
     content: uiMockInitScript(DEFAULT_CONFIG, { tabUrl: null }),
   });
@@ -2554,6 +2605,7 @@ async function openProxyGroup(page, selector) {
 
 async function testOptions(browser) {
   const context = await browser.newContext({ acceptDownloads: true });
+  await routeExtensionAssets(context);
   await context.addInitScript({ content: uiMockInitScript(DEFAULT_CONFIG) });
   const page = await context.newPage();
   await page.goto(pathToFileURL(join(root, "options/options.html")).href);
@@ -2573,6 +2625,42 @@ async function testOptions(browser) {
     1,
   );
   assert.equal(optionsUserAgentOptions.some((label) => label.includes("Firefox")), false);
+  const optionsGpuOptions = page.locator("#gpu-profile-preset option");
+  assert((await optionsGpuOptions.count()) > 1);
+  const optionsGpuProfileId = await optionsGpuOptions.nth(1).getAttribute("value");
+  await page.selectOption("#gpu-profile-preset", optionsGpuProfileId);
+  await page.waitForFunction(
+    (profileId) => window.__chromeState.config.gpuProfile?.id === profileId,
+    optionsGpuProfileId,
+  );
+  await page.click("#clear-gpu-profile");
+  await page.waitForFunction(() => window.__chromeState.config.gpuProfile === null);
+  const importedGpuProfile = {
+    source: "https://github.com/apify/fingerprint-suite",
+    meta: {
+      id: "e2e-apify-profile",
+      browser: "chrome",
+      operating_system: "macos",
+    },
+    fingerprint: {
+      navigator: { userAgent: "Mozilla/5.0" },
+      videoCard: {
+        vendor: "Google Inc. (Apple)",
+        renderer: "ANGLE (Apple, Apple M2, OpenGL 4.1)",
+      },
+    },
+  };
+  await page.setInputFiles("#gpu-profile-file", {
+    name: "apify-profile.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(importedGpuProfile)),
+  });
+  await page.waitForFunction(
+    () => window.__chromeState.config.gpuProfile?.id === "e2e-apify-profile",
+  );
+  assert.match(await page.textContent("#gpu-profile-status"), /WebGL/);
+  await page.click("#clear-gpu-profile");
+  await page.waitForFunction(() => window.__chromeState.config.gpuProfile === null);
   await page.selectOption("#useragent-preset", "iphone|safari184_ios");
   await page.waitForFunction(
     () =>
@@ -2603,8 +2691,13 @@ async function testOptions(browser) {
   await page.click("#tracker-lists-group > summary");
   await page.uncheck("#tracker-use-built-in");
   await page.uncheck('[data-filter-list-id="adguard-cookies"]');
+  await page.click("#tracker-cleanup-group > summary");
   await page.click("#tracker-custom-group > summary");
   await page.fill("#tracker-custom-domains", "*.metrics.test");
+  await page.check("#tracker-cosmetic-filtering");
+  await page.fill("#tracker-cosmetic-whitelist", "*.cosmetic.test");
+  await page.check("#tracker-youtube-enhancements");
+  await page.fill("#tracker-custom-filters", "example.com##.custom-ad");
   await page.waitForTimeout(1100);
   assert.deepEqual(
     await page.evaluate(() => [
@@ -2620,6 +2713,10 @@ async function testOptions(browser) {
         (entry) => entry.id === "adguard-cookies",
       ).enabled,
       window.__chromeState.config.tracker.customDomains,
+      window.__chromeState.config.tracker.cosmeticFiltering,
+      window.__chromeState.config.tracker.cosmeticWhitelist,
+      window.__chromeState.config.tracker.youtubeEnhancements,
+      window.__chromeState.config.tracker.customFilters,
     ]),
     [
       false,
@@ -2632,6 +2729,10 @@ async function testOptions(browser) {
       false,
       false,
       "*.metrics.test",
+      true,
+      "*.cosmetic.test",
+      true,
+      "example.com##.custom-ad",
     ],
   );
   await page.click("#update-filter-lists");
@@ -2867,6 +2968,7 @@ async function testOptions(browser) {
 
 async function testSelfTest(browser) {
   const context = await browser.newContext();
+  await routeExtensionAssets(context);
   await context.addInitScript({ content: uiMockInitScript(DEFAULT_CONFIG) });
   const page = await context.newPage();
   // The popup and the context menu both deep-link into the options page.
@@ -2896,6 +2998,7 @@ async function testUiInitializationFailures(browser) {
   });
 
   const popupContext = await browser.newContext();
+  await routeExtensionAssets(popupContext);
   await popupContext.addInitScript({ content: initScript });
   const popup = await popupContext.newPage();
   await popup.goto(pathToFileURL(join(root, "popup/popup.html")).href);
@@ -2905,6 +3008,7 @@ async function testUiInitializationFailures(browser) {
   await popupContext.close();
 
   const optionsContext = await browser.newContext();
+  await routeExtensionAssets(optionsContext);
   await optionsContext.addInitScript({ content: initScript });
   const optionsPage = await optionsContext.newPage();
   await optionsPage.goto(pathToFileURL(join(root, "options/options.html")).href);
@@ -2925,6 +3029,7 @@ async function testAuxiliaryVpnApiFailures(browser) {
   });
 
   const popupContext = await browser.newContext();
+  await routeExtensionAssets(popupContext);
   await popupContext.addInitScript({ content: initScript });
   const popup = await popupContext.newPage();
   await popup.goto(pathToFileURL(join(root, "popup/popup.html")).href);
@@ -2935,6 +3040,7 @@ async function testAuxiliaryVpnApiFailures(browser) {
   await popupContext.close();
 
   const optionsContext = await browser.newContext();
+  await routeExtensionAssets(optionsContext);
   await optionsContext.addInitScript({ content: initScript });
   const optionsPage = await optionsContext.newPage();
   await optionsPage.goto(pathToFileURL(join(root, "options/options.html")).href);

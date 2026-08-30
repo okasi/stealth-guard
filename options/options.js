@@ -188,11 +188,9 @@ function populateForm() {
     currentConfig.tracker.youtubeEnhancements;
   document.getElementById("tracker-custom-filters").value =
     currentConfig.tracker.customFilters;
-  const defaultIds = new Set([
-    "adguard-base",
-    "adguard-tracking",
-    "adguard-cookies",
-  ]);
+  const defaultIds = new Set(
+    DEFAULT_TRACKER_FILTER_LISTS.map((entry) => entry.id),
+  );
   for (const input of document.querySelectorAll("[data-filter-list-id]")) {
     const list = currentConfig.tracker.filterLists.find(
       (entry) => entry.id === input.dataset.filterListId,

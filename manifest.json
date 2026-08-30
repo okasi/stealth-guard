@@ -1,5 +1,5 @@
 {
-  "version": "1.0.60",
+  "version": "1.0.63",
   "manifest_version": 2,
   "name": "Stealth Guard by okasi | MV2",
   "author": "okasi.me",
@@ -24,10 +24,10 @@
     "scripts": [
       "lib/runtime.js",
       "lib/storage.js",
-    "lib/filterLists.js",
-    "lib/adblock.js",
-    "lib/gpuProfiles.js",
-    "lib/config.js",
+      "lib/filterLists.js",
+      "lib/adblock.js",
+      "lib/gpuProfiles.js",
+      "lib/config.js",
       "lib/curlProfiles.js",
       "lib/domainFilter.js",
       "lib/proxy.js",
@@ -58,6 +58,7 @@
       "match_about_blank": true,
       "run_at": "document_start",
       "js": [
+        "lib/runtime.js",
         "lib/filterLists.js",
         "lib/domainFilter.js",
         "lib/gpuProfiles.js",

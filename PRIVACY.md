@@ -2,7 +2,7 @@
 
 **Stealth Guard by okasi**
 
-_Last updated: July 2026_
+_Last updated: August 2026_
 
 ## Overview
 
@@ -47,9 +47,19 @@ individual list, change the interval, or add a custom HTTPS subscription in
 Settings. A custom subscription provider will receive the ordinary network
 metadata associated with requesting its URL, such as your IP address.
 
+### Browser/API Profile Updates
+
+When automatic curl-impersonate profile updates are enabled, Stealth Guard
+checks the public `lexiforest/curl-impersonate` GitHub API listing and downloads
+the selected wrapper files from GitHub's raw-content host. Only public profile
+metadata and wrapper files are requested; browsing data, cookies, and extension
+settings are not sent.
+
 ### Proxy Location Check (Optional)
 
-When using the proxy feature, the extension may query `ipinfo.io` or `ipapi.co` to display your proxy's apparent location. This is:
+When using the proxy feature, the extension may query `ipinfo.io`, `ipapi.co`,
+`ipwho.is`, `api.ip.sb`, or `ip-api.com` to display your proxy's apparent
+location. Providers are tried as fallbacks. This is:
 
 - Only triggered when you explicitly use the proxy feature
 - Used solely to display location information to you
@@ -85,9 +95,10 @@ The extension requests certain browser permissions to function. Here's why each 
 Stealth Guard does not integrate with any third-party analytics, advertising,
 or tracking services. Filter updates contact `filters.adtidy.org` by default or
 the HTTPS subscription URLs you configure. If you use automatic proxy location
-naming, the extension may contact `ipinfo.io` or `ipapi.co` with the proxy
-endpoint you entered. Proxy verification may contact `api.ipify.org` through
-the configured proxy.
+naming, the extension may contact the five location providers listed above with
+the proxy endpoint you entered. Proxy verification may contact `api.ipify.org`
+through the configured proxy. Automatic browser/API profile updates contact
+GitHub as described above.
 
 ## Data Sharing
 

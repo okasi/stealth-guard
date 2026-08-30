@@ -1186,15 +1186,15 @@ function applyTrackerBlocking(config) {
 }
 
 async function broadcastCosmeticRulesUpdated() {
+  return broadcastToHttpTabs({ type: "adblock-rules-updated" });
+}
+
+async function broadcastToHttpTabs(message) {
   const tabs = await queryTabs({ url: ["http://*/*", "https://*/*"] });
   await Promise.all(
     tabs
       .filter((tab) => typeof tab.id === "number")
-      .map((tab) =>
-        sendMessageToTabIgnoringErrors(tab.id, {
-          type: "adblock-rules-updated",
-        }),
-      ),
+      .map((tab) => sendMessageToTabIgnoringErrors(tab.id, message)),
   );
 }
 
@@ -1244,18 +1244,7 @@ function sendMessageToTabIgnoringErrors(tabId, message) {
 }
 
 async function broadcastConfigUpdated(config, profileCatalog = curlProfileCatalog) {
-  const tabs = await queryTabs({ url: ["http://*/*", "https://*/*"] });
-  await Promise.all(
-    tabs
-      .filter((tab) => typeof tab.id === "number")
-      .map((tab) =>
-        sendMessageToTabIgnoringErrors(tab.id, {
-          type: "config-updated",
-          config,
-          profileCatalog,
-        }),
-      ),
-  );
+  return broadcastToHttpTabs({ type: "config-updated", config, profileCatalog });
 }
 
 async function applyCurrentConfig(config) {
@@ -1946,7 +1935,8 @@ async function handleRepairWindowGeometryMessage(request, sender) {
   }
 }
 
-function handleGetCosmeticRulesMessage(request, sender) {
+async function handleGetCosmeticRulesMessage(request, sender) {
+  await ensureBackgroundInitialized();
   const hostname = resolveTabHostname(sender, request && request.hostname);
   const config = currentConfig;
   if (

@@ -17,15 +17,6 @@
   let runtimeMessageListener = null;
   let active = true;
 
-  function isExtensionContextInvalidated(error) {
-    return Boolean(
-      error &&
-        /extension context invalidated|context invalidated/i.test(
-          error.message || String(error),
-        ),
-    );
-  }
-
   function deactivate() {
     if (!active) return;
     active = false;
@@ -47,22 +38,31 @@
     }
   }
 
+  function addClassToken(token) {
+    if (
+      observedTokens.size < 3000 &&
+      typeof token === "string" &&
+      /^[a-z0-9_-]{1,128}$/i.test(token)
+    ) {
+      observedTokens.add(token);
+    }
+  }
+
+  function addElementTokens(element) {
+    if (element.id && observedTokens.size < 3000) {
+      observedTokens.add(element.id);
+    }
+    for (const className of element.classList || []) addClassToken(className);
+  }
+
   function addTokensFromElement(element) {
     if (!(element instanceof Element)) return false;
     const sizeBefore = observedTokens.size;
-    if (element.id && observedTokens.size < 3000) observedTokens.add(element.id);
-    for (const className of element.classList || []) {
-      if (observedTokens.size >= 3000) break;
-      if (/^[a-z0-9_-]{1,128}$/i.test(className)) observedTokens.add(className);
-    }
+    addElementTokens(element);
     if (observedTokens.size >= 3000) return observedTokens.size !== sizeBefore;
     for (const child of element.querySelectorAll("[id], [class]")) {
       if (observedTokens.size >= 3000) break;
-      if (child.id) observedTokens.add(child.id);
-      for (const className of child.classList || []) {
-        if (observedTokens.size >= 3000) break;
-        if (/^[a-z0-9_-]{1,128}$/i.test(className)) observedTokens.add(className);
-      }
+      addElementTokens(child);
     }
     return observedTokens.size !== sizeBefore;
   }

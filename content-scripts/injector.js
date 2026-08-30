@@ -34,23 +34,6 @@
   let runtimeMessageListener = null;
   let alertMessageListener = null;
 
-  function getRuntimeLastError() {
-    try {
-      return chrome.runtime && chrome.runtime.lastError;
-    } catch (error) {
-      return error;
-    }
-  }
-
-  function isExtensionContextInvalidated(error) {
-    return Boolean(
-      error &&
-        /extension context invalidated|context invalidated/i.test(
-          error.message || String(error),
-        ),
-    );
-  }
-
   function deactivate() {
     if (!active) return;
     active = false;
@@ -123,7 +106,7 @@
       chrome.runtime.sendMessage(
         { type: "repair-window-geometry", width, height },
         () => {
-          getRuntimeLastError();
+          getChromeError();
         },
       );
     } catch (error) {
@@ -146,7 +129,7 @@
     return new Promise((resolve) => {
       try {
         chrome.storage.local.get([STORAGE_KEY, CURL_PROFILE_CACHE_KEY], (result) => {
-          const error = getRuntimeLastError();
+          const error = getChromeError();
           if (error) {
             if (isExtensionContextInvalidated(error)) {
               deactivate();
@@ -305,7 +288,7 @@
           hostname: window.location.hostname,
         },
         () => {
-          const error = getRuntimeLastError();
+          const error = getChromeError();
           if (error) {
             if (isExtensionContextInvalidated(error)) {
               deactivate();
