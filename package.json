@@ -32,8 +32,8 @@
     "check": "npm run syntax && npm run manifest && npm run coverage && npm run e2e"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "4.1.10",
-    "playwright-core": "1.61.1",
-    "vitest": "4.1.10"
+    "@vitest/coverage-v8": "4.1.11",
+    "playwright-core": "1.62.1",
+    "vitest": "4.1.11"
   }
 }
