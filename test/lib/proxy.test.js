@@ -292,6 +292,21 @@ test("fetchJson aborts requests that exceed the timeout", async () => {
   await rejection;
 });
 
+test("fetchJson keeps the timeout active while reading the response body", async () => {
+  vi.useFakeTimers();
+  globalThis.fetch = vi.fn(async (url, { signal }) => ({
+    ok: true,
+    json: () => new Promise((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("body aborted")));
+    }),
+  }));
+  const rejection = expect(fetchJson("https://slow.test/body", 25))
+    .rejects.toThrow("body aborted");
+  await vi.advanceTimersByTimeAsync(25);
+  await rejection;
+  expect(vi.getTimerCount()).toBe(0);
+});
+
 test("fetchProxyLocation tries providers in order and tolerates failures", async () => {
   globalThis.fetch = vi
     .fn()

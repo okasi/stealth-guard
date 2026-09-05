@@ -1,4 +1,4 @@
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -7,9 +7,10 @@ const {
   GPU_PROFILE_SOURCE_URL,
   APIFY_FINGERPRINT_SUITE_SOURCE_URL,
   GPU_PROFILE_BUNDLE_PATH,
-  APIFY_PROFILE_BUNDLE_PATH,
   getGpuProfileAssetPath,
   getGpuProfileSummary,
+  loadBundledGpuProfile,
+  loadBundledGpuProfileIndex,
   normalizeGpuProfileIndex,
   normalizeGpuProfile,
 } = require("../../lib/gpuProfiles.js");
@@ -106,6 +107,106 @@ test("accepts a compact profile wrapper and rejects incomplete or oversized data
       padding: "x".repeat(512 * 1024),
     }),
   ).toBeNull();
+  const cyclic = createProfile();
+  cyclic.self = cyclic;
+  expect(normalizeGpuProfile(cyclic)).toBeNull();
+});
+
+test("normalizes bounded primitive, surface, adapter, and fallback variants", () => {
+  const profile = normalizeGpuProfile({
+    schema: "fingerprint-suite-profile",
+    id: "fallbacks",
+    webgl: {
+      webgl1: {
+        parameters: {
+          BOOLEAN: true,
+          STRING: "x".repeat(300),
+          ARRAY: [1, false, Number.NaN],
+          DEEP: { one: { two: { three: 1 }, invalid: Number.NaN } },
+          BAD: Number.NaN,
+          HUGE_ARRAY: Array(65).fill(1),
+        },
+        context_attributes: { alpha: true },
+      },
+    },
+    webgpu: {
+      lowPerformance: {
+        isFallbackAdapter: false,
+        features: [" feature ", 7, ""],
+        info: { device: "device", description: "description" },
+        limits: { valid: "4", negative: -1, invalid: "no" },
+      },
+      preferredCanvasFormat: "rgba8unorm",
+    },
+  });
+
+  expect(profile).toMatchObject({
+    source: APIFY_FINGERPRINT_SUITE_SOURCE_URL,
+    webgl: {
+      webgl1: {
+        parameters: {
+          BOOLEAN: true,
+          STRING: "x".repeat(256),
+          ARRAY: [1, false],
+          DEEP: { one: { two: {} } },
+        },
+        contextAttributes: { alpha: true },
+      },
+    },
+    webgpu: {
+      features: ["feature"],
+      limits: { valid: 4 },
+      preferredCanvasFormat: "rgba8unorm",
+    },
+  });
+  expect(profile.webgl.webgl1.parameters.HUGE_ARRAY).toBeUndefined();
+  expect(profile.webgl.webgl1.parameters.BAD).toBeUndefined();
+
+  expect(
+    normalizeGpuProfile({
+      source: APIFY_FINGERPRINT_SUITE_SOURCE_URL,
+      fingerprint: { videoCard: { vendor: "Vendor" } },
+    }).webgl.webgl1.debug,
+  ).toMatchObject({ UNMASKED_VENDOR_WEBGL: "Vendor" });
+  expect(
+    normalizeGpuProfile({
+      source: APIFY_FINGERPRINT_SUITE_SOURCE_URL,
+      fingerprint: { videoCard: { renderer: "Renderer" } },
+    }).webgl.webgl1.debug,
+  ).toMatchObject({ UNMASKED_RENDERER_WEBGL: "Renderer" });
+  expect(
+    normalizeGpuProfile({
+      source: APIFY_FINGERPRINT_SUITE_SOURCE_URL,
+      fingerprint: { videoCard: {} },
+    }),
+  ).toBeNull();
+  expect(
+    normalizeGpuProfile({
+      source: APIFY_FINGERPRINT_SUITE_SOURCE_URL,
+      webgl: { webgl2: { extensions: ["extension"] } },
+    }).webgl,
+  ).toMatchObject({ webgl1: null, webgl2: { extensions: ["extension"] } });
+  expect(
+    normalizeGpuProfile({
+      source: APIFY_FINGERPRINT_SUITE_SOURCE_URL,
+      webgl: { webgl1: { context_attributes: { alpha: true } } },
+    }),
+  ).toBeNull();
+});
+
+test("summarizes missing identifiers and WebGPU-only vendor metadata", () => {
+  expect(getGpuProfileSummary(null)).toBeNull();
+  expect(
+    getGpuProfileSummary({
+      source: APIFY_FINGERPRINT_SUITE_SOURCE_URL,
+      fingerprint: { videoCard: { vendor: "WebGL Vendor" } },
+      webgpu: { adapter: { info: { vendor: "WebGPU Vendor" } } },
+    }),
+  ).toMatchObject({
+    id: "Imported profile",
+    vendor: "WebGPU Vendor",
+    webgpuAvailable: true,
+  });
 });
 
 test("supports the collector's direct WebGPU shape and safe text normalization", () => {
@@ -214,7 +315,6 @@ test("normalizes the bundled profile index without allowing path traversal", () 
       screen: "1920x1080",
       hardwareConcurrency: 8,
       deviceMemory: 8,
-      webgpuAvailable: true,
     },
   ]);
 
@@ -224,7 +324,7 @@ test("normalizes the bundled profile index without allowing path traversal", () 
       profiles: [
         {
           id: "apify-ios-safari",
-          bundle_path: APIFY_PROFILE_BUNDLE_PATH,
+          bundle_path: "../ignored",
           webgpu_available: false,
           webgpu_profiled: false,
           selectable: false,
@@ -240,11 +340,75 @@ test("normalizes the bundled profile index without allowing path traversal", () 
       screen: "",
       hardwareConcurrency: null,
       deviceMemory: null,
-      webgpuAvailable: false,
-      source: APIFY_FINGERPRINT_SUITE_SOURCE_URL,
-      bundlePath: APIFY_PROFILE_BUNDLE_PATH,
-      selectable: false,
-      webgpuProfiled: false,
     },
   ]);
+});
+
+test("loads the bundled profile index and individual validated assets", async () => {
+  const originalChrome = globalThis.chrome;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.chrome = {
+      runtime: { getURL: vi.fn((path) => `extension://${path}`) },
+    };
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        profiles: [
+          { id: "webgpu", webgpu_available: true },
+          { id: "webgl-only", webgpu_available: false },
+        ],
+      }),
+    });
+
+    await expect(loadBundledGpuProfileIndex()).resolves.toEqual([
+      expect.objectContaining({ id: "webgpu" }),
+      expect.objectContaining({ id: "webgl-only" }),
+    ]);
+    expect(globalThis.chrome.runtime.getURL).toHaveBeenCalledWith(
+      "profiles/clearcote/index.json",
+    );
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => createProfile(),
+    });
+    await expect(loadBundledGpuProfile("intel-test")).resolves.toMatchObject({
+      id: "intel-test",
+      schema: "clearcote-profile",
+    });
+    expect(globalThis.chrome.runtime.getURL).toHaveBeenLastCalledWith(
+      "profiles/clearcote/intel-test.json",
+    );
+    await expect(loadBundledGpuProfile("../secret")).rejects.toThrow(
+      "Invalid bundled GPU profile",
+    );
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => createProfile({ meta: { id: "wrong" } }),
+    });
+    await expect(loadBundledGpuProfile("intel-test")).rejects.toThrow(
+      "Bundled GPU profile is invalid",
+    );
+
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false });
+    await expect(loadBundledGpuProfileIndex()).resolves.toEqual([]);
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => {
+        throw new Error("malformed index");
+      },
+    });
+    await expect(loadBundledGpuProfileIndex()).resolves.toEqual([]);
+
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("offline"));
+    await expect(loadBundledGpuProfileIndex()).resolves.toEqual([]);
+  } finally {
+    if (originalChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = originalChrome;
+    if (originalFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = originalFetch;
+  }
 });

@@ -1,83 +1,71 @@
 # Stealth Guard
 
-## Runtime
+Manifest V2 extension: persistent background page, classic scripts, no production
+build. `manifest.json` is the authoritative script order and permission list.
 
-Stealth Guard is a Manifest V2 extension with a persistent background page,
-classic scripts, and no production build. The four runtime areas are:
+## Modules and boundaries
 
-- `background.js`: normalized configuration, browser-global policies, network
-  listeners, storage, proxy state, and message dispatch.
-- `content-scripts/injector.js`: isolated-world document-start bootstrap,
-  trusted configuration delivery, and authenticated page alerts.
-- `content-scripts/main.js`: MAIN-world fingerprint, identity, WebRTC, worker,
-  and YouTube protections.
-- `popup/` and `options/`: extension-page controls that call the background
-  message API. `content-scripts/adblock.js` is the isolated-world cosmetic and
-  element-picker controller.
-
-## Essential modules
-
-| Path | Responsibility |
-| --- | --- |
-| `manifest.json` | MV2 permissions, entry points, and script order. |
-| `lib/runtime.js` / `lib/storage.js` | Browser API wrappers and shared runtime helpers. |
-| `lib/config.js` | Explicit-schema defaults, persistence, identity presets, and page-safe projection. |
-| `lib/domainFilter.js` | The only hostname, wildcard, and allowlist matcher. |
-| `lib/adblock.js` / `lib/filterLists.js` | Safe rule parsing, matching, cosmetic lookup, and subscription defaults. |
-| `lib/gpuProfiles.js` / `lib/curlProfiles.js` | Validated graphics and browser/API profile data. |
-| `lib/proxy.js` / `lib/proxyCredentials.js` | Proxy validation, PAC/settings, location lookup, and bounded authentication. |
-| `lib/session.js` | Serialized per-site session snapshots and tab-host revalidation. |
-| `tools/e2e.mjs` | Chromium-driven protection, UI, integration, and failure-path checks. |
+- `background.js`: startup, browser-global policy, request listeners, catalog
+  refreshes, toolbar/status, and the runtime message dispatcher.
+- `content-scripts/main.js`: serialized MAIN-world protections. Shared factories
+  provide descriptor patches, WebGL noise, and inline/nested Worker bootstrap.
+- `content-scripts/injector.js`: synchronous default protection, trusted config
+  delivery, authenticated alerts, and page diagnostics.
+- `content-scripts/adblock.js`: isolated-world cosmetic filtering and picker.
+- `popup/`, `options/`: controls, imports/exports, sessions, and self-test UI;
+  mutations go through background messages.
+- `lib/config.js`: defaults, normalization, effective identity/routing, storage,
+  and the explicit `createContentConfig()` page-safe projection.
+- `lib/domainFilter.js`: hostname, wildcard, URL-host, and allowlist semantics.
+- `lib/adblock.js`, `lib/filterLists.js`: bounded subscription normalization,
+  safe filter parsing, indexed matching, and cosmetic selection.
+- `lib/gpuProfiles.js`, `lib/curlProfiles.js`: validated GPU assets/imports and
+  the canonical browser-identity catalog. `profiles/clearcote/` contains compact
+  runtime profiles, their chooser index, and GPL attribution.
+- `lib/proxy.js`, `lib/proxyCredentials.js`, `lib/session.js`: proxy policy and
+  lookups, serialized credential persistence/authentication, and site sessions.
+- `lib/runtime.js`, `lib/storage.js`: browser callbacks, messaging, queues,
+  bounded concurrency, and local storage.
 
 ## Initialization and data flow
 
-1. The background scripts load in this order: `runtime` → `storage` →
-   `filterLists` → `adblock` → `gpuProfiles` → `config` → `curlProfiles` →
-   `domainFilter` → `proxy` → `proxyCredentials` → `session` → `background`.
-2. The content bundle loads `runtime` → `filterLists` → `domainFilter` →
-   `gpuProfiles` → `config` → `curlProfiles` → `main` → `injector` →
-   `adblock` at `document_start` in every frame.
-3. Background startup normalizes local state, applies User-Agent, tracker,
-   WebRTC, proxy, proxy-auth, refresh-alarm, and context-menu policies. Startup
-   is retried by the next message after a failure.
-4. The injector installs fail-closed MAIN-world wrappers immediately, then
-   applies trusted local/background updates. Only `createContentConfig()` data
-   crosses into the page; endpoints, credentials, sessions, routes, and
-   unknown imported fields do not.
-5. Config changes are serialized, persisted, applied atomically, rolled back
-   on failure, and broadcast to HTTP(S) tabs. Session mutations are separately
-   serialized and recheck the tab host before cookie/storage writes.
+Background order: runtime → storage → filterLists → adblock → gpuProfiles →
+curlProfiles → config → domainFilter → proxy → proxyCredentials → session →
+background. Independent stored state loads concurrently; policy application
+follows. Known messages await startup, retrying a failed initialization.
+Extension-page senders use the requested tab; content senders use their own tab.
 
-Persistent keys include `stealth-guard-config`, `stealth-guard-filter-cache`,
-`stealth-guard-curl-profiles`, `stealth-guard-proxy-credentials`,
-`stealth-guard-proxy-history`, `stealth-guard-sessions`, and
-`stealth-guard-active-sessions`.
+Content libraries load before main → injector → adblock at `document_start` in
+every frame; cosmetic filtering runs only in the top frame. The injector applies
+stored settings asynchronously after default wrappers. Project raw config once
+with `createContentConfig()`; never re-normalize its projected result. Later
+broadcasts supersede pending storage reads. Credentials, endpoints, routes,
+sessions, and unknown import fields must remain outside MAIN-world config.
 
-## Interaction points
+Config writes serialize, persist/apply with rollback, then broadcast to HTTP(S)
+tabs. Downloads run outside that queue; catalog commits serialize against the
+latest settings and persist before publication. Cosmetic updates invalidate old
+responses. Credential writes publish only after storage succeeds. Session
+mutations revalidate the target hostname before cookie/web-storage changes.
 
-- Config: `get-config`, `update-config`, `reset-config`, allowlist messages,
-  and `config-updated` broadcasts.
-- Protection: `fingerprint-detected`, triggered-feature diagnostics,
-  identity self-test, cosmetic rules, adblock status/rules, and curl profiles.
-- Proxy: profile preparation, credential status/update/clear, runtime status,
-  verification, diagnostics, history, settings, and proxy-error events.
-- Sessions: `get-sessions`, `save-session`, `switch-session`, `rename-session`,
-  `delete-session`, and `clear-current-session`.
-- Browser hooks: header rewriting, request blocking, WebRTC policy, proxy
-  settings/authentication, tabs, cookies, alarms, notifications, and menus.
+The curl catalog supplies request, Navigator, client-hint, Worker, and diagnostic
+identity; do not add parallel User-Agent tables. URL-backed Workers stay native.
+Inline Workers inherit the effective configuration at construction.
 
-## Guidance
+## Change and validation rules
 
-- Preserve MV2, the persistent background page, direct classic-script loading,
-  and manifest dependency order. Run `npm run manifest` after order changes.
-- Keep hostname matching in `lib/domainFilter.js` and browser proxy application
-  in `lib/proxy.js`.
-- Keep WebRTC and proxy policy browser-global, independent of the active tab.
-- Browser patches must preserve caller-owned descriptors, arrays, typed arrays,
-  and option objects.
+- Preserve MV2, classic-script globals, and dependency order. Keep hostname
+  matching in `domainFilter`, proxy application in `proxy`, and global
+  WebRTC/proxy policy in the background.
+- Use `createSerialQueue()` for ordered mutations and `mapWithConcurrency()`
+  for bounded independent work. Preserve caller descriptors, options, arrays,
+  and buffer regions outside the requested readback.
 - Bump the patch version in `manifest.json`, `package.json`, and both root
-  package entries in `package-lock.json` for every repository change.
-- Run `npm run check`. It covers syntax, manifest integrity, deterministic-core
-  coverage, background integration, browser E2E, UI flows, and failure paths.
-  Release validation still needs an unpacked smoke test in an MV2-capable
-  Opera build because current Chrome cannot load MV2.
+  `package-lock.json` entries for each change set.
+- Run `npm run check`: syntax/bundle compilation, manifest/assets/version checks,
+  deterministic-library coverage, background tests, and the Chromium harness.
+- Run `OPERA_PATH=/path/to/opera npm run e2e:extension` for release validation.
+  It needs an MV2-capable Opera and OpenSSL; it uses a temporary browser profile
+  and local HTTPS/proxy fixtures. See `BENCHMARKS.md` for scope and detector checks.
+- `reverse-engineering/` contains research and a proposed PRD, not an inventory
+  of implemented features. Keep README focused on installation and use.

@@ -3,12 +3,15 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const {
+  createCloudflareChallengeUrlMatcher,
   createDomainPatternTools,
   addDomainToAllowlist,
   getDomainPatternParts,
+  getHostnameFromUrl,
   isAdblockCompatibilityHostname,
   isAdblockFeatureActiveForHostname,
   isCloudflareChallengeHostname,
+  isCloudflareChallengeUrl,
   isDataDomeChallengeHostname,
   isDomainAllowlisted,
   isFeatureActiveForHostname,
@@ -50,6 +53,12 @@ test("normalizes hostnames and accepts only supported domain pattern shapes", ()
       null,
     ].map(normalizeDomainPattern),
   ).toEqual([null, null, null, null, null, null, null]);
+});
+
+test("extracts normalized hostnames from URLs and rejects invalid URLs", () => {
+  expect(getHostnameFromUrl("https://WWW.Example.COM./path")).toBe("www.example.com");
+  expect(getHostnameFromUrl("not a URL")).toBeNull();
+  expect(getHostnameFromUrl(null)).toBeNull();
 });
 
 test("parses and caches comma-separated patterns", () => {
@@ -171,9 +180,67 @@ test("allowlist helpers add covered domains once and remove every covering rule"
 
 test("Cloudflare challenge detection accepts only the owned challenge domain", () => {
   expect(isCloudflareChallengeHostname("challenges.cloudflare.com")).toBe(true);
-  expect(isCloudflareChallengeHostname("nested.challenges.cloudflare.com.")).toBe(true);
+  expect(isCloudflareChallengeHostname("nested.challenges.cloudflare.com.")).toBe(
+    true,
+  );
   expect(isCloudflareChallengeHostname("cloudflare.com")).toBe(false);
   expect(isCloudflareChallengeHostname(null)).toBe(false);
+});
+
+test("Cloudflare challenge URL detection covers first-party challenge flows", () => {
+  const matchesChallenge = createCloudflareChallengeUrlMatcher();
+  expect(
+    matchesChallenge(
+      new URL("https://site.test/cdn-cgi/challenge-platform/script.js"),
+    ),
+  ).toBe(true);
+  expect(
+    isCloudflareChallengeUrl(
+      "https://challenges.cloudflare.com/turnstile/v0/api.js",
+    ),
+  ).toBe(true);
+  expect(
+    isCloudflareChallengeUrl(
+      "https://nested.challenges.cloudflare.com/turnstile/v0/api.js",
+    ),
+  ).toBe(true);
+  expect(
+    isCloudflareChallengeUrl(
+      "https://site.test/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1",
+    ),
+  ).toBe(true);
+  expect(
+    isCloudflareChallengeUrl(
+      "https://site.test/CDN-CGI//CHALLENGE-PLATFORM/?ray=test",
+    ),
+  ).toBe(true);
+  expect(
+    isCloudflareChallengeUrl(
+      "https://site.test/protected?__cf_chl_rt_tk=challenge-token",
+    ),
+  ).toBe(true);
+  expect(
+    isCloudflareChallengeUrl(
+      "https://site.test/protected?__cf_chl_tk=challenge-token",
+    ),
+  ).toBe(true);
+  expect(
+    isCloudflareChallengeUrl(
+      "https://site.test/protected?__cf_chl_lookalike=challenge-token",
+    ),
+  ).toBe(false);
+  expect(
+    isCloudflareChallengeUrl(
+      "https://site.test/cdn-cgi/challenge-platform-fake/script.js",
+    ),
+  ).toBe(false);
+  expect(
+    isCloudflareChallengeUrl(
+      "https://site.test/page?next=%2Fcdn-cgi%2Fchallenge-platform%2F",
+    ),
+  ).toBe(false);
+  expect(isCloudflareChallengeUrl("file:///ordinary-page")).toBe(false);
+  expect(isCloudflareChallengeUrl("not a URL")).toBe(false);
 });
 
 test("DataDome challenge detection accepts only the delivery domain", () => {

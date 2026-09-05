@@ -64,7 +64,7 @@ jobs:
         run: |
           rm -rf build
           mkdir -p build/extension
-          cp manifest.json background.js build/extension/
+          cp manifest.json background.js LICENSE build/extension/
           cp -R content-scripts icons lib options popup profiles build/extension/
           CHROME_PATH=$(node --input-type=module -e 'import { chromium } from "playwright-core"; process.stdout.write(chromium.executablePath())')
           test -x "$CHROME_PATH"

@@ -2,8 +2,7 @@ function installMainWorldProtections(
   initialConfig,
   bridge,
   createPatternTools,
-  userAgentStrings,
-  userAgentClientHints,
+  createChallengeUrlMatcher,
 ) {
   "use strict";
 
@@ -11,7 +10,39 @@ function installMainWorldProtections(
   const configUpdateEvent = bridge.configEvent;
   const configUpdateToken = bridge.configToken;
   const domainPatterns = createPatternTools();
-  const clientHintProfiles = userAgentClientHints || {};
+  const isCloudflareChallengeUrl = createChallengeUrlMatcher();
+  const nativeHasOwnProperty = Object.prototype.hasOwnProperty;
+  let cloudflareChallengeDocument = false;
+
+  const isCloudflareChallengeDocument = function () {
+    if (
+      cloudflareChallengeDocument ||
+      isCloudflareChallengeUrl(window.location.href)
+    ) {
+      cloudflareChallengeDocument = true;
+      return true;
+    }
+    if (
+      !nativeHasOwnProperty.call(window, "_cf_chl_opt") ||
+      !window._cf_chl_opt ||
+      typeof window._cf_chl_opt !== "object"
+    ) {
+      return false;
+    }
+    const currentScript = document.currentScript;
+    if (
+      currentScript &&
+      currentScript.src &&
+      isCloudflareChallengeUrl(currentScript.src)
+    ) {
+      cloudflareChallengeDocument = true;
+      return true;
+    }
+    cloudflareChallengeDocument = Array.from(document.scripts).some(
+      (script) => script.src && isCloudflareChallengeUrl(script.src),
+    );
+    return cloudflareChallengeDocument;
+  };
 
   const replaceConfig = function (nextConfig) {
     if (!nextConfig || typeof nextConfig !== "object") return;
@@ -73,15 +104,14 @@ function installMainWorldProtections(
     };
   };
 
-  const protectGetter = function (prototype, property, apply, label) {
+  const protectDescriptor = function (prototype, property, slot, apply, label) {
     try {
+      if (!prototype) return false;
       const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
-      if (!descriptor || typeof descriptor.get !== "function") {
-        return false;
-      }
+      if (!descriptor || typeof descriptor[slot] !== "function") return false;
       Object.defineProperty(prototype, property, {
         ...descriptor,
-        get: new Proxy(descriptor.get, { apply }),
+        [slot]: new Proxy(descriptor[slot], { apply }),
       });
       return true;
     } catch (error) {
@@ -89,39 +119,26 @@ function installMainWorldProtections(
       return false;
     }
   };
-
-  const protectMethod = function (prototype, method, apply, label) {
-    try {
-      if (!prototype) {
-        return false;
-      }
-      const descriptor = Object.getOwnPropertyDescriptor(prototype, method);
-      if (!descriptor || typeof descriptor.value !== "function") {
-        return false;
-      }
-      Object.defineProperty(prototype, method, {
-        ...descriptor,
-        value: new Proxy(descriptor.value, { apply }),
-      });
-      return true;
-    } catch (error) {
-      debugWarn(`[Stealth Guard] Failed to protect ${label || method}:`, error);
-      return false;
-    }
-  };
+  const protectGetter = (prototype, property, apply, label) =>
+    protectDescriptor(prototype, property, "get", apply, label);
+  const protectMethod = (prototype, property, apply, label) =>
+    protectDescriptor(prototype, property, "value", apply, label);
 
   const isDomainAllowlisted = function (allowlist) {
     return domainPatterns.isAllowlisted(window.location.hostname, allowlist);
   };
 
   const isFeatureActive = function (featureName) {
+    if (isCloudflareChallengeDocument()) {
+      return false;
+    }
     const featureConfig = config[featureName];
     return Boolean(
       config.enabled &&
         featureConfig &&
         featureConfig.enabled &&
         !isDomainAllowlisted(config.globalWhitelist || "") &&
-      !isDomainAllowlisted(featureConfig.whitelist || ""),
+        !isDomainAllowlisted(featureConfig.whitelist || ""),
     );
   };
 
@@ -146,63 +163,6 @@ function installMainWorldProtections(
   };
 
   debugLog("[Stealth Guard] MAIN-world protections activating");
-
-  // CreepJS treats a zero outer dimension or an outer dimension smaller than
-  // the viewport as an impossible browser state. These values belong to the
-  // native browser window and are non-configurable in Chromium/Opera, so they
-  // must not be spoofed with JavaScript getters. Repair only an invalid
-  // top-level window through the native resize API; valid browser geometry is
-  // left completely untouched.
-  const repairInvalidWindowGeometry = function () {
-    try {
-      if (window !== window.top) return;
-
-      const innerWidth = Number(window.innerWidth);
-      const innerHeight = Number(window.innerHeight);
-      const outerWidth = Number(window.outerWidth);
-      const outerHeight = Number(window.outerHeight);
-      const invalidWidth =
-        !Number.isFinite(outerWidth) ||
-        outerWidth <= 0 ||
-        (Number.isFinite(innerWidth) && outerWidth < innerWidth);
-      const invalidHeight =
-        !Number.isFinite(outerHeight) ||
-        outerHeight <= 0 ||
-        (Number.isFinite(innerHeight) && outerHeight < innerHeight);
-
-      if (
-        (!invalidWidth && !invalidHeight) ||
-        typeof window.resizeTo !== "function"
-      ) {
-        return;
-      }
-
-      const targetWidth = Math.max(
-        1,
-        Number.isFinite(innerWidth) ? innerWidth + 1 : 0,
-        Number.isFinite(outerWidth) && outerWidth > 0 ? outerWidth : 0,
-      );
-      const targetHeight = Math.max(
-        1,
-        Number.isFinite(innerHeight) ? innerHeight + 1 : 0,
-        Number.isFinite(outerHeight) && outerHeight > 0 ? outerHeight : 0,
-      );
-      window.resizeTo(targetWidth, targetHeight);
-    } catch (error) {
-      // Regular tabs normally reject resizeTo; there is nothing else that a
-      // content script can safely do to native browser-window dimensions.
-    }
-  };
-
-  window.setTimeout(repairInvalidWindowGeometry, 0);
-  if (document.readyState !== "complete") {
-    window.addEventListener("load", repairInvalidWindowGeometry, {
-      once: true,
-      capture: true,
-    });
-  } else {
-    window.setTimeout(repairInvalidWindowGeometry, 250);
-  }
 
   const isYouTubeHostname = function () {
     const hostname = window.location.hostname.toLowerCase();
@@ -511,40 +471,114 @@ function installMainWorldProtections(
   const webglCanvases = new WeakSet();
   let webglNoiseSeed = 0;
 
-  const advanceWebGLNoiseState = function (state) {
-    state ^= state << 13;
-    state ^= state >>> 17;
-    state ^= state << 5;
-    return state >>> 0;
-  };
+  // Shared by the page and serialized Worker runtime.
+  function createWebGLNoiseTools(getSeed, isStrict) {
+    const advanceWebGLNoiseState = function (state) {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      return state >>> 0;
+    };
 
-  const seedWebGLNoiseState = function (...values) {
-    let state = webglNoiseSeed || 1;
-    for (const value of values) {
-      state = advanceWebGLNoiseState((state ^ (Number(value) >>> 0)) >>> 0);
-    }
-    return state;
-  };
+    const seedWebGLNoiseState = function (...values) {
+      let state = getSeed() || 1;
+      for (const value of values) {
+        state = advanceWebGLNoiseState((state ^ (Number(value) >>> 0)) >>> 0);
+      }
+      return state;
+    };
 
-  const addSeededWebGLNoise = function (imageData) {
-    const totalPixels = imageData.width * imageData.height;
-    if (!totalPixels || totalPixels > 1000000) return imageData;
-    let state = seedWebGLNoiseState(imageData.width, imageData.height);
-    const samples = Math.min(32, totalPixels);
-    for (let sample = 0; sample < samples; sample++) {
-      state = advanceWebGLNoiseState(state ^ sample);
-      const pixel = state % totalPixels;
-      const channel = (state >>> 8) % 3;
-      const index = pixel * 4 + channel;
-      const value = imageData.data[index];
-      const direction = state & 1 ? 1 : -1;
-      imageData.data[index] =
-        (value === 0 && direction < 0) || (value === 255 && direction > 0)
-          ? value - direction
-          : value + direction;
-    }
-    return imageData;
-  };
+    const addSeededWebGLNoise = function (imageData) {
+      const totalPixels = imageData.width * imageData.height;
+      if (!totalPixels || totalPixels > 1000000) return imageData;
+      let state = seedWebGLNoiseState(imageData.width, imageData.height);
+      const samples = Math.min(32, totalPixels);
+      for (let sample = 0; sample < samples; sample++) {
+        state = advanceWebGLNoiseState(state ^ sample);
+        const pixel = state % totalPixels;
+        const channel = (state >>> 8) % 3;
+        const index = pixel * 4 + channel;
+        const value = imageData.data[index];
+        const direction = state & 1 ? 1 : -1;
+        imageData.data[index] =
+          (value === 0 && direction < 0) || (value === 255 && direction > 0)
+            ? value - direction
+            : value + direction;
+      }
+      return imageData;
+    };
+    const getReadbackChannelCount = function (format) {
+      if (format === 6407 || format === 36248) return 3;
+      if (format === 33319 || format === 33320) return 2;
+      if (format === 6408 || format === 36249) return 4;
+      return 1;
+    };
+
+    const getIntegerArrayMaximum = function (output) {
+      if (output instanceof Uint8Array || output instanceof Uint8ClampedArray) {
+        return 255;
+      }
+      if (output instanceof Uint16Array) return 65535;
+      if (output instanceof Uint32Array) return 4294967295;
+      return null;
+    };
+
+    const addSeededWebGLReadbackNoise = function (
+      context,
+      nativeGetParameter,
+      output,
+      width,
+      height,
+      format,
+      type,
+      offset,
+    ) {
+      if (!isStrict() || !ArrayBuffer.isView(output) || !output.length ||
+          !Number.isInteger(width) || !Number.isInteger(height) ||
+          width <= 0 || height <= 0 || offset < 0 || type < 5120 || type > 5126) return;
+      const channels = getReadbackChannelCount(format);
+      const readParameter = (name) => Reflect.apply(nativeGetParameter, context, [name]);
+      const alignment = readParameter(3333); // PACK_ALIGNMENT
+      const webgl2 = "PACK_ROW_LENGTH" in context;
+      const rowLength = webgl2 ? readParameter(3330) || width : width;
+      const skipRows = webgl2 ? readParameter(3331) : 0;
+      const skipPixels = webgl2 ? readParameter(3332) : 0;
+      const rowBytes = rowLength * channels * output.BYTES_PER_ELEMENT;
+      const stride = Math.ceil(rowBytes / alignment) * alignment / output.BYTES_PER_ELEMENT;
+      const start = offset + skipRows * stride + skipPixels * channels;
+      if (start + (height - 1) * stride + width * channels > output.length) return;
+      const pixelCount = width * height;
+      let state = seedWebGLNoiseState(width, height, format, type, offset);
+      const samples = Math.min(8, pixelCount);
+      const maximum = getIntegerArrayMaximum(output);
+      const isFloat = output instanceof Float32Array || output instanceof Float64Array;
+      for (let sample = 0; sample < samples; sample++) {
+        state = advanceWebGLNoiseState(state ^ sample);
+        const pixel = state % pixelCount;
+        const channel = (state >>> 8) % Math.min(3, channels);
+        const index = start + Math.floor(pixel / width) * stride + (pixel % width) * channels + channel;
+        const value = output[index];
+        if (typeof value !== "number") continue;
+        if (isFloat) {
+          const delta = value === 0 ? 1e-7 : Math.max(Math.abs(value), 1) * 1e-7;
+          output[index] = value + (state & 1 ? delta : -delta);
+          continue;
+        }
+        const direction = state & 1 ? 1 : -1;
+        const nextValue = value + direction;
+        output[index] =
+          maximum === null
+            ? nextValue
+            : Math.max(0, Math.min(maximum, nextValue));
+      }
+    };
+
+    return { advanceWebGLNoiseState, seedWebGLNoiseState,
+      addSeededWebGLNoise, addSeededWebGLReadbackNoise };
+  }
+  const { advanceWebGLNoiseState, seedWebGLNoiseState,
+    addSeededWebGLNoise, addSeededWebGLReadbackNoise } =
+    createWebGLNoiseTools(() => webglNoiseSeed, isWebGLStrict);
 
   if (config.canvas) {
     const getImageData = CanvasRenderingContext2D.prototype.getImageData;
@@ -621,7 +655,7 @@ function installMainWorldProtections(
       // WebGL exports are rendering output, not a safe place to inject
       // fingerprint noise in compatibility mode. Editors and design tools
       // commonly use these exports for textures, thumbnails, and clipboard
-      // data. Strict mode is opt-in per site and operates on a copy only.
+      // data. Strict mode operates on a copy only.
       if (isWebGLCanvas) {
         if (!isFeatureActive("webgl") || !canvas.width || !canvas.height) {
           return originalMethod.apply(canvas, args);
@@ -920,9 +954,15 @@ function installMainWorldProtections(
       const surface = getConfiguredWebGLSurfaceProfile(version);
       if (!surface || !surface.parameters) return undefined;
       const Constructor =
-        version === 2 ? WebGL2RenderingContext : WebGLRenderingContext;
+        version === 2
+          ? typeof WebGL2RenderingContext !== "undefined"
+            ? WebGL2RenderingContext
+            : null
+          : typeof WebGLRenderingContext !== "undefined"
+            ? WebGLRenderingContext
+            : null;
       const parameterName =
-        typeof Constructor !== "undefined"
+        Constructor
           ? Object.getOwnPropertyNames(Constructor).find(
               (name) =>
                 Constructor[name] === parameter &&
@@ -984,66 +1024,10 @@ function installMainWorldProtections(
       return Object.values(values).every(Number.isFinite) ? values : null;
     };
 
-    const getReadbackChannelCount = function (format) {
-      if (format === 6407 || format === 36248) return 3;
-      if (format === 33319 || format === 33320) return 2;
-      if (format === 6408 || format === 36249) return 4;
-      return 1;
-    };
-
-    const getIntegerArrayMaximum = function (output) {
-      if (output instanceof Uint8Array || output instanceof Uint8ClampedArray) {
-        return 255;
-      }
-      if (output instanceof Uint16Array) return 65535;
-      if (output instanceof Uint32Array) return 4294967295;
-      return null;
-    };
-
-    const addSeededWebGLReadbackNoise = function (
-      output,
-      width,
-      height,
-      format,
-      type,
-      offset,
-    ) {
-      if (!isWebGLStrict() || !ArrayBuffer.isView(output) || !output.length) {
-        return;
-      }
-      const available = output.length - offset;
-      if (available <= 0) return;
-      const channels = getReadbackChannelCount(format);
-      const pixelCount = Math.floor(available / channels);
-      if (!pixelCount) return;
-      let state = seedWebGLNoiseState(width, height, format, type, offset);
-      const samples = Math.min(8, pixelCount);
-      const maximum = getIntegerArrayMaximum(output);
-      const isFloat = output instanceof Float32Array || output instanceof Float64Array;
-      for (let sample = 0; sample < samples; sample++) {
-        state = advanceWebGLNoiseState(state ^ sample);
-        const pixel = state % pixelCount;
-        const channel = (state >>> 8) % Math.min(3, channels);
-        const index = offset + pixel * channels + channel;
-        const value = output[index];
-        if (typeof value !== "number") continue;
-        if (isFloat) {
-          const delta = value === 0 ? 1e-7 : Math.max(Math.abs(value), 1) * 1e-7;
-          output[index] = value + (state & 1 ? delta : -delta);
-          continue;
-        }
-        const direction = state & 1 ? 1 : -1;
-        const nextValue = value + direction;
-        output[index] =
-          maximum === null
-            ? nextValue
-            : Math.max(0, Math.min(maximum, nextValue));
-      }
-    };
-
     const protectWebGL = function (Constructor, version) {
       if (typeof Constructor === "undefined") return;
       const label = `WebGL${version === 2 ? "2" : ""}RenderingContext`;
+      const nativeGetParameter = Constructor.prototype.getParameter;
       protectMethod(
         Constructor.prototype,
         "getParameter",
@@ -1171,7 +1155,7 @@ function installMainWorldProtections(
           const result = Reflect.apply(target, self, args);
           if (isWebGLStrict()) {
             addSeededWebGLReadbackNoise(
-              args[6],
+              self, nativeGetParameter, args[6],
               args[2],
               args[3],
               args[4],
@@ -2103,74 +2087,20 @@ function installMainWorldProtections(
   }
 
   if (config.useragent && !isEmptyHostnameFrame) {
-    const metadataByPreset = {
-      macos: {
-        platform: "MacIntel",
-        oscpu: "Intel Mac OS X 10.15.7",
-        vendor: "Apple Computer, Inc.",
-        hardwareConcurrency: 8,
-        deviceMemory: undefined,
-        maxTouchPoints: 0,
-        clientHints: null,
-      },
-      macos_chrome: {
-        platform: "MacIntel",
-        oscpu: "Intel Mac OS X 10.15.7",
-        vendor: "Google Inc.",
-        hardwareConcurrency: 8,
-        deviceMemory: 8,
-        maxTouchPoints: 0,
-        clientHints: clientHintProfiles.macos_chrome,
-      },
-      windows: {
-        platform: "Win32",
-        oscpu: "Windows NT 10.0; Win64; x64",
-        vendor: "Google Inc.",
-        hardwareConcurrency: 8,
-        deviceMemory: 8,
-        maxTouchPoints: 0,
-        clientHints: clientHintProfiles.windows,
-      },
-      iphone: {
-        platform: "iPhone",
-        oscpu: "iPhone OS 17.4.1",
-        vendor: "Apple Computer, Inc.",
-        hardwareConcurrency: 6,
-        deviceMemory: undefined,
-        maxTouchPoints: 5,
-        clientHints: null,
-      },
-      android: {
-        platform: "Linux armv8l",
-        oscpu: "Linux; Android 13",
-        vendor: "Google Inc.",
-        hardwareConcurrency: 8,
-        deviceMemory: 8,
-        maxTouchPoints: 5,
-        clientHints: clientHintProfiles.android,
-      },
-    };
     let cachedProfileKey = null;
     let cachedProfile = null;
     const getUserAgentProfile = function () {
-      const preset = config.useragent.preset || "macos";
       const configuredProfile =
         config.useragent.profile &&
         typeof config.useragent.profile === "object"
           ? config.useragent.profile
           : null;
-      const profileKey = `${preset}:${configuredProfile?.target || ""}:${configuredProfile?.version || ""}:${configuredProfile?.updatedAt || ""}`;
+      if (!configuredProfile) return null;
+      const profileKey = `${configuredProfile.target || ""}:${configuredProfile.version || ""}:${configuredProfile.updatedAt || ""}`;
       if (cachedProfileKey === profileKey) return cachedProfile;
-      const userAgent =
-        configuredProfile?.userAgent ||
-        userAgentStrings[preset] ||
-        userAgentStrings.macos;
-      const metadata =
-        configuredProfile?.navigator ||
-        metadataByPreset[preset] ||
-        metadataByPreset.macos;
-      const clientHints =
-        configuredProfile?.clientHints || metadata.clientHints || null;
+      const userAgent = configuredProfile.userAgent;
+      const metadata = configuredProfile.navigator || {};
+      const clientHints = configuredProfile.clientHints || null;
       const slash = userAgent.indexOf("/");
       const versionPattern =
         clientHints && clientHints.brand === "Microsoft Edge"
@@ -2197,11 +2127,12 @@ function installMainWorldProtections(
         Navigator.prototype,
         property,
         (target, self, args) => {
-          if (!isFeatureActive("useragent")) {
+          const profile = getUserAgentProfile();
+          if (!isFeatureActive("useragent") || !profile) {
             return Reflect.apply(target, self, args);
           }
           notifyUserAgentAccess();
-          return getSpoofedValue(getUserAgentProfile(), target, self, args);
+          return getSpoofedValue(profile, target, self, args);
         },
         `Navigator.${property}`,
       );
@@ -2228,7 +2159,9 @@ function installMainWorldProtections(
         platform: hints.platform,
         architecture: hints.architecture,
         bitness: hints.bitness,
-        formFactors: hints.formFactors.slice(),
+        formFactors: Array.isArray(hints.formFactors)
+          ? hints.formFactors.slice()
+          : [],
         fullVersionList: freezeBrands(
           hints.fullVersionList || [
             { brand: "Not_A Brand", version: "99.0.0.0" },
@@ -2401,8 +2334,72 @@ function installMainWorldProtections(
     }
   }
 
+  // This factory is serialized with the installer for nested Workers.
+  function createWorkerBootstrapTools(installWorkerWorldProtections, createWebGLNoiseTools) {
+    const getWorkerType = function (args) {
+      const options = args && args[1];
+      return options && typeof options === "object" && options.type === "module"
+        ? "module"
+        : "classic";
+    };
+
+    const wrappedWorkerUrls = new Map();
+    const isInlineWorkerUrl = function (scriptUrl) {
+      try {
+        const protocol = new URL(scriptUrl).protocol;
+        return protocol === "blob:" || protocol === "data:";
+      } catch (error) {
+        return false;
+      }
+    };
+    const createWrappedWorkerUrl = function (scriptUrl, type, payload) {
+      const serializedPayload = JSON.stringify({ ...payload, baseUrl: scriptUrl });
+      const cacheKey = `${type}\n${scriptUrl}\n${serializedPayload}`;
+      const cachedUrl = wrappedWorkerUrls.get(cacheKey);
+      if (cachedUrl) return cachedUrl;
+      const bootstrap = `(${installWorkerWorldProtections.toString()})(${serializedPayload}, ${createWorkerBootstrapTools.toString()}, ${createWebGLNoiseTools.toString()});`;
+      const originalUrl = JSON.stringify(scriptUrl);
+      const source =
+        type === "module"
+          ? `${bootstrap}\nimport(${originalUrl});`
+          : `${bootstrap}
+  const __sgOriginalWorkerUrl = ${originalUrl};
+  const __sgNativeImportScripts = self.importScripts.bind(self);
+  let __sgImportBase = __sgOriginalWorkerUrl;
+  self.importScripts = function (...urls) {
+    const previousBase = __sgImportBase;
+    try {
+      for (const url of urls) {
+        const resolvedUrl = new URL(String(url), __sgImportBase).href;
+        __sgImportBase = resolvedUrl;
+        __sgNativeImportScripts(resolvedUrl);
+      }
+    } finally {
+      __sgImportBase = previousBase;
+    }
+  };
+  self.importScripts(__sgOriginalWorkerUrl);`;
+      const wrappedUrl = URL.createObjectURL(
+        new Blob([source], { type: "application/javascript" }),
+      );
+      wrappedWorkerUrls.set(cacheKey, wrappedUrl);
+      return wrappedUrl;
+    };
+    return {
+      getWorkerType,
+      isInlineWorkerUrl,
+      createWrappedWorkerUrl,
+      dispose() {
+        for (const url of wrappedWorkerUrls.values()) URL.revokeObjectURL(url);
+        wrappedWorkerUrls.clear();
+      },
+    };
+  }
+
   const installWorkerWorldProtections = function installWorkerWorldProtections(
     payload,
+    createWorkerBootstrapTools,
+    createWebGLNoiseTools,
   ) {
     "use strict";
 
@@ -2553,6 +2550,25 @@ function installMainWorldProtections(
         RelativeTimeFormat: Intl.RelativeTimeFormat,
         Segmenter: Intl.Segmenter,
       };
+      const prepareIntlArguments = function (name, args) {
+        const nextArgs = Array.from(args || []);
+        if (
+          isActive("language") &&
+          locale &&
+          (nextArgs.length === 0 || nextArgs[0] === undefined)
+        ) {
+          nextArgs[0] = locale;
+        }
+        if (name === "DateTimeFormat" && isActive("timezone")) {
+          nextArgs[1] = {
+            ...(nextArgs[1] && typeof nextArgs[1] === "object"
+              ? nextArgs[1]
+              : {}),
+            timeZone: timezone,
+          };
+        }
+        return nextArgs;
+      };
       for (const [name, nativeConstructor] of Object.entries(
         nativeConstructors,
       )) {
@@ -2561,42 +2577,18 @@ function installMainWorldProtections(
         if (!descriptor) continue;
         const proxy = new Proxy(nativeConstructor, {
           apply(target, thisArg, args) {
-            const nextArgs = Array.from(args || []);
-            if (
-              isActive("language") &&
-              locale &&
-              (nextArgs.length === 0 || nextArgs[0] === undefined)
-            ) {
-              nextArgs[0] = locale;
-            }
-            if (name === "DateTimeFormat" && isActive("timezone")) {
-              nextArgs[1] = {
-                ...(nextArgs[1] && typeof nextArgs[1] === "object"
-                  ? nextArgs[1]
-                  : {}),
-                timeZone: timezone,
-              };
-            }
-            return Reflect.apply(target, thisArg, nextArgs);
+            return Reflect.apply(
+              target,
+              thisArg,
+              prepareIntlArguments(name, args),
+            );
           },
           construct(target, args, newTarget) {
-            const nextArgs = Array.from(args || []);
-            if (
-              isActive("language") &&
-              locale &&
-              (nextArgs.length === 0 || nextArgs[0] === undefined)
-            ) {
-              nextArgs[0] = locale;
-            }
-            if (name === "DateTimeFormat" && isActive("timezone")) {
-              nextArgs[1] = {
-                ...(nextArgs[1] && typeof nextArgs[1] === "object"
-                  ? nextArgs[1]
-                  : {}),
-                timeZone: timezone,
-              };
-            }
-            return Reflect.construct(target, nextArgs, newTarget);
+            return Reflect.construct(
+              target,
+              prepareIntlArguments(name, args),
+              newTarget,
+            );
           },
         });
         try {
@@ -2656,93 +2648,9 @@ function installMainWorldProtections(
 
     const patchedWebGLPrototypes = new WeakSet();
     const debugRendererInfoContexts = new WeakSet();
-    const advanceWebGLNoiseState = function (state) {
-      state ^= state << 13;
-      state ^= state >>> 17;
-      state ^= state << 5;
-      return state >>> 0;
-    };
-    const seedWebGLNoiseState = function (...values) {
-      let state = webglSeed;
-      for (const value of values) {
-        state = advanceWebGLNoiseState((state ^ (Number(value) >>> 0)) >>> 0);
-      }
-      return state;
-    };
-    const getReadbackChannelCount = function (format) {
-      if (format === 6407 || format === 36248) return 3;
-      if (format === 33319 || format === 33320) return 2;
-      if (format === 6408 || format === 36249) return 4;
-      return 1;
-    };
-    const addSeededWebGLReadbackNoise = function (
-      output,
-      width,
-      height,
-      format,
-      type,
-      offset,
-    ) {
-      if (
-        !isActive("webglStrict") ||
-        !ArrayBuffer.isView(output) ||
-        !output.length
-      ) {
-        return;
-      }
-      const available = output.length - offset;
-      if (available <= 0) return;
-      const channels = getReadbackChannelCount(format);
-      const pixelCount = Math.floor(available / channels);
-      if (!pixelCount) return;
-      let state = seedWebGLNoiseState(width, height, format, type, offset);
-      const samples = Math.min(8, pixelCount);
-      const isFloat = output instanceof Float32Array || output instanceof Float64Array;
-      const maximum =
-        output instanceof Uint8Array || output instanceof Uint8ClampedArray
-          ? 255
-          : output instanceof Uint16Array
-            ? 65535
-            : output instanceof Uint32Array
-              ? 4294967295
-              : null;
-      for (let sample = 0; sample < samples; sample++) {
-        state = advanceWebGLNoiseState(state ^ sample);
-        const pixel = state % pixelCount;
-        const channel = (state >>> 8) % Math.min(3, channels);
-        const index = offset + pixel * channels + channel;
-        const value = output[index];
-        if (typeof value !== "number") continue;
-        if (isFloat) {
-          const delta = value === 0 ? 1e-7 : Math.max(Math.abs(value), 1) * 1e-7;
-          output[index] = value + (state & 1 ? delta : -delta);
-          continue;
-        }
-        const nextValue = value + (state & 1 ? 1 : -1);
-        output[index] =
-          maximum === null
-            ? nextValue
-            : Math.max(0, Math.min(maximum, nextValue));
-      }
-    };
-    const addSeededWebGLCanvasNoise = function (imageData) {
-      const totalPixels = imageData.width * imageData.height;
-      if (!totalPixels || totalPixels > 1000000) return;
-      let state = seedWebGLNoiseState(imageData.width, imageData.height);
-      const samples = Math.min(32, totalPixels);
-      for (let sample = 0; sample < samples; sample++) {
-        state = advanceWebGLNoiseState(state ^ sample);
-        const pixel = state % totalPixels;
-        const channel = (state >>> 8) % 3;
-        const index = pixel * 4 + channel;
-        const value = imageData.data[index];
-        const direction = state & 1 ? 1 : -1;
-        imageData.data[index] =
-          (value === 0 && direction < 0) || (value === 255 && direction > 0)
-            ? value - direction
-            : value + direction;
-      }
-    };
+    const { advanceWebGLNoiseState, seedWebGLNoiseState,
+      addSeededWebGLNoise: addSeededWebGLCanvasNoise, addSeededWebGLReadbackNoise } =
+      createWebGLNoiseTools(() => webglSeed, () => isActive("webglStrict"));
     const webglCanvases = new WeakSet();
     const patchWebGLContext = function (context) {
       if (!context || !webgl) return;
@@ -2848,7 +2756,7 @@ function installMainWorldProtections(
             value: function (...args) {
               const result = Reflect.apply(nativeReadPixels, this, args);
               addSeededWebGLReadbackNoise(
-                args[6],
+                this, nativeGetParameter, args[6],
                 args[2],
                 args[3],
                 args[4],
@@ -2949,42 +2857,8 @@ function installMainWorldProtections(
       return;
     }
 
-    const createWrappedWorkerUrl = function (scriptUrl, type, nextPayload) {
-      const serializedPayload = JSON.stringify(nextPayload);
-      const installSource = `(${installWorkerWorldProtections.toString()})`;
-      const bootstrap = `${installSource}(${serializedPayload});`;
-      const originalUrl = JSON.stringify(scriptUrl);
-      const source =
-        type === "module"
-          ? `${bootstrap}\nimport(${originalUrl});`
-          : `${bootstrap}
-const __sgOriginalWorkerUrl = ${originalUrl};
-const __sgNativeImportScripts = self.importScripts.bind(self);
-let __sgImportBase = __sgOriginalWorkerUrl;
-self.importScripts = function (...urls) {
-  const previousBase = __sgImportBase;
-  try {
-    for (const url of urls) {
-      const resolvedUrl = new URL(String(url), __sgImportBase).href;
-      __sgImportBase = resolvedUrl;
-      __sgNativeImportScripts(resolvedUrl);
-    }
-  } finally {
-    __sgImportBase = previousBase;
-  }
-};
-self.importScripts(__sgOriginalWorkerUrl);`;
-      return URL.createObjectURL(
-        new Blob([source], { type: "application/javascript" }),
-      );
-    };
-
-    const getWorkerType = function (args) {
-      const options = args && args[1];
-      return options && typeof options === "object" && options.type === "module"
-        ? "module"
-        : "classic";
-    };
+    const { getWorkerType, isInlineWorkerUrl, createWrappedWorkerUrl } =
+      createWorkerBootstrapTools(installWorkerWorldProtections, createWebGLNoiseTools);
 
     const wrapWorkerConstructor = function (name) {
       const nativeConstructor = scope[name];
@@ -3005,6 +2879,9 @@ self.importScripts(__sgOriginalWorkerUrl);`;
           } catch (error) {
             return Reflect.construct(target, originalArgs, newTarget);
           }
+          if (!isInlineWorkerUrl(originalUrl)) {
+            return Reflect.construct(target, originalArgs, newTarget);
+          }
           const nextPayload = {
             ...payload,
             baseUrl: originalUrl,
@@ -3016,9 +2893,7 @@ self.importScripts(__sgOriginalWorkerUrl);`;
               nextPayload,
             );
             originalArgs[0] = wrappedUrl;
-            const worker = Reflect.construct(target, originalArgs, newTarget);
-            scope.setTimeout(() => URL.revokeObjectURL(wrappedUrl), 60000);
-            return worker;
+            return Reflect.construct(target, originalArgs, newTarget);
           } catch (error) {
             return Reflect.construct(target, originalArgs, newTarget);
           }
@@ -3073,8 +2948,11 @@ self.importScripts(__sgOriginalWorkerUrl);`;
     };
   };
 
+  const { getWorkerType, isInlineWorkerUrl, createWrappedWorkerUrl, dispose } =
+    createWorkerBootstrapTools(installWorkerWorldProtections, createWebGLNoiseTools);
+  window.addEventListener("pagehide", dispose, { once: true });
+
   const installWorkerConstructors = function () {
-    if (!isFeatureActive("worker")) return;
     if (typeof Worker === "undefined" && typeof SharedWorker === "undefined") {
       return;
     }
@@ -3082,44 +2960,6 @@ self.importScripts(__sgOriginalWorkerUrl);`;
       typeof Worker === "undefined" ? null : Worker;
     const nativeSharedWorker =
       typeof SharedWorker === "undefined" ? null : SharedWorker;
-    const getWorkerType = function (args) {
-      const options = args && args[1];
-      return options && typeof options === "object" && options.type === "module"
-        ? "module"
-        : "classic";
-    };
-    const createWrappedWorkerUrl = function (scriptUrl, type, nextPayload) {
-      const serializedPayload = JSON.stringify({
-        ...nextPayload,
-        baseUrl: scriptUrl,
-      });
-      const installSource = `(${installWorkerWorldProtections.toString()})`;
-      const bootstrap = `${installSource}(${serializedPayload});`;
-      const originalUrl = JSON.stringify(scriptUrl);
-      const source =
-        type === "module"
-          ? `${bootstrap}\nimport(${originalUrl});`
-          : `${bootstrap}
-const __sgOriginalWorkerUrl = ${originalUrl};
-const __sgNativeImportScripts = self.importScripts.bind(self);
-let __sgImportBase = __sgOriginalWorkerUrl;
-self.importScripts = function (...urls) {
-  const previousBase = __sgImportBase;
-  try {
-    for (const url of urls) {
-      const resolvedUrl = new URL(String(url), __sgImportBase).href;
-      __sgImportBase = resolvedUrl;
-      __sgNativeImportScripts(resolvedUrl);
-    }
-  } finally {
-    __sgImportBase = previousBase;
-  }
-};
-self.importScripts(__sgOriginalWorkerUrl);`;
-      return URL.createObjectURL(
-        new Blob([source], { type: "application/javascript" }),
-      );
-    };
     const wrapConstructor = function (name, nativeConstructor) {
       if (!nativeConstructor || nativeConstructor.__stealthGuardWorkerWrapper) {
         return;
@@ -3127,7 +2967,7 @@ self.importScripts(__sgOriginalWorkerUrl);`;
       const wrapped = new Proxy(nativeConstructor, {
         construct(target, args, newTarget) {
           const originalArgs = Array.from(args || []);
-          if (!originalArgs.length) {
+          if (!isFeatureActive("worker") || !originalArgs.length) {
             return Reflect.construct(target, originalArgs, newTarget);
           }
           const payload = createWorkerProtectionPayload();
@@ -3143,6 +2983,9 @@ self.importScripts(__sgOriginalWorkerUrl);`;
           } catch (error) {
             return Reflect.construct(target, originalArgs, newTarget);
           }
+          if (!isInlineWorkerUrl(originalUrl)) {
+            return Reflect.construct(target, originalArgs, newTarget);
+          }
           try {
             const wrappedUrl = createWrappedWorkerUrl(
               originalUrl,
@@ -3150,9 +2993,7 @@ self.importScripts(__sgOriginalWorkerUrl);`;
               payload,
             );
             originalArgs[0] = wrappedUrl;
-            const worker = Reflect.construct(target, originalArgs, newTarget);
-            setTimeout(() => URL.revokeObjectURL(wrappedUrl), 60000);
-            return worker;
+            return Reflect.construct(target, originalArgs, newTarget);
           } catch (error) {
             return Reflect.construct(target, originalArgs, newTarget);
           }

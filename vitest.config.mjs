@@ -6,10 +6,12 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: [
+        "lib/adblock.js",
         "lib/filterLists.js",
         "lib/config.js",
         "lib/curlProfiles.js",
         "lib/domainFilter.js",
+        "lib/gpuProfiles.js",
         "lib/proxy.js",
         "lib/proxyCredentials.js",
         "lib/runtime.js",

@@ -555,10 +555,10 @@
         <section class="card" id="worker-section">
           <h2><span>🧵 Worker Identity Protection</span></h2>
           <p class="section-desc">
-            Align dedicated Worker and SharedWorker identity surfaces with the
-            selected browser profile, language, timezone, and WebGL settings.
-            Some applications depend on native worker URLs and shared-worker
-            naming, so those sites can remain native through the allowlist.
+            Align inline dedicated Worker and SharedWorker identity surfaces
+            with the selected browser profile, language, timezone, and WebGL
+            settings. URL-backed application workers remain native so script
+            location, CSP, module loading, and shared state keep working.
           </p>
           <div class="field checkbox">
             <label>
@@ -576,8 +576,7 @@
               placeholder="web.telegram.org"
             ></textarea>
             <small
-              >Worker bootstrapping stays native on these sites so their worker
-              URLs and shared state remain compatible.</small
+              >Inline Worker bootstrapping also stays native on these sites.</small
             >
           </div>
         </section>
@@ -988,8 +987,8 @@
               <option value="">No bundled profile</option>
             </select>
             <small class="field-help"
-              >Includes the curated 72-profile GPL dataset shipped with this
-              extension; 64 profiles contain both WebGL and WebGPU data.</small
+              >Includes 54 runtime-distinct WebGL/WebGPU profiles from the
+              bundled GPL dataset.</small
             >
           </div>
           <div class="field">
@@ -1159,8 +1158,8 @@
     <script src="../lib/domainFilter.js"></script>
     <script src="../lib/filterLists.js"></script>
     <script src="../lib/gpuProfiles.js"></script>
-    <script src="../lib/config.js"></script>
     <script src="../lib/curlProfiles.js"></script>
+    <script src="../lib/config.js"></script>
     <script src="../lib/runtime.js"></script>
     <script src="options.js"></script>
   </body>

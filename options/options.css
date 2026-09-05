@@ -276,17 +276,6 @@ button {
   color: white;
 }
 
-.button-link {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 12px 18px;
-  border-radius: 8px;
-  font-size: 15px;
-  font-weight: 600;
-  text-decoration: none;
-}
-
 .btn-secondary:hover {
   background: #5a6268;
 }
@@ -302,7 +291,9 @@ button {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   transform: translateY(100px);
   opacity: 0;
-  transition: all 0.3s;
+  transition:
+    transform 0.3s,
+    opacity 0.3s;
   z-index: 1000;
 }
 
@@ -427,47 +418,15 @@ textarea:focus-visible {
 }
 
 .proxy-editor summary,
-.proxy-group > summary {
-  cursor: pointer;
-  color: #1a73e8;
-  font-weight: 650;
-}
-
-.proxy-editor-panel,
-.proxy-group-panel {
-  margin-top: 10px;
-  padding: 16px;
-  background: var(--surface-subtle);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-
-.proxy-group {
-  margin-bottom: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-
-.proxy-group:last-child {
-  margin-bottom: 0;
-}
-
-.proxy-group-panel > .field:last-child {
-  margin-bottom: 0;
-}
-
-.tracker-group {
-  margin-bottom: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-
+.proxy-group > summary,
 .tracker-group > summary {
   cursor: pointer;
   color: #1a73e8;
   font-weight: 650;
 }
 
+.proxy-editor-panel,
+.proxy-group-panel,
 .tracker-group-panel {
   margin-top: 10px;
   padding: 16px;
@@ -476,10 +435,16 @@ textarea:focus-visible {
   border-radius: 8px;
 }
 
-.tracker-group-panel > .field:last-child {
-  margin-bottom: 0;
+.proxy-group,
+.tracker-group {
+  margin-bottom: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
 }
 
+.proxy-group-panel > .field:last-child,
+.tracker-group-panel > .field:last-child,
+.proxy-group:last-child,
 .tracker-group:last-child {
   margin-bottom: 0;
 }

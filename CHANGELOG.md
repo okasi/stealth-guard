@@ -28,6 +28,20 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Changed
 
+- Shared page/Worker WebGL noise and Worker bootstrap factories, descriptor
+  patching, locale identity generation, and staged credential writes.
+- Compact runtime GPU assets omit 1.5 MB of unused capture data.
+- Added repeatable unpacked Opera integration checks with local HTTPS and
+  authenticated proxy fixtures (`npm run e2e:extension`).
+
+- Shared GPU asset loading, User-Agent/profile compatibility, configuration
+  form bindings, serial queues, browser API calls, and bounded concurrent
+  downloads now use single reusable implementations.
+- Configuration and filter-list imports now cap collection and text sizes, and
+  the manifest check validates every bundled GPU asset against its index.
+- Deterministic-library coverage now includes the adblock and GPU-profile
+  libraries at the existing 100% statements, branches, functions, and lines
+  threshold.
 - Adblock request matching now reuses normalized request context and scans block candidates once, reducing repeated per-request tokenization and hostname work.
 - Method hooks now install from their property descriptors so writable, enumerable, and configurable flags remain intact across the expanded protection surface.
 - Split isolated-world injection from a directly testable MAIN-world protection runtime.
@@ -45,10 +59,32 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - Popup diagnostics now summarize effective User-Agent, language, timezone, WebRTC, proxy, and tracker state for the current site.
 - User-Agent headers and MAIN-world navigator/client-hint values can share the selected modern curl-impersonate profile, while native TLS and HTTP/2 remain browser-owned.
 - User-Agent and modern browser/API choices now use one combined identity selector.
+- The validated curl-profile catalog is now the single source for request-header,
+  Navigator, client-hint, Worker, and diagnostic browser identity.
 - Session operations verify the target tab before mutating cookies or web storage.
+- Session cookie mutation and tab broadcasts now use bounded concurrency.
 
 ### Fixed
 
+- Startup config projection and late storage reads no longer discard proxy
+  locale settings or overwrite newer broadcasts.
+- Filter/catalog commits use current settings, persist before publication,
+  and refresh new subscriptions after older downloads finish. Automatic filter
+  downloads now honor their switch.
+- Substring filter indexing no longer misses matches inside longer URL tokens;
+  malformed scopes cannot turn into global rules.
+- WebGL readback respects pixel-pack layout and untouched destination regions.
+- Cosmetic filtering ignores stale responses, notices changed classes/IDs, and
+  lets the picker reach elements underneath its instruction banner.
+- Worker toggles apply to subsequent Workers without a page reload.
+- Proxy verification times out stalled response bodies; credential persistence
+  failures leave active credentials intact.
+- Extension pages opened in tabs target the requested website session, and
+  self-test counts downloaded/custom filtering rules.
+
+- URL-backed application Workers now retain native script-location, CSP,
+  module-loading, and SharedWorker identity semantics; identity bootstrapping
+  is limited to inline Worker URLs used by fingerprint probes.
 - Content-script cosmetic filtering now loads its shared runtime helpers in
   the production manifest bundle and waits for background initialization.
 - WebGPU command descriptors and upload buffers now remain native so active
@@ -79,6 +115,8 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Removed
 
+- Eighteen invalid or behaviorally duplicate indexed ClearCote captures, plus
+  unused multi-bundle catalog metadata.
 - Unused storage/config APIs, the stateful domain-filter wrapper, proxy comment generation, remote-DNS UI state, legacy DNR cleanup, and redundant WebRTC navigation listeners.
 
 ## 1.0.10 - 2026-01-23

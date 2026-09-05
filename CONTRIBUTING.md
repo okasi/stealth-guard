@@ -4,11 +4,11 @@ Thank you for helping improve Stealth Guard. Changes should preserve privacy, br
 
 ## Development setup
 
-1. Use Node.js 20.19+ or 22.12+.
+1. Use Node.js 20.19.x or a supported release ≥22.12.
 2. Install Chrome/Chromium or set `CHROME_PATH` for browser automation.
 3. Run `npm ci`.
 4. Run `npm run check` before opening a pull request.
-5. Load the repository as an unpacked extension in an MV2-compatible browser for native extension verification.
+5. Run `OPERA_PATH=/path/to/opera npm run e2e:extension` with an MV2-capable Opera and OpenSSL for native extension verification.
 
 There is no production build step. Source files are loaded directly by the extension, so keep browser compatibility in mind and do not introduce runtime npm dependencies.
 

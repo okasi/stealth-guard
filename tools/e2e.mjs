@@ -109,6 +109,7 @@ function protectionInitScript(config) {
       window.__sgNativeCanvasToDataURL = HTMLCanvasElement.prototype.toDataURL;
       window.__sgNativeGetImageData = CanvasRenderingContext2D.prototype.getImageData;
       window.__sgNativeMeasureText = CanvasRenderingContext2D.prototype.measureText;
+      window.__sgNativeWorker = window.Worker;
       window.__sgNativeOffscreen =
         typeof OffscreenCanvas === "undefined"
           ? null
@@ -480,6 +481,7 @@ function uiMockInitScript(config, options = {}) {
               },
               tracker: {
                 enabled: state.config.tracker.enabled,
+                totalRules: 150,
                 builtInRules: state.config.tracker.useBuiltIn ? 15 : 0,
                 customRules: state.config.tracker.customDomains ? 1 : 0,
                 blockedCount: 0,
@@ -653,6 +655,37 @@ function uiMockInitScript(config, options = {}) {
 
 async function startServer() {
   const server = createServer((request, response) => {
+    if (request.url === "/worker-location.js") {
+      response.writeHead(200, {
+        "content-type": "application/javascript; charset=utf-8",
+      });
+      response.end(`
+        self.onmessage = () => self.postMessage({
+          href: self.location.href,
+          userAgent: navigator.userAgent,
+        });
+      `);
+      return;
+    }
+    if (request.url === "/shared-worker-location.js") {
+      response.writeHead(200, {
+        "content-type": "application/javascript; charset=utf-8",
+      });
+      response.end(`
+        let connectionCount = 0;
+        self.onconnect = (event) => {
+          const port = event.ports[0];
+          const connection = ++connectionCount;
+          port.onmessage = () => port.postMessage({
+            connection,
+            href: self.location.href,
+            userAgent: navigator.userAgent,
+          });
+          port.start();
+        };
+      `);
+      return;
+    }
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     const isChild = request.url === "/child";
     response.end(`<!doctype html>
@@ -1034,7 +1067,7 @@ async function exerciseProtections(page) {
                 ),
               };
             }
-          } catch (error) {}
+          } catch {}
           return values;
         }
         self.onmessage = () => self.postMessage(snapshot());
@@ -1485,6 +1518,24 @@ async function testProtectionRuntime(browser, port) {
     },
   };
   const strictWebgl = await page.evaluate(async (strictConfig) => {
+    function readbackBounds() {
+      const canvas = new OffscreenCanvas(3, 2);
+      const gl = canvas.getContext("webgl2");
+      gl.clearColor(0.2, 0.4, 0.6, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.pixelStorei(gl.PACK_ALIGNMENT, 8);
+      gl.pixelStorei(gl.PACK_ROW_LENGTH, 5);
+      gl.pixelStorei(gl.PACK_SKIP_ROWS, 1);
+      gl.pixelStorei(gl.PACK_SKIP_PIXELS, 1);
+      const pixels = new Uint8Array(96).fill(117);
+      gl.readPixels(0, 0, 3, 2, gl.RGBA, gl.UNSIGNED_BYTE, pixels, 8);
+      const untouched = Array.from(pixels).every((value, index) =>
+        (index >= 36 && index < 48) || (index >= 60 && index < 72) || value === 117,
+      );
+      const empty = new Uint8Array(96).fill(117);
+      gl.readPixels(0, 0, 0, 2, gl.RGBA, gl.UNSIGNED_BYTE, empty, 8);
+      return { untouched, emptyUntouched: empty.every((value) => value === 117) };
+    }
     window.__sgUpdateConfig(strictConfig);
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
     const canvas = document.createElement("canvas");
@@ -1529,6 +1580,7 @@ async function testProtectionRuntime(browser, port) {
     const worker = await new Promise((resolvePromise, rejectPromise) => {
       const source = `
         self.onmessage = () => {
+          const readbackBounds = ${readbackBounds.toString()};
           const canvas = new OffscreenCanvas(1, 1);
           const gl = canvas.getContext("webgl");
           gl.clearColor(0.2, 0.4, 0.6, 1);
@@ -1538,6 +1590,7 @@ async function testProtectionRuntime(browser, port) {
           gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, first);
           gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, second);
           self.postMessage({
+            bounds: readbackBounds(),
             pixels: Array.from(first),
             repeatedPixels: Array.from(second),
             extensions: gl.getSupportedExtensions(),
@@ -1577,12 +1630,15 @@ async function testProtectionRuntime(browser, port) {
       profiledMaxTextureSize,
       profiledVersion,
       profiledGpuLimit,
+      bounds: readbackBounds(),
       nativePixels: Array.from(nativePixels),
       protectedPixels: Array.from(protectedPixels),
       repeatedProtectedPixels: Array.from(repeatedProtectedPixels),
       worker,
     };
   }, strictConfig);
+  assert.deepEqual(strictWebgl.bounds, { untouched: true, emptyUntouched: true });
+  assert.deepEqual(strictWebgl.worker.bounds, strictWebgl.bounds);
   assert.notEqual(strictWebgl.protectedDataUrl, strictWebgl.nativeDataUrl);
   assert.deepEqual(
     strictWebgl.protectedExtensions,
@@ -2028,6 +2084,51 @@ async function testProtectionRuntime(browser, port) {
   await locationContext.close();
 }
 
+async function testConfigurationBootstrap(browser) {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.enabled = false;
+  config.proxy = {
+    ...config.proxy, enabled: true, activeProfile: "Tokyo",
+    profiles: [{ name: "Tokyo", scheme: "http", host: "proxy.test", port: 8080,
+      location: { countryCode: "JP", timezone: "Asia/Tokyo", loc: "35.68,139.69" } }],
+  };
+  for (const lateRead of [false, true]) {
+    const context = await browser.newContext();
+    await context.route("https://www.youtube.com/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>` }),
+    );
+    await context.addInitScript({ content: protectionInitScript(config) + (lateRead ? `
+      const storedGet = chrome.storage.local.get;
+      chrome.storage.local.get = (...args) => {
+        window.__sgReleaseStoredConfig = () => storedGet(...args);
+      };
+    ` : "") });
+    const page = await context.newPage();
+    await page.goto("https://www.youtube.com/watch?v=bootstrap");
+    if (lateRead) {
+      await page.evaluate(() => {
+        window.__sgUpdateConfig({ enabled: false });
+        window.__sgReleaseStoredConfig();
+      });
+      await page.waitForFunction(() => navigator.userAgent === window.__sgNativeUserAgent);
+      // Let the old read's promise continuation run before checking it again.
+      await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
+      assert.equal(await page.evaluate(() => navigator.userAgent), await page.evaluate(() => window.__sgNativeUserAgent));
+    } else {
+      await page.waitForFunction(() => navigator.language === "ja-JP");
+      assert.equal(await page.evaluate(() => new Intl.DateTimeFormat().resolvedOptions().timeZone), "Asia/Tokyo");
+      const position = await page.evaluate(() => new Promise((resolve) =>
+        navigator.geolocation.getCurrentPosition((value) => resolve([value.coords.latitude, value.coords.longitude])),
+      ));
+      assert.deepEqual(position, [35.68, 139.69]);
+    }
+    assert.equal(await page.evaluate(() =>
+      JSON.parse('{"adPlacements":[{"id":"keep"}]}').adPlacements[0].id,
+    ), "keep");
+    await context.close();
+  }
+}
+
 async function testAllowlistAndChallengeFrames(browser, port) {
   const allowlistedConfig = structuredClone(DEFAULT_CONFIG);
   allowlistedConfig.globalWhitelist = "site.test";
@@ -2117,9 +2218,67 @@ async function testAllowlistAndChallengeFrames(browser, port) {
       body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>`,
     }),
   );
+  await challengeContext.route(
+    `http://site.test:${port}/cdn-cgi/challenge-platform/**`,
+    (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>`,
+      }),
+  );
+  await challengeContext.route(
+    `http://site.test:${port}/protected?__cf_chl_rt_tk=*`,
+    (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>`,
+      }),
+  );
   const challengePage = await challengeContext.newPage();
   challengePage.on("pageerror", (error) =>
     console.error("Challenge page error:", error),
+  );
+  await challengePage.goto(`http://site.test:${port}/`);
+  await challengePage.waitForFunction(() => window.__sgHarnessReady === true);
+  const challengeTransition = await challengePage.evaluate(() => {
+    const protectedUserAgent = navigator.userAgent;
+    history.replaceState(null, "", "/?__cf_chl_rt_tk=challenge-token");
+    return {
+      protectedUserAgent,
+      challengeUserAgent: navigator.userAgent,
+      nativeUserAgent: window.__sgNativeUserAgent,
+    };
+  });
+  assert.notEqual(
+    challengeTransition.protectedUserAgent,
+    challengeTransition.nativeUserAgent,
+  );
+  assert.equal(
+    challengeTransition.challengeUserAgent,
+    challengeTransition.nativeUserAgent,
+  );
+  await challengePage.goto(`http://site.test:${port}/`);
+  await challengePage.waitForFunction(() => window.__sgHarnessReady === true);
+  const challengeMarker = await challengePage.evaluate(() => {
+    const protectedUserAgent = navigator.userAgent;
+    window._cf_chl_opt = {};
+    const script = document.createElement("script");
+    script.type = "application/json";
+    script.src = "/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1";
+    document.head.appendChild(script);
+    return {
+      protectedUserAgent,
+      challengeUserAgent: navigator.userAgent,
+      nativeUserAgent: window.__sgNativeUserAgent,
+    };
+  });
+  assert.notEqual(
+    challengeMarker.protectedUserAgent,
+    challengeMarker.nativeUserAgent,
+  );
+  assert.equal(
+    challengeMarker.challengeUserAgent,
+    challengeMarker.nativeUserAgent,
   );
   await challengePage.goto("https://challenges.cloudflare.com/");
   await challengePage.waitForTimeout(25);
@@ -2130,6 +2289,31 @@ async function testAllowlistAndChallengeFrames(browser, port) {
   }));
   assert.equal(challenge.userAgent, challenge.nativeUserAgent);
   assert.equal(challenge.reports, 0);
+  await challengePage.goto(
+    `http://site.test:${port}/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1`,
+  );
+  await challengePage.waitForTimeout(25);
+  const firstPartyChallenge = await challengePage.evaluate(() => ({
+    userAgent: navigator.userAgent,
+    nativeUserAgent: window.__sgNativeUserAgent,
+    reports: window.__sgReports.length,
+  }));
+  assert.equal(
+    firstPartyChallenge.userAgent,
+    firstPartyChallenge.nativeUserAgent,
+  );
+  assert.equal(firstPartyChallenge.reports, 0);
+  await challengePage.goto(
+    `http://site.test:${port}/protected?__cf_chl_rt_tk=challenge-token`,
+  );
+  await challengePage.waitForTimeout(25);
+  const tokenChallenge = await challengePage.evaluate(() => ({
+    userAgent: navigator.userAgent,
+    nativeUserAgent: window.__sgNativeUserAgent,
+    reports: window.__sgReports.length,
+  }));
+  assert.equal(tokenChallenge.userAgent, tokenChallenge.nativeUserAgent);
+  assert.equal(tokenChallenge.reports, 0);
   await challengePage.goto("https://geo.captcha-delivery.com/");
   await challengePage.waitForTimeout(25);
   const dataDomeChallenge = await challengePage.evaluate(() => ({
@@ -2140,6 +2324,165 @@ async function testAllowlistAndChallengeFrames(browser, port) {
   assert.equal(dataDomeChallenge.userAgent, dataDomeChallenge.nativeUserAgent);
   assert.equal(dataDomeChallenge.reports, 0);
   await challengeContext.close();
+}
+
+async function testUrlBackedWorkerCompatibility(browser, port) {
+  const context = await browser.newContext();
+  await context.addInitScript({
+    content: protectionInitScript(DEFAULT_CONFIG),
+  });
+  const page = await context.newPage();
+  page.on("pageerror", (error) =>
+    console.error("URL-backed Worker compatibility page error:", error),
+  );
+  await page.goto(`http://site.test:${port}/`);
+  await page.waitForFunction(() => window.__sgHarnessReady === true);
+
+  const result = await page.evaluate(async () => {
+    const readDedicatedWorker = () =>
+      new Promise((resolvePromise, rejectPromise) => {
+        const worker = new Worker("/worker-location.js");
+        worker.onmessage = (event) => {
+          worker.terminate();
+          resolvePromise(event.data);
+        };
+        worker.onerror = (event) => {
+          worker.terminate();
+          rejectPromise(new Error(event.message || "URL Worker failed"));
+        };
+        worker.postMessage("read");
+      });
+    const readSharedWorker = (worker) =>
+      new Promise((resolvePromise, rejectPromise) => {
+        worker.port.onmessage = (event) => {
+          worker.port.close();
+          resolvePromise(event.data);
+        };
+        worker.port.onmessageerror = () => {
+          worker.port.close();
+          rejectPromise(new Error("URL SharedWorker failed"));
+        };
+        worker.port.start();
+        worker.port.postMessage("read");
+      });
+
+    const dedicated = await readDedicatedWorker();
+    const firstShared = new SharedWorker("/shared-worker-location.js", {
+      name: "url-backed-worker-test",
+    });
+    const secondShared = new SharedWorker("/shared-worker-location.js", {
+      name: "url-backed-worker-test",
+    });
+    const shared = await Promise.all([
+      readSharedWorker(firstShared),
+      readSharedWorker(secondShared),
+    ]);
+    const inlineUrl = URL.createObjectURL(
+      new Blob(
+        [
+          `let connectionCount = 0;
+          self.onconnect = (event) => {
+            const port = event.ports[0];
+            const connection = ++connectionCount;
+            port.onmessage = () => port.postMessage({
+              connection,
+              userAgent: navigator.userAgent,
+            });
+            port.start();
+          };`,
+        ],
+        { type: "application/javascript" },
+      ),
+    );
+    const firstInline = new SharedWorker(inlineUrl, {
+      name: "inline-worker-test",
+    });
+    const secondInline = new SharedWorker(inlineUrl, {
+      name: "inline-worker-test",
+    });
+    const inline = await Promise.all([
+      readSharedWorker(firstInline),
+      readSharedWorker(secondInline),
+    ]);
+    URL.revokeObjectURL(inlineUrl);
+    return {
+      constructorProtected: window.Worker !== window.__sgNativeWorker,
+      dedicated,
+      inline,
+      protectedUserAgent: navigator.userAgent,
+      shared,
+    };
+  });
+
+  const root = `http://site.test:${port}`;
+  assert(result.constructorProtected);
+  assert.equal(result.dedicated.href, `${root}/worker-location.js`);
+  assert.equal(result.dedicated.userAgent, await page.evaluate(() =>
+    window.__sgNativeUserAgent,
+  ));
+  assert.deepEqual(
+    result.shared.map((entry) => entry.href),
+    [
+      `${root}/shared-worker-location.js`,
+      `${root}/shared-worker-location.js`,
+    ],
+  );
+  assert.deepEqual(
+    result.shared.map((entry) => entry.connection).sort((a, b) => a - b),
+    [1, 2],
+  );
+  assert.deepEqual(
+    result.inline.map((entry) => entry.connection).sort((a, b) => a - b),
+    [1, 2],
+  );
+  assert(
+    result.inline.every(
+      (entry) => entry.userAgent === result.protectedUserAgent,
+    ),
+  );
+  await context.close();
+}
+
+async function testInlineWorkerVariants(browser, port) {
+  const context = await browser.newContext();
+  await context.addInitScript({ content: protectionInitScript(DEFAULT_CONFIG) });
+  const page = await context.newPage();
+  await page.goto(`http://site.test:${port}/`);
+  await page.waitForFunction(() => window.__sgHarnessReady === true);
+  const results = await page.evaluate(async () => {
+    const snapshot = "postMessage({ userAgent: navigator.userAgent, language: navigator.language })";
+    const results = [];
+    for (const type of ["classic", "module"]) {
+      for (const nested of [false, true]) {
+        const source = nested ? `
+          const url = URL.createObjectURL(new Blob([${JSON.stringify(snapshot)}], {type:'application/javascript'}));
+          const child = new Worker(url, {type:${JSON.stringify(type)}});
+          child.onmessage = event => { postMessage(event.data); child.terminate(); URL.revokeObjectURL(url); };
+        ` : snapshot;
+        const url = URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
+        const options = Object.freeze({ type });
+        const result = await new Promise((resolve, reject) => {
+          const worker = new Worker(url, options);
+          const timeout = setTimeout(() => finish(new Error(`${type} nested=${nested} timed out`)), 5000);
+          function finish(error, value) {
+            clearTimeout(timeout);
+            worker.terminate();
+            URL.revokeObjectURL(url);
+            error ? reject(error) : resolve(value);
+          }
+          worker.onmessage = (event) => finish(null, event.data);
+          worker.onerror = (event) => finish(new Error(event.message));
+        });
+        results.push({ ...result, type: options.type, nested });
+      }
+    }
+    return { results, userAgent: navigator.userAgent, language: navigator.language };
+  });
+  for (const worker of results.results) {
+    assert.equal(worker.userAgent, results.userAgent, `${worker.type} nested=${worker.nested}`);
+    assert.equal(worker.language, results.language);
+  }
+  await context.close();
 }
 
 async function testInvalidatedExtensionContext(browser, port) {
@@ -2248,6 +2591,28 @@ async function testCosmeticFilteringAndElementPicker(browser, port) {
     ),
   );
   await page.waitForTimeout(100);
+  await page.evaluate(() => {
+    window.__pendingCosmeticResponses = [];
+    chrome.runtime.sendMessage = (message, callback) => {
+      if (message.type === "get-cosmetic-rules") window.__pendingCosmeticResponses.push(callback);
+    };
+    for (const listener of window.__sgRuntimeListeners) {
+      listener({ type: "adblock-rules-updated" }, {}, () => {});
+    }
+  });
+  await page.waitForFunction(() => window.__pendingCosmeticResponses.length === 1);
+  await page.evaluate(() => {
+    for (const listener of window.__sgRuntimeListeners) {
+      listener({ type: "adblock-rules-updated" }, {}, () => {});
+    }
+  });
+  await page.waitForFunction(() => window.__pendingCosmeticResponses.length === 2);
+  await page.evaluate(() => {
+    const [stale, latest] = window.__pendingCosmeticResponses;
+    latest({ success: true, enabled: false });
+    stale({ success: true, enabled: true, selectors: [".ad-banner"] });
+  });
+  assert.notEqual(await page.locator(".ad-banner").evaluate((element) => getComputedStyle(element).display), "none");
   const invalidatedCalls = await page.evaluate(async () => {
     let calls = 0;
     chrome.runtime.sendMessage = () => {
@@ -2894,7 +3259,10 @@ async function testOptions(browser) {
     () =>
       window.__chromeState.config.globalWhitelist ===
         "*localhost*, *kameleoon*" &&
-      window.__chromeState.config.canvas.whitelist === "*.imported.test",
+      window.__chromeState.config.canvas.whitelist === "*.imported.test" &&
+      document.querySelector("#global-whitelist").value ===
+        "*localhost*, *kameleoon*" &&
+      document.querySelector("#canvas-whitelist").value === "*.imported.test",
   );
   assert.equal(
     await page.inputValue("#global-whitelist"),
@@ -3069,7 +3437,10 @@ async function main() {
   });
 
   try {
+    await testConfigurationBootstrap(browser);
     await testProtectionRuntime(browser, server.port);
+    await testUrlBackedWorkerCompatibility(browser, server.port);
+    await testInlineWorkerVariants(browser, server.port);
     await testAllowlistAndChallengeFrames(browser, server.port);
     await testInvalidatedExtensionContext(browser, server.port);
     await testCosmeticFilteringAndElementPicker(browser, server.port);

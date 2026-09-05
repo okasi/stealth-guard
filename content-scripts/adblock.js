@@ -2,7 +2,7 @@
   if (
     window.top !== window ||
     !/^https?:$/.test(location.protocol) ||
-    isCloudflareChallengeHostname(location.hostname) ||
+    isCloudflareChallengeUrl(location.href) ||
     isDataDomeChallengeHostname(location.hostname)
   ) {
     return;
@@ -16,6 +16,21 @@
   let observer = null;
   let runtimeMessageListener = null;
   let active = true;
+  let rulesGeneration = 0;
+
+  function isCloudflareChallengeDocument() {
+    if (isCloudflareChallengeUrl(location.href)) return true;
+    if (
+      !Object.prototype.hasOwnProperty.call(window, "_cf_chl_opt") ||
+      !window._cf_chl_opt ||
+      typeof window._cf_chl_opt !== "object"
+    ) {
+      return false;
+    }
+    return Array.from(document.scripts).some(
+      (script) => script.src && isCloudflareChallengeUrl(script.src),
+    );
+  }
 
   function deactivate() {
     if (!active) return;
@@ -120,13 +135,19 @@
   async function requestCosmeticRules() {
     requestTimer = null;
     if (!active) return;
+    if (isCloudflareChallengeDocument()) {
+      clearCosmeticStyles();
+      deactivate();
+      return;
+    }
+    const generation = rulesGeneration;
     try {
       const response = await sendRuntimeMessage({
         type: "get-cosmetic-rules",
         hostname: normalizeHostname(location.hostname),
         tokens: Array.from(observedTokens),
       });
-      if (!response || response.success === false) return;
+      if (!active || generation !== rulesGeneration || !response || response.success === false) return;
       if (!response.enabled) {
         youtubeEnhancements = false;
         clearCosmeticStyles();
@@ -190,6 +211,7 @@
     Object.assign(banner.style, {
       all: "initial",
       position: "fixed",
+      pointerEvents: "none",
       zIndex: "2147483647",
       inset: "12px auto auto 50%",
       transform: "translateX(-50%)",
@@ -268,6 +290,8 @@
       startElementPicker();
       sendResponse({ success: true });
     } else if (message && message.type === "adblock-rules-updated") {
+      rulesGeneration++;
+      youtubeEnhancements = false;
       clearCosmeticStyles();
       scheduleRuleRequest();
       sendResponse({ success: true });
@@ -288,6 +312,11 @@
   observer = new MutationObserver((mutations) => {
     let tokensChanged = false;
     for (const mutation of mutations) {
+      if (mutation.type === "attributes") {
+        const sizeBefore = observedTokens.size;
+        addElementTokens(mutation.target);
+        tokensChanged = observedTokens.size !== sizeBefore || tokensChanged;
+      }
       for (const node of mutation.addedNodes) {
         tokensChanged = addTokensFromElement(node) || tokensChanged;
       }
@@ -295,6 +324,8 @@
     if (tokensChanged) scheduleRuleRequest();
     applyYouTubeEnhancements();
   });
-  if (active) observer.observe(document, { childList: true, subtree: true });
+  if (active) observer.observe(document, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ["id", "class"],
+  });
   window.addEventListener("pagehide", deactivate, { once: true });
 })();

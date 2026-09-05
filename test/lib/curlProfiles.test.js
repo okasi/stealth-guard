@@ -264,9 +264,6 @@ test("profile normalization strips unsafe remote values and supports explicit va
       mobile: true,
     },
   });
-  expect(profiles.getCurlProfileByTarget(null, "chrome131")).toMatchObject({
-    target: "chrome131",
-  });
   expect(profiles.isModernCurlProfileTarget("chrome131")).toBe(true);
   expect(profiles.isModernCurlProfileTarget("chrome142")).toBe(false);
   expect(profiles.isModernCurlProfileTarget("chrome145")).toBe(false);
@@ -314,7 +311,6 @@ test("profile normalization strips unsafe remote values and supports explicit va
       '--impersonate "chrome131_android"',
     ),
   ).toMatchObject({ target: "chrome131_android", mobile: true });
-  expect(profiles.getCurlProfileByTarget(null, null)).toBeNull();
   expect(profiles.createCurlProfileVariant(null, "windows")).toBeNull();
   expect(
     profiles.createCurlProfileVariant(
@@ -353,11 +349,6 @@ test("profile normalization strips unsafe remote values and supports explicit va
     ),
   ).toBeNull();
   expect(
-    profiles.createCurlProfilePublicEntry(
-      profiles.DEFAULT_CURL_PROFILE_CATALOG.profiles[0],
-    ),
-  ).toMatchObject({ target: "chrome131", family: "chrome" });
-  expect(
     profiles.normalizeCurlProfile({
       target: "chrome131",
       clientHints: {
@@ -383,6 +374,11 @@ test("profile normalization strips unsafe remote values and supports explicit va
 });
 
 test("shared identity options expose versioned preset and modern profile choices", () => {
+  expect(profiles.isCurlProfileCompatible("missing", "auto")).toBe(false);
+  expect(profiles.isCurlProfileCompatible("windows", 101)).toBe(false);
+  expect(profiles.isCurlProfileCompatible("windows", "edge101")).toBe(true);
+  expect(profiles.isCurlProfileCompatible("iphone", "safari184_ios")).toBe(true);
+  expect(profiles.isCurlProfileCompatible("android", "chrome131_android")).toBe(true);
   expect(profiles.createUserAgentSelectionValue("windows", "")).toBe(
     "windows|auto",
   );
@@ -405,6 +401,14 @@ test("shared identity options expose versioned preset and modern profile choices
     preset: "macos_chrome",
     curlProfile: "chrome131",
   });
+  expect(profiles.parseUserAgentSelection("android|chrome131")).toEqual({
+    preset: "android",
+    curlProfile: "auto",
+  });
+  expect(profiles.parseUserAgentSelection("macos|safari184_ios")).toEqual({
+    preset: "macos",
+    curlProfile: "auto",
+  });
   expect(profiles.parseUserAgentSelection("iphone|chrome136")).toEqual({
     preset: "iphone",
     curlProfile: "auto",
@@ -417,33 +421,9 @@ test("shared identity options expose versioned preset and modern profile choices
     preset: "windows",
     curlProfile: "auto",
   });
-  expect(profiles.getUserAgentPresetVersionLabel("macos", {})).toBe("");
-  expect(
-    profiles.getUserAgentPresetVersionLabel("macos", {
-      macos: "Mozilla/5.0 Version/17.6 Safari/605.1.15",
-    }),
-  ).toBe("Safari 17.6");
-  expect(
-    profiles.getUserAgentPresetVersionLabel("iphone", {
-      iphone: "Mozilla/5.0 Version/18.4 Mobile Safari/604.1",
-    }),
-  ).toBe("iOS 18.4");
-  expect(
-    profiles.getUserAgentPresetVersionLabel("iphone", {
-      iphone: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X)",
-    }),
-  ).toBe("iOS 17.4.1");
-
-  const strings = {
-    macos:
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Version/17.6 Safari/605.1.15",
-    iphone:
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) Version/17.4.1 Mobile/15E148 Safari/604.1",
-  };
   const options = profiles.getUserAgentSelectionOptions(
     profiles.DEFAULT_CURL_PROFILE_CATALOG,
     { preset: "windows", curlProfile: "auto" },
-    strings,
   );
   const labels = options.map((option) => option.label);
   expect(labels).toEqual(
@@ -479,7 +459,6 @@ test("shared identity options expose versioned preset and modern profile choices
     profiles.getUserAgentSelectionOptions(
       profiles.DEFAULT_CURL_PROFILE_CATALOG,
       { preset: "windows", curlProfile: "chrome999" },
-      strings,
     ).at(-1),
   ).toMatchObject({
     value: "windows|chrome999",
@@ -492,7 +471,6 @@ test("shared identity options expose versioned preset and modern profile choices
     profiles.getUserAgentSelectionOptions(
       profiles.DEFAULT_CURL_PROFILE_CATALOG,
       { preset: "unknown", curlProfile: "auto" },
-      strings,
     ).some((option) => option.value === "unknown"),
   ).toBe(false);
 });

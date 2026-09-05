@@ -5,6 +5,8 @@ const require = createRequire(import.meta.url);
 const {
   assertRuntimeResponse,
   callChromeApi,
+  createSerialQueue,
+  mapWithConcurrency,
   getChromeError,
   isExtensionContextInvalidated,
   getTimeZoneGmtOffsetLabel,
@@ -17,6 +19,53 @@ const {
 afterEach(() => {
   delete globalThis.chrome;
   vi.useRealTimers();
+});
+
+test("serial queues keep operations ordered after a rejected operation", async () => {
+  const enqueue = createSerialQueue();
+  const events = [];
+  let releaseFirst;
+  const first = enqueue(async () => {
+    events.push("first-start");
+    await new Promise((resolve) => {
+      releaseFirst = resolve;
+    });
+    events.push("first-end");
+    throw new Error("first failed");
+  });
+  const second = enqueue(() => {
+    events.push("second");
+    return "done";
+  });
+
+  await Promise.resolve();
+  expect(events).toEqual(["first-start"]);
+  releaseFirst();
+  await expect(first).rejects.toThrow("first failed");
+  await expect(second).resolves.toBe("done");
+  expect(events).toEqual(["first-start", "first-end", "second"]);
+});
+
+test("bounded maps preserve order without exceeding their worker limit", async () => {
+  let active = 0;
+  let peak = 0;
+  const results = await mapWithConcurrency([3, 1, 2], 2, async (value, index) => {
+    active++;
+    peak = Math.max(peak, active);
+    await Promise.resolve();
+    active--;
+    return `${index}:${value}`;
+  });
+
+  expect(results).toEqual(["0:3", "1:1", "2:2"]);
+  expect(peak).toBe(2);
+  await expect(mapWithConcurrency([], 2, () => null)).resolves.toEqual([]);
+  await expect(mapWithConcurrency([1], 0, (value) => value + 1)).resolves.toEqual([
+    2,
+  ]);
+  await expect(
+    mapWithConcurrency([1], 1, () => Promise.reject(new Error("map failed"))),
+  ).rejects.toThrow("map failed");
 });
 
 test("Chrome callback helpers normalize success and error responses", async () => {
@@ -40,6 +89,14 @@ test("Chrome callback helpers normalize success and error responses", async () =
     },
   };
   await expect(callChromeApi(calculator, "add", 2)).resolves.toBe(3);
+  const brokenApi = {
+    explode() {
+      throw new Error("synchronous failure");
+    },
+  };
+  await expect(callChromeApi(brokenApi, "explode")).rejects.toThrow(
+    "synchronous failure",
+  );
   expect(getChromeError()).toBeNull();
 
   chrome.runtime.lastError = { message: "disconnected" };

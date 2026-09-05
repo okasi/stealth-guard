@@ -7,10 +7,14 @@ const { DEFAULT_FILTER_LISTS, normalizeFilterListEntries } = require(
 );
 const {
   createAdblockEngine,
+  domainMatches,
   getCosmeticSelectors,
   mergeCompiledRules,
   normalizeFilterSubscriptions,
+  parseCosmeticRule,
   parseFilterList,
+  parseNetworkOptions,
+  parseNetworkRule,
   isSafeRegexPattern,
   shouldBlockRequest,
 } = require("../../lib/adblock.js");
@@ -46,6 +50,14 @@ test("normalizes safe HTTPS filter subscriptions", () => {
     },
   ]);
   expect(normalizeFilterSubscriptions([])).toHaveLength(3);
+  expect(
+    normalizeFilterSubscriptions(
+      Array.from({ length: 40 }, (_, index) => ({
+        id: `list-${index}`,
+        url: `https://example.test/${index}`,
+      })),
+    ),
+  ).toHaveLength(32);
 });
 
 test("parses and matches common AdGuard and uBlock network rules", () => {
@@ -196,4 +208,263 @@ test("merges filter lists larger than the JavaScript argument limit", () => {
 
   expect(merged.network.block).toHaveLength(150_000);
   expect(merged.stats.network).toBe(150_000);
+});
+
+test("covers supported network option aliases, negations, and rejection paths", () => {
+  expect(
+    parseNetworkOptions("css,doc,frame,xhr,~image,,~third-party"),
+  ).toMatchObject({
+    types: ["stylesheet", "document", "subdocument", "xmlhttprequest"],
+    excludedTypes: ["image"],
+    thirdParty: false,
+  });
+  expect(parseNetworkOptions("first-party").thirdParty).toBe(false);
+  expect(parseNetworkOptions("~first-party").thirdParty).toBe(true);
+  expect(
+    parseNetworkOptions(
+      "domain=site.example|~excluded.example|bad host,match-case,~important,elemhide",
+    ),
+  ).toMatchObject({
+    domains: ["site.example"],
+    excludedDomains: ["excluded.example"],
+    matchCase: true,
+    important: false,
+  });
+  expect(parseNetworkOptions("~match-case,important")).toMatchObject({
+    matchCase: false,
+    important: true,
+  });
+  expect(parseNetworkOptions("redirect=noopjs")).toBeNull();
+  expect(parseNetworkOptions("unknown-option")).toBeNull();
+});
+
+test("rejects malformed network, cosmetic, hosts, and extended rules", () => {
+  expect(parseNetworkRule("")).toBeNull();
+  expect(parseNetworkRule("x".repeat(2049))).toBeNull();
+  expect(parseNetworkRule("*".repeat(17))).toBeNull();
+  expect(parseNetworkRule("*")).toBeNull();
+  expect(parseNetworkRule("*$script")).toMatchObject({ kind: "url" });
+  expect(parseNetworkRule("/[/")).toMatchObject({ kind: "regex" });
+  expect(parseNetworkRule("/valid/$match-case")).toMatchObject({
+    kind: "regex",
+    flags: "",
+  });
+
+  for (const rule of [
+    "##",
+    `##${"x".repeat(2049)}`,
+    "##div{color:red}",
+    "##div:has-text(ad)",
+  ]) {
+    expect(parseCosmeticRule(rule)).toBeNull();
+  }
+  expect(parseCosmeticRule("not cosmetic")).toBeNull();
+  expect(parseCosmeticRule(" ,bad/domain,site.example##.ad")).toMatchObject({
+    domains: ["site.example"],
+  });
+
+  const compiled = parseFilterList(
+    [null, "127.0.0.1 localhost", "#?#extended", "[/metadata]", "! comment"].join(
+      "\n",
+    ),
+  );
+  expect(compiled.stats).toEqual({ network: 0, cosmetic: 0, ignored: 2 });
+  expect(parseFilterList(null)).toEqual(expect.objectContaining({ version: 2 }));
+});
+
+test("malformed scopes never become global blocking rules", () => {
+  const rules = [
+    "/index.js$domain=bad/host", "/index.js$domain=", "/index.js$from=~bad/host",
+    "bad/host##.ad", "##div{color:red}", "bad/host#@#.ad",
+  ];
+  expect(parseFilterList(rules.join("\n")).stats).toEqual({
+    network: 0, cosmetic: 0, ignored: rules.length,
+  });
+});
+
+test("handles sparse compiled data and every request matching boundary", () => {
+  const emptyEngine = createAdblockEngine(null);
+  expect(createAdblockEngine({ version: 2, network: {}, cosmetic: {} }).cosmeticFallback).toEqual([]);
+  expect(
+    shouldBlockRequest(emptyEngine, null, "page.test", "request.test"),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(emptyEngine, {}, "page.test", "request.test"),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(
+      emptyEngine,
+      { url: "https://request.test" },
+      "",
+      "request.test",
+    ),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(
+      emptyEngine,
+      { url: "https://request.test" },
+      "page.test",
+      "",
+    ),
+  ).toBe(false);
+  expect(getCosmeticSelectors(null, "page.test")).toEqual([]);
+  expect(getCosmeticSelectors(emptyEngine, "")).toEqual([]);
+
+  const merged = mergeCompiledRules([
+    null,
+    { version: 1 },
+    { version: 2, network: {}, cosmetic: {}, stats: {} },
+    {
+      version: 2,
+      network: { allow: [{ id: "allow" }] },
+      cosmetic: { allow: [{ id: "cosmetic-allow" }] },
+      stats: { network: 1, cosmetic: 2, ignored: 3 },
+    },
+  ]);
+  expect(merged.network.allow).toEqual([{ id: "allow" }]);
+  expect(merged.cosmetic.allow).toEqual([{ id: "cosmetic-allow" }]);
+  expect(merged.stats).toEqual({ network: 1, cosmetic: 2, ignored: 3 });
+
+  const rules = parseFilterList(
+    [
+      "||types.test^$script,~image",
+      "||excluded-type.test^$~image",
+      "||party.test^$third-party",
+      "||scoped.test^$domain=page.test|~excluded.test",
+      "||excluded-domain.test^$domain=excluded.test|~excluded.test",
+      "|https://start.test/path|$match-case",
+      "plain-token",
+    ].join("\n"),
+  );
+  const engine = createAdblockEngine(rules);
+  expect(
+    shouldBlockRequest(
+      engine,
+      { url: "https://types.test/a", type: "image" },
+      "page.test",
+      "types.test",
+    ),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(
+      engine,
+      { url: "https://excluded-type.test/a", type: "image" },
+      "page.test",
+      "excluded-type.test",
+    ),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(
+      engine,
+      { url: "https://party.test/a", type: "script" },
+      "party.test",
+      "party.test",
+    ),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(
+      engine,
+      { url: "https://excluded-domain.test/a", type: "script" },
+      "excluded.test",
+      "excluded-domain.test",
+    ),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(
+      engine,
+      { url: "https://scoped.test/a", type: "script" },
+      "other.test",
+      "scoped.test",
+    ),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(
+      engine,
+      { url: "https://scoped.test/a", type: "script" },
+      "excluded.test",
+      "scoped.test",
+    ),
+  ).toBe(false);
+  expect(
+    shouldBlockRequest(
+      engine,
+      { url: "https://start.test/path", type: "main_frame" },
+      "page.test",
+      "start.test",
+    ),
+  ).toBe(true);
+  expect(
+    shouldBlockRequest(
+      engine,
+      { url: "https://none.test", type: "sub_frame" },
+      "page.test",
+      "none.test",
+    ),
+  ).toBe(false);
+});
+
+test("indexes wildcard domains, invalid runtime regexes, and cosmetic fallbacks", () => {
+  for (let index = 0; index < 260; index += 1) {
+    expect(
+      domainMatches(`a.cache-${index}.test`, `*.cache-${index}.test`),
+    ).toBe(true);
+  }
+  expect(domainMatches("a.cache-259.test", "*.cache-259.test")).toBe(true);
+  expect(domainMatches("a.repeat.test", "*.repeat.test")).toBe(true);
+  expect(domainMatches("b.repeat.test", "*.repeat.test")).toBe(true);
+  expect(domainMatches("", "*.cache-1.test")).toBe(false);
+  expect(domainMatches("a.test", "")).toBe(false);
+
+  const compiled = parseFilterList(
+    [
+      "##body > aside",
+      "##.short.longer-token",
+      "#@#.generic-exception",
+    ].join("\n"),
+  );
+  compiled.network.block.push({
+    allow: false,
+    kind: "regex",
+    pattern: "[",
+    flags: "",
+    options: parseNetworkOptions(""),
+  });
+  const engine = createAdblockEngine(compiled);
+  expect(engine.block.fallback).toEqual([]);
+  expect(getCosmeticSelectors(engine, "site.test", null)).toContain(
+    "body > aside",
+  );
+  expect(getCosmeticSelectors(engine, "site.test", ["longer-token"])).toContain(
+    ".short.longer-token",
+  );
+
+  const cappedFallbacks = parseFilterList(
+    Array.from(
+      { length: 501 },
+      (_, index) => `##aside:nth-child(${index + 1})`,
+    ).join("\n"),
+  );
+  expect(createAdblockEngine(cappedFallbacks).cosmeticFallback).toHaveLength(500);
+});
+
+
+test("indexes substring literals without losing URL matches or exceptions", () => {
+  const engine = createAdblockEngine(parseFilterList([
+    "adserver$script",
+    "adserver$xmlhttprequest",
+    "@@trusted-adserver$script",
+    "tracking*pixel$script",
+    "||ads.example^$image",
+    "||ads.example^$script",
+    "##.slot.banner",
+    "##.slot.footer",
+  ].join("\n")));
+  const blocked = (path, type = "script") => shouldBlockRequest(
+    engine, { url: `https://cdn.example/${path}`, type }, "site.example", "cdn.example",
+  );
+  expect(blocked("my-adserver-bundle.js")).toBe(true);
+  expect(blocked("my-adserver-bundle.js", "xmlhttprequest")).toBe(true);
+  expect(blocked("my-trusted-adserver-bundle.js")).toBe(false);
+  expect(blocked("some-tracking-token/pixel.gif")).toBe(true);
+  expect(blocked("adse-but-no-full-match.js")).toBe(false);
 });

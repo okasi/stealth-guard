@@ -22,13 +22,18 @@ setInterval(() => {
 
 async function initializePopup() {
   try {
+    const auxiliaryLoads = Promise.all([
+      loadCurlProfileCatalog(),
+      loadBundledGpuProfileIndex().then((profiles) => {
+        bundledGpuProfiles = profiles;
+      }),
+    ]);
     const [config, tab, proxyStatus] = await Promise.all([
       loadRuntimeConfig(),
       queryCurrentTab(),
       loadProxyRuntimeStatus(),
-      loadCurlProfileCatalog(),
-      loadBundledGpuProfiles(),
     ]);
+    await auxiliaryLoads;
     currentConfig = config;
     currentTab = tab;
     currentProxyRuntimeStatus = proxyStatus;
@@ -40,21 +45,6 @@ async function initializePopup() {
     console.error("Failed to initialize popup:", error);
     document.body.textContent =
       "Failed to load settings. Reload the extension and try again.";
-  }
-}
-
-async function loadBundledGpuProfiles() {
-  try {
-    const response = await fetch(
-      chrome.runtime.getURL(`${GPU_PROFILE_BUNDLE_PATH}/index.json`),
-    );
-    if (!response.ok) throw new Error("Bundled GPU profile index unavailable");
-    bundledGpuProfiles = normalizeGpuProfileIndex(await response.json()).filter(
-      (profile) => profile.webgpuAvailable,
-    );
-  } catch (error) {
-    console.warn("Failed to load bundled GPU profiles:", error);
-    bundledGpuProfiles = [];
   }
 }
 
@@ -182,7 +172,6 @@ function populateUserAgentQuickSelect() {
   const options = getUserAgentSelectionOptions(
     curlProfileCatalog,
     currentConfig.useragent,
-    USER_AGENT_STRINGS,
   );
   select.replaceChildren(
     ...options.map((option) => new Option(option.label, option.value)),
@@ -671,14 +660,8 @@ async function selectBundledGpuProfile(event) {
     await saveCurrentConfig();
     return;
   }
-  const assetPath = getGpuProfileAssetPath(profileId);
-  if (!assetPath) return;
   try {
-    const response = await fetch(chrome.runtime.getURL(assetPath));
-    if (!response.ok) throw new Error("Bundled GPU profile unavailable");
-    const profile = normalizeGpuProfile(await response.json());
-    if (!profile) throw new Error("Bundled GPU profile is invalid");
-    currentConfig.gpuProfile = profile;
+    currentConfig.gpuProfile = await loadBundledGpuProfile(profileId);
     renderPopup();
     await saveCurrentConfig();
   } catch (error) {
@@ -713,40 +696,28 @@ async function toggleCurrentSiteAllowlist() {
 
 async function toggleCurrentSiteAdblock() {
   if (!currentSessionHostname) return;
-  const allowlisted = isDomainAllowlisted(
+  currentConfig.tracker.whitelist = toggleDomainAllowlist(
     currentSessionHostname,
     currentConfig.tracker.whitelist,
   );
-  currentConfig.tracker.whitelist = allowlisted
-    ? removeDomainFromAllowlist(
-        currentSessionHostname,
-        currentConfig.tracker.whitelist,
-      )
-    : addDomainToAllowlist(
-        currentSessionHostname,
-        currentConfig.tracker.whitelist,
-      );
   renderPopup();
   await saveCurrentConfig();
 }
 
 async function toggleCurrentSiteCosmeticFiltering() {
   if (!currentSessionHostname) return;
-  const allowlisted = isDomainAllowlisted(
+  currentConfig.tracker.cosmeticWhitelist = toggleDomainAllowlist(
     currentSessionHostname,
     currentConfig.tracker.cosmeticWhitelist,
   );
-  currentConfig.tracker.cosmeticWhitelist = allowlisted
-    ? removeDomainFromAllowlist(
-        currentSessionHostname,
-        currentConfig.tracker.cosmeticWhitelist,
-      )
-    : addDomainToAllowlist(
-        currentSessionHostname,
-        currentConfig.tracker.cosmeticWhitelist,
-      );
   renderPopup();
   await saveCurrentConfig();
+}
+
+function toggleDomainAllowlist(hostname, allowlist) {
+  return isDomainAllowlisted(hostname, allowlist)
+    ? removeDomainFromAllowlist(hostname, allowlist)
+    : addDomainToAllowlist(hostname, allowlist);
 }
 
 async function startElementPicker() {

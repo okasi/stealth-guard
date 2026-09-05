@@ -12,9 +12,8 @@ npm install --no-save fingerprint-generator
 node tools/generate-apify-profile.mjs windows-edge > apify-profile.json
 ```
 
-The repository includes an equivalent helper at
-`tools/generate-apify-profile.mjs`. Install `fingerprint-generator` in the
-environment that runs the helper, then import its JSON output from Advanced
+Supported presets: `windows-edge`, `macos-chrome`, `macos-safari`,
+`ios-safari`, and `android-chrome`. Import the generated JSON from Advanced
 Settings. The bridge maps Apify's `fingerprint.videoCard` into the extension's
 WebGL identity surface and does not apply a sourced WebGPU adapter profile
 unless the JSON also contains an explicit WebGPU section. The extension's

@@ -7,7 +7,7 @@
   window.__STEALTH_GUARD_INJECTED__ = true;
 
   if (
-    isCloudflareChallengeHostname(window.location.hostname) ||
+    isCloudflareChallengeUrl(window.location.href) ||
     isDataDomeChallengeHostname(window.location.hostname)
   ) {
     return;
@@ -33,6 +33,7 @@
   let active = true;
   let runtimeMessageListener = null;
   let alertMessageListener = null;
+  let receivedConfigUpdate = false;
 
   function deactivate() {
     if (!active) return;
@@ -103,12 +104,18 @@
         Number.isFinite(innerHeight) ? innerHeight + 1 : 0,
         Number.isFinite(outerHeight) && outerHeight > 0 ? outerHeight : 0,
       );
-      chrome.runtime.sendMessage(
-        { type: "repair-window-geometry", width, height },
-        () => {
-          getChromeError();
-        },
-      );
+      callChromeApi(chrome.runtime, "sendMessage", {
+        type: "repair-window-geometry",
+        width,
+        height,
+      }).catch((error) => {
+        if (!isExtensionContextInvalidated(error)) {
+          debugWarn(
+            "[Stealth Guard] Native window geometry repair failed:",
+            error,
+          );
+        }
+      });
     } catch (error) {
       if (!isExtensionContextInvalidated(error)) {
         debugWarn(
@@ -125,43 +132,26 @@
     capture: true,
   });
 
-  function loadStoredContentConfig() {
-    return new Promise((resolve) => {
-      try {
-        chrome.storage.local.get([STORAGE_KEY, CURL_PROFILE_CACHE_KEY], (result) => {
-          const error = getChromeError();
-          if (error) {
-            if (isExtensionContextInvalidated(error)) {
-              deactivate();
-            } else {
-              debugWarn(
-                "[Stealth Guard] Failed to load stored config:",
-                error,
-              );
-            }
-            resolve(config);
-            return;
-          }
-          curlProfileCatalog = normalizeCurlProfileCatalog(
-            result && result[CURL_PROFILE_CACHE_KEY],
-          );
-          resolve(
-            createContentConfig(
-              result && result[STORAGE_KEY],
-              window.location.hostname,
-              curlProfileCatalog,
-            ),
-          );
-        });
-      } catch (error) {
-        if (isExtensionContextInvalidated(error)) {
-          deactivate();
-        } else {
-          debugWarn("[Stealth Guard] Failed to load stored config:", error);
-        }
-        resolve(config);
+  async function loadStoredConfig() {
+    try {
+      const result = await callChromeApi(chrome.storage.local, "get", [
+        STORAGE_KEY,
+        CURL_PROFILE_CACHE_KEY,
+      ]);
+      // A broadcast may arrive before this storage read finishes.
+      if (active && !receivedConfigUpdate) {
+        applyTrustedContentConfig(
+          result && result[STORAGE_KEY],
+          result && result[CURL_PROFILE_CACHE_KEY],
+        );
       }
-    });
+    } catch (error) {
+      if (isExtensionContextInvalidated(error)) {
+        deactivate();
+      } else {
+        debugWarn("[Stealth Guard] Failed to load stored config:", error);
+      }
+    }
   }
 
   function applyTrustedContentConfig(nextConfig, nextProfileCatalog) {
@@ -189,15 +179,14 @@
     JSON.stringify(config),
     JSON.stringify(bridge),
     createDomainPatternTools.toString(),
-    JSON.stringify(USER_AGENT_STRINGS),
-    JSON.stringify(USER_AGENT_CLIENT_HINTS),
+    createCloudflareChallengeUrlMatcher.toString(),
   ].join(", ");
   script.textContent =
     `(${installMainWorldProtections.toString()})(${serializedArguments});`;
   (document.head || document.documentElement).appendChild(script);
   script.remove();
 
-  loadStoredContentConfig().then(applyTrustedContentConfig);
+  loadStoredConfig();
 
   function requestMainWorldDiagnostics() {
     return new Promise((resolve) => {
@@ -242,6 +231,7 @@
   runtimeMessageListener = (request, sender, sendResponse) => {
     if (!active) return;
     if (request && request.type === "config-updated") {
+      receivedConfigUpdate = true;
       applyTrustedContentConfig(request.config, request.profileCatalog);
     }
     if (request && request.type === "run-self-test") {
@@ -280,37 +270,19 @@
 
     if (reportedFeatures.has(alert.feature)) return;
     reportedFeatures.add(alert.feature);
-    try {
-      chrome.runtime.sendMessage(
-        {
-          type: "fingerprint-detected",
-          feature: alert.feature,
-          hostname: window.location.hostname,
-        },
-        () => {
-          const error = getChromeError();
-          if (error) {
-            if (isExtensionContextInvalidated(error)) {
-              deactivate();
-              return;
-            }
-            reportedFeatures.delete(alert.feature);
-            debugWarn(
-              "[Stealth Guard] Failed to report fingerprint access:",
-              error.message || String(error),
-            );
-          } else {
-            debugLog(
-              "[Stealth Guard] Reported fingerprint access:",
-              alert.feature,
-            );
-          }
-        },
-      );
-    } catch (error) {
-      if (isExtensionContextInvalidated(error)) {
-        deactivate();
-      } else {
+    callChromeApi(chrome.runtime, "sendMessage", {
+      type: "fingerprint-detected",
+      feature: alert.feature,
+      hostname: window.location.hostname,
+    }).then(
+      () => {
+        debugLog("[Stealth Guard] Reported fingerprint access:", alert.feature);
+      },
+      (error) => {
+        if (isExtensionContextInvalidated(error)) {
+          deactivate();
+          return;
+        }
         reportedFeatures.delete(alert.feature);
         if (active) {
           debugWarn(
@@ -318,8 +290,8 @@
             error.message || String(error),
           );
         }
-      }
-    }
+      },
+    );
   };
   window.addEventListener("message", alertMessageListener);
   window.addEventListener("pagehide", deactivate, { once: true });

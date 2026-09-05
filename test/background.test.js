@@ -4,26 +4,15 @@ import { expect, test, vi } from "vitest";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { DEFAULT_CONFIG, getUserAgentString } = require("../lib/config.js");
+const { DEFAULT_CONFIG } = require("../lib/config.js");
 const {
   CURL_PROFILE_CACHE_KEY,
   CURL_PROFILE_UPDATE_SOURCE,
   getCurlProfileForConfig,
 } = require("../lib/curlProfiles.js");
-const BACKGROUND_SCRIPTS = [
-  "lib/runtime.js",
-  "lib/storage.js",
-  "lib/filterLists.js",
-  "lib/adblock.js",
-  "lib/gpuProfiles.js",
-  "lib/config.js",
-  "lib/curlProfiles.js",
-  "lib/domainFilter.js",
-  "lib/proxy.js",
-  "lib/proxyCredentials.js",
-  "lib/session.js",
-  "background.js",
-];
+const BACKGROUND_SCRIPTS = JSON.parse(
+  readFileSync(new URL("../manifest.json", import.meta.url), "utf8"),
+).background.scripts;
 
 function createEvent() {
   const listeners = [];
@@ -363,6 +352,10 @@ async function installBackground(config = DEFAULT_CONFIG, behavior = {}) {
     },
     fetch: vi.fn().mockImplementation(async (url) => {
       state.fetches.push(String(url));
+      if (behavior.fetch) {
+        const response = await behavior.fetch(String(url));
+        if (response) return response;
+      }
       if (behavior.exitIp && String(url).includes("api.ipify.org")) {
         return {
           ok: true,
@@ -449,6 +442,7 @@ test("background initializes policies and applies config changes atomically", as
     url: tab.url,
     requestHeaders: headers,
   });
+  expect(headers).toEqual([{ name: "Accept", value: "*/*" }]);
   expect(
     modified.requestHeaders.find((header) => header.name === "User-Agent")
       .value,
@@ -476,6 +470,33 @@ test("background initializes policies and applies config changes atomically", as
   expect(
     events.onBeforeSendHeaders.listeners[0]({
       url: "https://challenges.cloudflare.com/turnstile",
+      requestHeaders: challengeHeaders,
+    }).requestHeaders,
+  ).toBe(challengeHeaders);
+  expect(
+    events.onBeforeSendHeaders.listeners[0]({
+      url: "https://site.test/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1",
+      tabId: tab.id,
+      requestHeaders: challengeHeaders,
+    }).requestHeaders,
+  ).toBe(challengeHeaders);
+  expect(
+    events.onBeforeSendHeaders.listeners[0]({
+      url: "https://site.test/ordinary-subresource.js",
+      tabId: tab.id,
+      requestHeaders: challengeHeaders,
+    }).requestHeaders,
+  ).toBe(challengeHeaders);
+  expect(
+    events.onBeforeSendHeaders.listeners[0]({
+      url: "https://unrelated.test/ordinary-subresource.js",
+      tabId: tab.id,
+      requestHeaders: challengeHeaders,
+    }).requestHeaders,
+  ).not.toBe(challengeHeaders);
+  expect(
+    events.onBeforeSendHeaders.listeners[0]({
+      url: "https://site.test/protected?__cf_chl_rt_tk=challenge-token",
       requestHeaders: challengeHeaders,
     }).requestHeaders,
   ).toBe(challengeHeaders);
@@ -914,28 +935,42 @@ test("background keeps TechCrunch usable without opening its anti-adblock gate",
 });
 
 test("background refreshes modern curl-impersonate profiles every four hours", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.useragent.preset = "macos";
+  config.useragent.curlProfile = "safari184";
   const wrapperUrl =
     "https://raw.githubusercontent.com/lexiforest/curl-impersonate/main/bin/curl_chrome150";
-  const { sendMessage, state } = await installBackground(DEFAULT_CONFIG, {
+  const { sendMessage, state, events } = await installBackground(config, {
     curlProfileIndex: [
       { name: "curl_chrome150", type: "file" },
       { name: "curl_chrome136", type: "file" },
+      { name: "curl_safari184", type: "file" },
     ],
     curlProfileSources: {
+      "https://raw.githubusercontent.com/lexiforest/curl-impersonate/main/bin/curl_safari184":
+        "curl -H 'user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.16 (KHTML, like Gecko) Version/18.4 Safari/605.1.16'",
       [wrapperUrl]:
         '#!/usr/bin/env bash\n"$dir/curl-impersonate" --compressed --impersonate "chrome150" "$@"',
     },
   });
 
   const before = await sendMessage({ type: "get-curl-profile-status" });
-  expect(before.status.profiles.some((profile) => profile.target === "chrome131")).toBe(true);
+  expect(before.catalog.profiles.some((profile) => profile.target === "chrome131")).toBe(true);
   expect(
-    before.status.profiles.some((profile) =>
+    before.catalog.profiles.some((profile) =>
       ["chrome142", "chrome145", "chrome146"].includes(profile.target),
     ),
   ).toBe(false);
 
+  const headerListener = events.onBeforeSendHeaders.listeners[0];
+  const readUserAgent = () =>
+    headerListener({
+      url: "https://example.com/",
+      requestHeaders: [{ name: "User-Agent", value: "native" }],
+    }).requestHeaders.find((header) => header.name === "User-Agent").value;
+  expect(readUserAgent()).toContain("Safari/605.1.15");
   const result = await sendMessage({ type: "update-curl-profiles" });
+  expect(readUserAgent()).toContain("Safari/605.1.16");
   expect(result.success).toBe(true);
   expect(result.catalog.profiles.some((profile) => profile.target === "chrome150")).toBe(true);
   expect(state.storageData[CURL_PROFILE_CACHE_KEY]).toBeTruthy();
@@ -1550,4 +1585,92 @@ test("background handles install, context-menu, proxy, and unknown events", asyn
   expect(state.notifications.at(-1).title).toContain("Proxy Error");
 
   expect(await sendMessage({ type: "unknown" })).toBeUndefined();
+});
+
+
+test("a pending filter download cannot re-enable disabled protection", async () => {
+  let release;
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.filterLists = [{ id: "slow", name: "Slow", url: "https://filters.test/slow", enabled: true }];
+  const pending = new Promise((resolve) => { release = resolve; });
+  const { sendMessage, events } = await installBackground(config, {
+    fetch: (url) => url.includes("filters.test") ? pending : null,
+  });
+  const update = sendMessage({ type: "update-adblock-filters" });
+  config.tracker.enabled = false;
+  expect(await sendMessage({ type: "update-config", config })).toEqual({ success: true });
+  release({ ok: true, text: async () => "||late-ad.example^" });
+  expect((await update).success).toBe(true);
+  expect(events.onBeforeRequest.listeners).toHaveLength(0);
+  expect((await sendMessage({ type: "get-adblock-status" })).status).toMatchObject({
+    updating: false, nextUpdate: null,
+  });
+});
+
+test("failed filter persistence leaves the active engine and cache unchanged", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.filterLists = [{ id: "slow", url: "https://filters.test/slow", enabled: true }];
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const { sendMessage, chrome, state } = await installBackground(config, {
+    fetch: (url) => url.includes("filters.test") ? pending : null,
+  });
+  const write = chrome.storage.local.set;
+  chrome.storage.local.set = (items, callback) => {
+    if (!items["stealth-guard-filter-cache"]) return write(items, callback);
+    chrome.runtime.lastError = { message: "Disk full" };
+    callback();
+    chrome.runtime.lastError = null;
+  };
+  const update = sendMessage({ type: "update-adblock-filters" });
+  release({ ok: true, text: async () => "||late-ad.example^" });
+  expect(await update).toMatchObject({ success: false, error: "Disk full" });
+  const { status } = await sendMessage({ type: "get-adblock-status" });
+  expect(status).toMatchObject({ updating: false, error: "Disk full" });
+  expect(status.lists[0].networkRules).toBe(0);
+  expect(state.storageData["stealth-guard-filter-cache"]).toBeUndefined();
+});
+
+test("unknown messages cannot dispatch inherited object methods", async () => {
+  const { sendMessage } = await installBackground();
+  for (const type of ["toString", "constructor", "__proto__"]) {
+    expect(await sendMessage({ type })).toBeUndefined();
+  }
+});
+
+test("automatic filter downloads stay disabled while manual updates still work", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.autoUpdate = false;
+  config.tracker.filterLists = [{ id: "manual", url: "https://filters.test/manual", enabled: true }];
+  const { state, sendMessage } = await installBackground(config, { filterText: "||ads.test^" });
+  expect(state.fetches).toEqual([]);
+  expect(await sendMessage({ type: "update-adblock-filters" })).toMatchObject({ success: true, updated: 1 });
+  expect(state.fetches).toEqual(["https://filters.test/manual"]);
+});
+
+test("filter changes during a download are refreshed after the pending work", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.filterLists = [{ id: "old", url: "https://filters.test/old", enabled: true }];
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const { state, sendMessage } = await installBackground(config, {
+    fetch: (url) => url.endsWith("/old") ? pending : null,
+    filterText: "||new-ad.test^",
+  });
+  config.tracker.filterLists = [{ id: "new", url: "https://filters.test/new", enabled: true }];
+  await sendMessage({ type: "update-config", config });
+  const update = sendMessage({ type: "update-adblock-filters" });
+  release({ ok: true, text: async () => "||old-ad.test^" });
+  expect(await update).toMatchObject({ success: true });
+  expect(Object.keys(state.storageData["stealth-guard-filter-cache"].lists)).toEqual(["new"]);
+});
+
+test("extension pages in tabs use the requested session target", async () => {
+  const { sendMessage, state, tab } = await installBackground();
+  const result = await sendMessage({ type: "save-session", tabId: tab.id }, {
+    url: "chrome-extension://test/options/options.html",
+    tab: { id: 99, url: "chrome-extension://test/options/options.html" },
+  });
+  expect(result.success).toBe(true);
+  expect(state.executedScripts).toHaveLength(1);
 });

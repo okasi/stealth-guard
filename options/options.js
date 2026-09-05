@@ -14,7 +14,42 @@ let bundledGpuProfiles = [];
 
 const AUTO_SAVE_DELAY_MS = 1000;
 const MAX_CONFIG_FILE_SIZE = 1024 * 1024;
+const MAX_CONCURRENT_PROFILE_REFRESHES = 4;
 const TIMEZONE_LABEL_REFRESH_MS = 60 * 1000;
+const CONFIG_FIELD_BINDINGS = [
+  ["global-enabled", ["enabled"], "checked"],
+  ["global-whitelist", ["globalWhitelist"]],
+  ["notifications-enabled", ["notifications", "enabled"], "checked"],
+  ["webgl-preset", ["webgl", "preset"]],
+  ["webgl-mode", ["webgl", "mode"]],
+  ["webgl-compatibility-whitelist", ["webgl", "compatibilityWhitelist"]],
+  ["webgl-strict-whitelist", ["webgl", "strictWhitelist"]],
+  ["canvas-noise-level", ["canvas", "noiseLevel"]],
+  ["timezone-select", ["timezone", "name"]],
+  ["language-preset", ["language", "preset"]],
+  ["webrtc-policy", ["webrtc", "policy"]],
+  ["tracker-use-built-in", ["tracker", "useBuiltIn"], "checked"],
+  ["tracker-custom-domains", ["tracker", "customDomains"]],
+  ["tracker-auto-update", ["tracker", "autoUpdate"], "checked"],
+  [
+    "tracker-update-interval",
+    ["tracker", "updateIntervalHours"],
+    "valueAsNumber",
+  ],
+  ["tracker-cosmetic-filtering", ["tracker", "cosmeticFiltering"], "checked"],
+  ["tracker-cosmetic-whitelist", ["tracker", "cosmeticWhitelist"]],
+  ["tracker-youtube-enhancements", ["tracker", "youtubeEnhancements"], "checked"],
+  ["tracker-custom-filters", ["tracker", "customFilters"]],
+  ["proxy-enabled", ["proxy", "enabled"], "checked"],
+  ["proxy-routing-mode", ["proxy", "routingMode"]],
+  ["proxy-sync-timezone", ["proxy", "syncTimezone"], "checked"],
+  ["proxy-sync-geolocation", ["proxy", "syncGeolocation"], "checked"],
+  ["proxy-sync-language", ["proxy", "syncLanguage"], "checked"],
+  ...PROTECTION_FEATURES.flatMap((featureName) => [
+    [`${featureName}-enabled`, [featureName, "enabled"], "checked"],
+    [`${featureName}-whitelist`, [featureName, "whitelist"]],
+  ]),
+];
 
 document.addEventListener("DOMContentLoaded", initializeOptions);
 document.addEventListener("visibilitychange", saveWhenHidden);
@@ -43,9 +78,37 @@ function serializeConfig(config) {
   return JSON.stringify(config);
 }
 
+function getConfigValue(path) {
+  return path.reduce((value, key) => value[key], currentConfig);
+}
+
+function setConfigValue(path, value) {
+  const key = path[path.length - 1];
+  const parent = path
+    .slice(0, -1)
+    .reduce((entry, part) => entry[part], currentConfig);
+  parent[key] = value;
+}
+
+function populateConfigFields() {
+  for (const [id, path, property = "value"] of CONFIG_FIELD_BINDINGS) {
+    document.getElementById(id)[property] = getConfigValue(path);
+  }
+}
+
+function collectConfigFields() {
+  for (const [id, path, property = "value"] of CONFIG_FIELD_BINDINGS) {
+    setConfigValue(path, document.getElementById(id)[property]);
+  }
+}
+
 async function loadOptionsConfig() {
-  currentConfig = await loadRuntimeConfig();
-  await loadBundledGpuProfiles();
+  const [config, profiles] = await Promise.all([
+    loadRuntimeConfig(),
+    loadBundledGpuProfileIndex(),
+  ]);
+  currentConfig = config;
+  bundledGpuProfiles = profiles;
   await refreshStoredProxyProfiles();
   await Promise.all([
     refreshProxyCredentialStatuses(),
@@ -59,51 +122,43 @@ async function loadOptionsConfig() {
   populateForm();
 }
 
-async function loadBundledGpuProfiles() {
-  try {
-    const response = await fetch(
-      chrome.runtime.getURL(`${GPU_PROFILE_BUNDLE_PATH}/index.json`),
-    );
-    if (!response.ok) throw new Error("Bundled GPU profile index unavailable");
-    bundledGpuProfiles = normalizeGpuProfileIndex(await response.json()).filter(
-      (profile) => profile.webgpuAvailable,
-    );
-  } catch (error) {
-    console.warn("Failed to load bundled GPU profiles:", error);
-    bundledGpuProfiles = [];
-  }
-}
-
 async function refreshStoredProxyProfiles() {
   const profiles = currentConfig?.proxy?.profiles;
   if (!Array.isArray(profiles) || profiles.length === 0) {
     return false;
   }
 
-  const nextConfig = normalizeConfig(JSON.parse(JSON.stringify(currentConfig)));
+  const nextConfig = normalizeConfig(cloneConfig(currentConfig));
   const refreshedProfiles = [];
   const renames = new Map();
 
-  for (const profile of profiles) {
-    try {
-      const response = await sendRuntimeMessage({
-        type: "prepare-proxy-profile",
-        profile,
-      });
-      const prepared = assertRuntimeResponse(
-        response,
-        "Invalid proxy profile",
-      ).profile;
-      if (!prepared || typeof prepared !== "object") {
-        throw new Error("Invalid proxy profile");
+  const refreshed = await mapWithConcurrency(
+    profiles,
+    MAX_CONCURRENT_PROFILE_REFRESHES,
+    async (profile) => {
+      try {
+        const response = await sendRuntimeMessage({
+          type: "prepare-proxy-profile",
+          profile,
+        });
+        const prepared = assertRuntimeResponse(
+          response,
+          "Invalid proxy profile",
+        ).profile;
+        if (!prepared || typeof prepared !== "object") {
+          throw new Error("Invalid proxy profile");
+        }
+        return { previousName: profile.name, prepared };
+      } catch (error) {
+        console.warn("Failed to refresh proxy profile metadata:", error);
+        return { previousName: profile.name, prepared: profile };
       }
-      refreshedProfiles.push(prepared);
-      if (profile.name && prepared.name && profile.name !== prepared.name) {
-        renames.set(profile.name, prepared.name);
-      }
-    } catch (error) {
-      console.warn("Failed to refresh proxy profile metadata:", error);
-      refreshedProfiles.push(profile);
+    },
+  );
+  for (const { previousName, prepared } of refreshed) {
+    refreshedProfiles.push(prepared);
+    if (previousName && prepared.name && previousName !== prepared.name) {
+      renames.set(previousName, prepared.name);
     }
   }
 
@@ -138,56 +193,12 @@ async function refreshStoredProxyProfiles() {
 }
 
 function populateForm() {
-  document.getElementById("global-enabled").checked = currentConfig.enabled;
-  document.getElementById("global-whitelist").value =
-    currentConfig.globalWhitelist;
-  document.getElementById("notifications-enabled").checked =
-    currentConfig.notifications.enabled;
-
-  for (const featureName of PROTECTION_FEATURES) {
-    document.getElementById(`${featureName}-enabled`).checked =
-      currentConfig[featureName].enabled;
-    document.getElementById(`${featureName}-whitelist`).value =
-      currentConfig[featureName].whitelist;
-  }
-
-  document.getElementById("webgl-preset").value = currentConfig.webgl.preset;
-  document.getElementById("webgl-mode").value = currentConfig.webgl.mode;
-  document.getElementById("webgl-compatibility-whitelist").value =
-    currentConfig.webgl.compatibilityWhitelist;
-  document.getElementById("webgl-strict-whitelist").value =
-    currentConfig.webgl.strictWhitelist;
+  populateConfigFields();
   populateGpuProfileOptions();
   renderGpuProfileStatus();
-  document.getElementById("canvas-noise-level").value =
-    currentConfig.canvas.noiseLevel;
   const timezoneSelect = document.getElementById("timezone-select");
   updateTimeZoneSelectLabels(timezoneSelect);
-  timezoneSelect.value = currentConfig.timezone.name;
   populateUserAgentOptions();
-  document.getElementById("language-preset").value =
-    currentConfig.language.preset;
-  document.getElementById("webrtc-policy").value = currentConfig.webrtc.policy;
-  document.getElementById("tracker-enabled").checked =
-    currentConfig.tracker.enabled;
-  document.getElementById("tracker-whitelist").value =
-    currentConfig.tracker.whitelist;
-  document.getElementById("tracker-use-built-in").checked =
-    currentConfig.tracker.useBuiltIn;
-  document.getElementById("tracker-custom-domains").value =
-    currentConfig.tracker.customDomains;
-  document.getElementById("tracker-auto-update").checked =
-    currentConfig.tracker.autoUpdate;
-  document.getElementById("tracker-update-interval").value =
-    currentConfig.tracker.updateIntervalHours;
-  document.getElementById("tracker-cosmetic-filtering").checked =
-    currentConfig.tracker.cosmeticFiltering;
-  document.getElementById("tracker-cosmetic-whitelist").value =
-    currentConfig.tracker.cosmeticWhitelist;
-  document.getElementById("tracker-youtube-enhancements").checked =
-    currentConfig.tracker.youtubeEnhancements;
-  document.getElementById("tracker-custom-filters").value =
-    currentConfig.tracker.customFilters;
   const defaultIds = new Set(
     DEFAULT_TRACKER_FILTER_LISTS.map((entry) => entry.id),
   );
@@ -203,18 +214,8 @@ function populateForm() {
       .map((entry) => entry.url)
       .join("\n");
   renderAdblockStatus();
-  document.getElementById("proxy-enabled").checked =
-    currentConfig.proxy.enabled;
-  document.getElementById("proxy-routing-mode").value =
-    currentConfig.proxy.routingMode;
   document.getElementById("proxy-bypass-list").value =
     currentConfig.proxy.bypassList.join(", ");
-  document.getElementById("proxy-sync-timezone").checked =
-    currentConfig.proxy.syncTimezone;
-  document.getElementById("proxy-sync-geolocation").checked =
-    currentConfig.proxy.syncGeolocation;
-  document.getElementById("proxy-sync-language").checked =
-    currentConfig.proxy.syncLanguage;
 
   updateUserAgentString();
   renderCurlProfileStatus();
@@ -454,71 +455,12 @@ function collectForm(options = {}) {
     return false;
   }
 
-  currentConfig.enabled = document.getElementById("global-enabled").checked;
-  currentConfig.globalWhitelist =
-    document.getElementById("global-whitelist").value;
-  currentConfig.notifications.enabled = document.getElementById(
-    "notifications-enabled",
-  ).checked;
-
-  for (const featureName of PROTECTION_FEATURES) {
-    currentConfig[featureName].enabled = document.getElementById(
-      `${featureName}-enabled`,
-    ).checked;
-    currentConfig[featureName].whitelist = document.getElementById(
-      `${featureName}-whitelist`,
-    ).value;
-  }
-
-  currentConfig.webgl.preset = document.getElementById("webgl-preset").value;
-  currentConfig.webgl.mode = document.getElementById("webgl-mode").value;
-  currentConfig.webgl.compatibilityWhitelist = document.getElementById(
-    "webgl-compatibility-whitelist",
-  ).value;
-  currentConfig.webgl.strictWhitelist = document.getElementById(
-    "webgl-strict-whitelist",
-  ).value;
-  currentConfig.canvas.noiseLevel =
-    document.getElementById("canvas-noise-level").value;
-  currentConfig.timezone.name =
-    document.getElementById("timezone-select").value;
+  collectConfigFields();
   const selectedUserAgent = parseUserAgentSelection(
     document.getElementById("useragent-preset").value,
   );
   currentConfig.useragent.preset = selectedUserAgent.preset;
   currentConfig.useragent.curlProfile = selectedUserAgent.curlProfile;
-  currentConfig.language.preset =
-    document.getElementById("language-preset").value;
-  currentConfig.webrtc.policy = document.getElementById("webrtc-policy").value;
-  currentConfig.tracker.enabled =
-    document.getElementById("tracker-enabled").checked;
-  currentConfig.tracker.whitelist =
-    document.getElementById("tracker-whitelist").value;
-  currentConfig.tracker.useBuiltIn = document.getElementById(
-    "tracker-use-built-in",
-  ).checked;
-  currentConfig.tracker.customDomains = document.getElementById(
-    "tracker-custom-domains",
-  ).value;
-  currentConfig.tracker.autoUpdate = document.getElementById(
-    "tracker-auto-update",
-  ).checked;
-  currentConfig.tracker.updateIntervalHours = Number.parseInt(
-    document.getElementById("tracker-update-interval").value,
-    10,
-  );
-  currentConfig.tracker.cosmeticFiltering = document.getElementById(
-    "tracker-cosmetic-filtering",
-  ).checked;
-  currentConfig.tracker.cosmeticWhitelist = document.getElementById(
-    "tracker-cosmetic-whitelist",
-  ).value;
-  currentConfig.tracker.youtubeEnhancements = document.getElementById(
-    "tracker-youtube-enhancements",
-  ).checked;
-  currentConfig.tracker.customFilters = document.getElementById(
-    "tracker-custom-filters",
-  ).value;
   const existingDefaults = DEFAULT_TRACKER_FILTER_LISTS.map((defaultEntry) => ({
     ...defaultEntry,
     ...(currentConfig.tracker.filterLists.find(
@@ -546,10 +488,6 @@ function collectForm(options = {}) {
     ...customSubscriptions,
   ];
 
-  currentConfig.proxy.enabled =
-    document.getElementById("proxy-enabled").checked;
-  currentConfig.proxy.routingMode =
-    document.getElementById("proxy-routing-mode").value;
   currentConfig.proxy.activeProfile =
     document.getElementById("proxy-active-profile").value || null;
   currentConfig.proxy.fallbackProfiles = Array.from(
@@ -561,14 +499,6 @@ function collectForm(options = {}) {
     .value.split(",")
     .map((pattern) => pattern.trim())
     .filter(Boolean);
-  currentConfig.proxy.syncTimezone =
-    document.getElementById("proxy-sync-timezone").checked;
-  currentConfig.proxy.syncGeolocation = document.getElementById(
-    "proxy-sync-geolocation",
-  ).checked;
-  currentConfig.proxy.syncLanguage =
-    document.getElementById("proxy-sync-language").checked;
-
   if (
     currentConfig.proxy.enabled &&
     ((currentConfig.proxy.routingMode === "protect-selected" &&
@@ -705,7 +635,7 @@ function updateUserAgentString() {
     curlProfileCatalog,
   );
   document.getElementById("useragent-string").value =
-    curlProfile?.userAgent || USER_AGENT_STRINGS[selectedUserAgent.preset] || "";
+    curlProfile?.userAgent || "";
 }
 
 function populateProxyProfiles() {
@@ -1120,7 +1050,6 @@ function populateUserAgentOptions() {
   const options = getUserAgentSelectionOptions(
     curlProfileCatalog,
     currentConfig.useragent,
-    USER_AGENT_STRINGS,
   );
   userAgentSelect.replaceChildren(
     ...options.map((option) => new Option(option.label, option.value)),
@@ -1156,7 +1085,7 @@ async function updateCurlProfilesNow() {
       throw new Error((response && response.error) || "Profile update failed");
     }
     curlProfileStatus = response.status;
-    if (response.status && response.status.profiles) {
+    if (response.catalog) {
       curlProfileCatalog = normalizeCurlProfileCatalog(response.catalog);
     }
     populateUserAgentOptions();
@@ -1333,17 +1262,8 @@ async function selectBundledGpuProfile(event) {
     await clearGpuProfile();
     return;
   }
-  const assetPath = getGpuProfileAssetPath(profileId);
-  if (!assetPath) {
-    showToast("Invalid bundled GPU profile", "error");
-    return;
-  }
   try {
-    const response = await fetch(chrome.runtime.getURL(assetPath));
-    if (!response.ok) throw new Error("Bundled GPU profile unavailable");
-    const profile = normalizeGpuProfile(await response.json());
-    if (!profile) throw new Error("Bundled GPU profile is invalid");
-    currentConfig.gpuProfile = profile;
+    currentConfig.gpuProfile = await loadBundledGpuProfile(profileId);
     renderGpuProfileStatus();
     await saveOptionsConfig();
     showToast(`GPU profile ${profileId} selected`, "success");
@@ -1633,7 +1553,8 @@ async function runSelfTest() {
   clearSelfTestResults();
   try {
     const selected = select.options[select.selectedIndex];
-    const hostname = new URL(selected ? selected.dataset.url : "").hostname;
+    const hostname = getHostnameFromUrl(selected?.dataset.url);
+    if (!hostname) throw new Error("The selected tab has no valid hostname");
     const [policyResponse, pageResponse] = await Promise.all([
       sendRuntimeMessage({
         type: "get-identity-diagnostics",
@@ -1746,10 +1667,10 @@ function renderSelfTestResults(policy, snapshot) {
   setSelfTestResult(
     "result-trackers",
     policy.tracker.enabled
-      ? `${policy.tracker.blockedCount} blocked · ${policy.tracker.builtInRules + policy.tracker.customRules} rules`
+      ? `${policy.tracker.blockedCount} blocked · ${policy.tracker.totalRules} rules`
       : "Off",
     policy.tracker.enabled
-      ? check(true, policy.tracker.builtInRules + policy.tracker.customRules > 0)
+      ? check(true, policy.tracker.totalRules > 0)
       : "warning",
   );
   if (!policy.tracker.enabled) warnings++;

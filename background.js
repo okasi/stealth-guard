@@ -4,8 +4,6 @@ const lastNotificationTime = new Map();
 const triggeredFeaturesPerTab = new Map();
 const trackerActivityPerTab = new Map();
 let lastAppliedWebRTCPolicy = null;
-let webRTCPolicyQueue = Promise.resolve();
-let configMutationQueue = Promise.resolve();
 let proxyAuthListenersInstalled = false;
 let proxyAuthenticationConfig = null;
 let proxyRuntimeStatus = {
@@ -31,7 +29,6 @@ const PROXY_HISTORY_STATES = new Set([
 ]);
 let proxyConnectionHistory = [];
 let proxyHistoryInitialized = false;
-let proxyHistoryWriteQueue = Promise.resolve();
 let trackerListener = null;
 let adblockCache = { version: ADBLOCK_CACHE_VERSION, lists: {} };
 const adblockCompiledById = new Map();
@@ -69,6 +66,10 @@ const PROXY_INDICATOR_COLORS = {
   warning: "#B06000",
   error: "#B3261E",
 };
+const CURL_PROFILE_REQUEST_TIMEOUT_MS = 15000;
+const FILTER_REQUEST_TIMEOUT_MS = 30000;
+const MAX_CONCURRENT_DOWNLOADS = 4;
+const MAX_CONCURRENT_TAB_MESSAGES = 16;
 const BLOCKED_BADGE_COLORS = {
   active: "#B3261E",
   empty: "#5F6368",
@@ -76,11 +77,17 @@ const BLOCKED_BADGE_COLORS = {
 const TOOLBAR_ICON_SIZES = [16, 32];
 const toolbarIconRenderVersions = new Map();
 const toolbarIconImageDataByColor = new Map();
+const toolbarProxyColorPerTab = new Map();
 const toolbarHostnamePerTab = new Map();
+const cloudflareChallengeByTab = new Map();
+const CLOUDFLARE_CHALLENGE_SESSION_TTL_MS = 10 * 60 * 1000;
 const REPORTED_FEATURES = new Set([
   ...PROTECTION_FEATURES.filter((feature) => feature !== "useragent"),
   "user-agent",
 ]);
+const enqueueWebRTCPolicy = createSerialQueue();
+const enqueueConfigMutation = createSerialQueue();
+const enqueueProxyHistoryWrite = createSerialQueue();
 
 function debug(method, ...args) {
   if (currentConfig && currentConfig.notifications.enabled) {
@@ -164,10 +171,9 @@ async function initializeProxyConnectionHistory() {
 
 function persistProxyConnectionHistory() {
   const snapshot = proxyConnectionHistory.map((entry) => ({ ...entry }));
-  const operation = () =>
-    storage.write({ [PROXY_CONNECTION_HISTORY_KEY]: snapshot });
-  proxyHistoryWriteQueue = proxyHistoryWriteQueue.then(operation, operation);
-  proxyHistoryWriteQueue.catch((error) => {
+  enqueueProxyHistoryWrite(() =>
+    storage.write({ [PROXY_CONNECTION_HISTORY_KEY]: snapshot }),
+  ).catch((error) => {
     debugWarn("[Proxy] Failed to persist connection history:", error);
   });
 }
@@ -378,14 +384,6 @@ function setupProxyAuthentication() {
   proxyAuthListenersInstalled = true;
 }
 
-function getHostnameFromUrl(url) {
-  try {
-    return normalizeHostname(new URL(url).hostname);
-  } catch (error) {
-    return null;
-  }
-}
-
 function resolveTabHostname(sender, fallbackHostname = null) {
   if (sender && sender.tab && sender.tab.url) {
     const tabHostname = getHostnameFromUrl(sender.tab.url);
@@ -489,33 +487,12 @@ function markTrackerBlocked(tabId, pageHostname, requestHostname) {
 }
 
 function isProxyBypassedForHostname(config, hostname) {
-  if (
-    !config ||
-    !config.enabled ||
-    !config.proxy ||
-    !config.proxy.enabled ||
-    !hostname
-  ) {
-    return false;
-  }
-
-  const proxy = config.proxy;
-  if (
-    isDomainAllowlisted(hostname, config.globalWhitelist) ||
-    isDomainAllowlisted(hostname, PROXY_SAFETY_BYPASS_LIST.join(",")) ||
-    (proxy.routingMode === "bypass-selected" &&
-      isDomainAllowlisted(
-        hostname,
-        normalizeBypassList(proxy.bypassList || []).join(","),
-      ))
-  ) {
-    return true;
-  }
-
-  const matchingRoute = (proxy.domainRoutes || []).find((route) =>
-    isDomainAllowlisted(hostname, route.pattern),
+  return Boolean(
+    config?.enabled &&
+      config.proxy?.enabled &&
+      hostname &&
+      !resolveProxyProfile(config, hostname),
   );
-  return !matchingRoute && proxy.routingMode === "protect-selected";
 }
 
 function getToolbarProxyStatus(hostname = "") {
@@ -613,7 +590,10 @@ function updateToolbarIndicator(tabId, hostname = "") {
       tabId,
       title: `Stealth Guard — ${blockedLabel} — Proxy ${proxy.label}`,
     });
-    refreshToolbarProxyIcon(tabId, proxy.color);
+    if (toolbarProxyColorPerTab.get(tabId) !== proxy.color) {
+      toolbarProxyColorPerTab.set(tabId, proxy.color);
+      refreshToolbarProxyIcon(tabId, proxy.color);
+    }
   } catch (error) {
     debugWarn("[Toolbar] Failed to update indicator:", error);
   }
@@ -717,10 +697,10 @@ function refreshToolbarProxyIcon(tabId, color) {
 }
 
 function normalizeAdblockCache(value) {
+  adblockCompiledById.clear();
   if (!value || value.version !== ADBLOCK_CACHE_VERSION || !value.lists) {
     return { version: ADBLOCK_CACHE_VERSION, lists: {} };
   }
-  adblockCompiledById.clear();
   const lists = {};
   for (const [id, entry] of Object.entries(value.lists)) {
     if (
@@ -770,6 +750,17 @@ function scheduleCurlProfileUpdates() {
     Date.now() + CURL_PROFILE_UPDATE_PERIOD_MINUTES * 60000;
 }
 
+async function fetchWithTimeout(url, options, timeoutMs, consume) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return await consume(response);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 function isCurlProfileWrapperName(name) {
   const target = String(name || "").replace(/^curl_/, "");
   return /^curl_(?:chrome\d+(?:_android)?|edge\d+|safari\d+(?:_ios)?)$/.test(String(name || "")) &&
@@ -779,38 +770,44 @@ function isCurlProfileWrapperName(name) {
 async function downloadCurlProfileWrapper(entry) {
   const target = String(entry.name || "");
   const url = `${CURL_PROFILE_RAW_BASE_URL}${encodeURIComponent(target)}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const response = await fetch(url, {
+  return fetchWithTimeout(
+    url,
+    {
       cache: "no-cache",
       credentials: "omit",
       redirect: "follow",
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status || "error"}`);
-    const text = await response.text();
-    if (text.length > CURL_PROFILE_MAX_SOURCE_LENGTH) {
-      throw new Error("curl-impersonate wrapper exceeds the safety limit");
-    }
-    return text;
-  } finally {
-    clearTimeout(timeout);
-  }
+    },
+    CURL_PROFILE_REQUEST_TIMEOUT_MS,
+    async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status || "error"}`);
+      const text = await response.text();
+      if (text.length > CURL_PROFILE_MAX_SOURCE_LENGTH) {
+        throw new Error("curl-impersonate wrapper exceeds the safety limit");
+      }
+      return text;
+    },
+  );
 }
 
 async function fetchCurlProfileCatalog() {
-  const response = await fetch(CURL_PROFILE_UPDATE_SOURCE, {
-    cache: "no-cache",
-    credentials: "omit",
-    headers: {
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
+  const entries = await fetchWithTimeout(
+    CURL_PROFILE_UPDATE_SOURCE,
+    {
+      cache: "no-cache",
+      credentials: "omit",
+      headers: {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
     },
-  });
-  if (!response.ok) throw new Error(`GitHub API returned HTTP ${response.status || "error"}`);
-  const entries = await response.json();
-  if (!Array.isArray(entries)) throw new Error("GitHub bin listing was not an array");
+    CURL_PROFILE_REQUEST_TIMEOUT_MS,
+    async (response) => {
+      if (!response.ok) throw new Error(`GitHub API returned HTTP ${response.status || "error"}`);
+      const result = await response.json();
+      if (!Array.isArray(result)) throw new Error("GitHub bin listing was not an array");
+      return result;
+    },
+  );
 
   const candidates = entries
     .filter(
@@ -821,16 +818,21 @@ async function fetchCurlProfileCatalog() {
     )
     .sort((a, b) => String(a.name).localeCompare(String(b.name)))
     .slice(0, CURL_PROFILE_MAX_COUNT);
-  const profiles = [];
-  for (const entry of candidates) {
-    try {
-      const source = await downloadCurlProfileWrapper(entry);
-      const profile = createCurlProfileFromWrapper(entry.name, source);
-      if (profile) profiles.push(profile);
-    } catch (error) {
-      debugWarn(`[curl-impersonate] Could not load ${entry.name}:`, error);
-    }
-  }
+  const profiles = (
+    await mapWithConcurrency(
+      candidates,
+      MAX_CONCURRENT_DOWNLOADS,
+      async (entry) => {
+        try {
+          const source = await downloadCurlProfileWrapper(entry);
+          return createCurlProfileFromWrapper(entry.name, source);
+        } catch (error) {
+          debugWarn(`[curl-impersonate] Could not load ${entry.name}:`, error);
+          return null;
+        }
+      },
+    )
+  ).filter(Boolean);
   if (!profiles.length) throw new Error("No supported browser profiles were found in bin");
   return normalizeCurlProfileCatalog({
     version: CURL_PROFILE_CACHE_VERSION,
@@ -843,9 +845,6 @@ function getCurlProfileStatus() {
   return {
     ...curlProfileStatus,
     profileCount: curlProfileCatalog.profiles.length,
-    profiles: getCurlProfileEntries(curlProfileCatalog).map(
-      createCurlProfilePublicEntry,
-    ),
   };
 }
 
@@ -858,8 +857,11 @@ function refreshCurlProfiles(force = false) {
     curlProfileStatus = { ...curlProfileStatus, updating: true, error: null };
     try {
       const nextCatalog = await fetchCurlProfileCatalog();
-      curlProfileCatalog = nextCatalog;
-      await storage.write({ [CURL_PROFILE_CACHE_KEY]: nextCatalog });
+      await enqueueConfigMutation(async () => {
+        await storage.write({ [CURL_PROFILE_CACHE_KEY]: nextCatalog });
+        curlProfileCatalog = nextCatalog;
+        if (currentConfig) await broadcastConfigUpdated(currentConfig);
+      });
       curlProfileStatus = {
         ...curlProfileStatus,
         updating: false,
@@ -867,11 +869,6 @@ function refreshCurlProfiles(force = false) {
         profileCount: nextCatalog.profiles.length,
         error: null,
       };
-      if (currentConfig) {
-        broadcastConfigUpdated(currentConfig, curlProfileCatalog).catch((error) => {
-          debugWarn("[curl-impersonate] Could not broadcast updated profiles:", error);
-        });
-      }
       return { success: true, updated: true, status: getCurlProfileStatus() };
     } catch (error) {
       curlProfileStatus = {
@@ -916,6 +913,14 @@ function createLocalAdblockRules(config) {
 
 function rebuildAdblockEngine(config) {
   const subscriptions = normalizeFilterSubscriptions(config.tracker.filterLists);
+  const subscriptionIds = new Set(
+    subscriptions.map((subscription) => subscription.id),
+  );
+  for (const id of adblockCompiledById.keys()) {
+    if (!subscriptionIds.has(id)) {
+      adblockCompiledById.delete(id);
+    }
+  }
   const compiled = [];
   for (const subscription of subscriptions) {
     const cached = adblockCache.lists[subscription.id];
@@ -1002,50 +1007,54 @@ function scheduleProxyRetries(config) {
 }
 
 async function downloadFilterSubscription(subscription) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
-  try {
-    const response = await fetch(subscription.url, {
+  return fetchWithTimeout(
+    subscription.url,
+    {
       cache: "no-cache",
       credentials: "omit",
       redirect: "follow",
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status || "error"}`);
-    }
-    const declaredLength = Number(response.headers?.get?.("content-length"));
-    if (declaredLength > MAX_FILTER_TEXT_LENGTH) {
-      throw new Error("Filter list exceeds the 16 MB safety limit");
-    }
-    const text = await response.text();
-    if (text.length > MAX_FILTER_TEXT_LENGTH) {
-      throw new Error("Filter list exceeds the 16 MB safety limit");
-    }
-    const compiled = parseFilterList(text);
-    if (compiled.stats.network + compiled.stats.cosmetic === 0) {
-      throw new Error("Filter list contained no supported rules");
-    }
-    return {
-      name: subscription.name,
-      url: subscription.url,
-      updatedAt: Date.now(),
-      text,
-      compiled,
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
+    },
+    FILTER_REQUEST_TIMEOUT_MS,
+    async (response) => {
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status || "error"}`);
+      }
+      const declaredLength = Number(response.headers?.get?.("content-length"));
+      if (declaredLength > MAX_FILTER_TEXT_LENGTH) {
+        throw new Error("Filter list exceeds the 16 MB safety limit");
+      }
+      const text = await response.text();
+      if (text.length > MAX_FILTER_TEXT_LENGTH) {
+        throw new Error("Filter list exceeds the 16 MB safety limit");
+      }
+      const compiled = parseFilterList(text);
+      if (compiled.stats.network + compiled.stats.cosmetic === 0) {
+        throw new Error("Filter list contained no supported rules");
+      }
+      return {
+        name: subscription.name,
+        url: subscription.url,
+        updatedAt: Date.now(),
+        text,
+        compiled,
+      };
+    },
+  );
 }
 
 function refreshAdblockFilters(configOverride, force = false) {
-  if (adblockUpdatePromise) return adblockUpdatePromise;
+  if (adblockUpdatePromise) {
+    return adblockUpdatePromise.then(() =>
+      refreshAdblockFilters(currentConfig || configOverride, force),
+    );
+  }
   adblockUpdatePromise = (async () => {
     const config = configOverride || (await getConfig());
     const enabled = normalizeFilterSubscriptions(config.tracker.filterLists).filter(
       (entry) => entry.enabled,
     );
-    if (!config.enabled || !config.tracker.enabled || !enabled.length) {
+    if (!config.enabled || !config.tracker.enabled || !enabled.length ||
+        (!force && !config.tracker.autoUpdate)) {
       return { success: true, updated: 0 };
     }
     const maxAge = config.tracker.updateIntervalHours * 60 * 60 * 1000;
@@ -1053,74 +1062,94 @@ function refreshAdblockFilters(configOverride, force = false) {
     let updated = 0;
     const errors = [];
     const persistentUpdates = {};
-    for (const subscription of enabled) {
+    const pendingSubscriptions = enabled.filter((subscription) => {
       const cached = adblockCache.lists[subscription.id];
-      if (
-        !force &&
-        cached &&
-        cached.url === subscription.url &&
-        Date.now() - Number(cached.updatedAt || 0) < maxAge
-      ) {
-        continue;
+      return (
+        force ||
+        !cached ||
+        cached.url !== subscription.url ||
+        Date.now() - Number(cached.updatedAt || 0) >= maxAge
+      );
+    });
+    const downloads = await mapWithConcurrency(
+      pendingSubscriptions,
+      MAX_CONCURRENT_DOWNLOADS,
+      async (subscription) => {
+        try {
+          return {
+            subscription,
+            downloaded: await downloadFilterSubscription(subscription),
+          };
+        } catch (error) {
+          return { subscription, error };
+        }
+      },
+    );
+    return enqueueConfigMutation(async () => {
+      // Downloads can finish after a settings change. Commit against the
+      // current configuration so disabled filters stay disabled.
+      const effectiveConfig = currentConfig || config;
+      const subscriptions = normalizeFilterSubscriptions(effectiveConfig.tracker.filterLists);
+      const accepted = downloads.filter(({ subscription }) =>
+        subscriptions.some((entry) =>
+          entry.id === subscription.id && entry.url === subscription.url,
+        ),
+      );
+      for (const { subscription, downloaded, error } of accepted) {
+        if (downloaded) {
+          const { compiled, ...entry } = downloaded;
+          persistentUpdates[subscription.id] = entry;
+          updated++;
+        } else {
+          errors.push(`${subscription.name}: ${error.message}`);
+        }
       }
-      try {
-        const downloaded = await downloadFilterSubscription(subscription);
-        adblockCompiledById.set(subscription.id, downloaded.compiled);
-        adblockCache.lists[subscription.id] = {
-          name: downloaded.name,
-          url: downloaded.url,
-          updatedAt: downloaded.updatedAt,
-          stats: downloaded.compiled.stats,
-        };
-        persistentUpdates[subscription.id] = {
-          name: downloaded.name,
-          url: downloaded.url,
-          updatedAt: downloaded.updatedAt,
-          text: downloaded.text,
-        };
-        updated += 1;
-      } catch (error) {
-        errors.push(`${subscription.name}: ${error.message}`);
-      }
-    }
-    if (updated) {
-      const stored = await storage.read(ADBLOCK_CACHE_KEY);
-      const previous = stored[ADBLOCK_CACHE_KEY];
-      const persistentLists =
-        previous &&
-        previous.version === ADBLOCK_CACHE_VERSION &&
-        previous.lists &&
-        typeof previous.lists === "object"
-          ? previous.lists
+      if (updated) {
+        const stored = await storage.read(ADBLOCK_CACHE_KEY);
+        const previous = stored[ADBLOCK_CACHE_KEY];
+        const persistentLists = previous?.version === ADBLOCK_CACHE_VERSION
+          ? previous.lists || {}
           : {};
-      await storage.write({
-        [ADBLOCK_CACHE_KEY]: {
-          version: ADBLOCK_CACHE_VERSION,
-          lists: { ...persistentLists, ...persistentUpdates },
-        },
-      });
-      rebuildAdblockEngine(config);
-      applyTrackerBlocking(config);
-      await broadcastCosmeticRulesUpdated();
-    }
-    const lastUpdate = getOldestEnabledFilterUpdate(config) || null;
-    adblockStatus = {
-      ...adblockStatus,
-      updating: false,
-      lastUpdate,
-      nextUpdate: config.tracker.autoUpdate
-        ? Date.now() + config.tracker.updateIntervalHours * 60 * 60 * 1000
-        : null,
-      error: errors.length ? errors.join("; ") : null,
-    };
-    return { success: errors.length === 0, updated, error: adblockStatus.error };
-  })().finally(() => {
+        const lists = {};
+        for (const subscription of subscriptions) {
+          const entry = persistentUpdates[subscription.id] || persistentLists[subscription.id];
+          if (entry?.url === subscription.url) lists[subscription.id] = entry;
+        }
+        await storage.write({
+          [ADBLOCK_CACHE_KEY]: { version: ADBLOCK_CACHE_VERSION, lists },
+        });
+        for (const { subscription, downloaded } of accepted) {
+          if (!downloaded) continue;
+          const { compiled, text, ...entry } = downloaded;
+          adblockCompiledById.set(subscription.id, compiled);
+          adblockCache.lists[subscription.id] = { ...entry, stats: compiled.stats };
+        }
+        rebuildAdblockEngine(effectiveConfig);
+        applyTrackerBlocking(effectiveConfig, { rebuild: false });
+        await broadcastCosmeticRulesUpdated();
+      }
+      adblockStatus = {
+        ...adblockStatus,
+        lastUpdate: getOldestEnabledFilterUpdate(effectiveConfig) || null,
+        nextUpdate: effectiveConfig.enabled && effectiveConfig.tracker.enabled &&
+          effectiveConfig.tracker.autoUpdate
+          ? Date.now() + effectiveConfig.tracker.updateIntervalHours * 60 * 60 * 1000
+          : null,
+        error: errors.length ? errors.join("; ") : null,
+      };
+      return { success: errors.length === 0, updated, error: adblockStatus.error };
+    });
+  })().catch((error) => {
+    adblockStatus.error = error.message;
+    throw error;
+  }).finally(() => {
+    adblockStatus.updating = false;
     adblockUpdatePromise = null;
   });
   return adblockUpdatePromise;
 }
 
-function applyTrackerBlocking(config) {
+function applyTrackerBlocking(config, { rebuild = true } = {}) {
   if (trackerListener) {
     chrome.webRequest.onBeforeRequest.removeListener(trackerListener);
     trackerListener = null;
@@ -1133,7 +1162,9 @@ function applyTrackerBlocking(config) {
     throw new Error("Tracker blocking is unavailable in this browser");
   }
 
-  rebuildAdblockEngine(config);
+  if (rebuild) {
+    rebuildAdblockEngine(config);
+  }
   // Compatibility exceptions are network rules too, but they do not require
   // a blocking listener when no block rules are active.
   if (!adblockEngine.compiled.network.block.length) {
@@ -1191,56 +1222,42 @@ async function broadcastCosmeticRulesUpdated() {
 
 async function broadcastToHttpTabs(message) {
   const tabs = await queryTabs({ url: ["http://*/*", "https://*/*"] });
-  await Promise.all(
-    tabs
-      .filter((tab) => typeof tab.id === "number")
-      .map((tab) => sendMessageToTabIgnoringErrors(tab.id, message)),
+  await mapWithConcurrency(
+    tabs.filter((tab) => typeof tab.id === "number"),
+    MAX_CONCURRENT_TAB_MESSAGES,
+    (tab) => sendMessageToTabIgnoringErrors(tab.id, message),
   );
 }
 
-function queryTabs(queryInfo) {
-  return new Promise((resolve) => {
-    chrome.tabs.query(queryInfo, (tabs) => {
-      if (chrome.runtime.lastError) {
-        debugWarn(
-          "[Background] Failed to query tabs for broadcast:",
-          chrome.runtime.lastError.message,
-        );
-        resolve([]);
-        return;
-      }
-      resolve(tabs || []);
-    });
-  });
+async function queryTabs(queryInfo) {
+  try {
+    return (await callChromeApi(chrome.tabs, "query", queryInfo)) || [];
+  } catch (error) {
+    debugWarn("[Background] Failed to query tabs for broadcast:", error.message);
+    return [];
+  }
 }
 
 function sendMessageToTabIgnoringErrors(tabId, message) {
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, message, () => {
-      // Read runtime.lastError to suppress "Unchecked runtime.lastError" noise.
-      // These two failures are expected during tab broadcasts:
-      // 1) Tab has no content script, 2) Receiver doesn't send a response.
-      const error = chrome.runtime.lastError;
-      if (error) {
-        const msg = error.message || "";
-        const expected =
-          msg.includes(
-            "Could not establish connection. Receiving end does not exist.",
-          ) ||
-          msg.includes(
-            "The message port closed before a response was received.",
-          );
-        if (!expected) {
-          debugWarn(
-            "[Background] tabs.sendMessage warning for tab",
-            tabId + ":",
-            msg,
-          );
-        }
+  return callChromeApi(chrome.tabs, "sendMessage", tabId, message).catch(
+    (error) => {
+      const messageText = error.message || "";
+      const expected =
+        messageText.includes(
+          "Could not establish connection. Receiving end does not exist.",
+        ) ||
+        messageText.includes(
+          "The message port closed before a response was received.",
+        );
+      if (!expected) {
+        debugWarn(
+          "[Background] tabs.sendMessage warning for tab",
+          tabId + ":",
+          messageText,
+        );
       }
-      resolve();
-    });
-  });
+    },
+  );
 }
 
 async function broadcastConfigUpdated(config, profileCatalog = curlProfileCatalog) {
@@ -1336,55 +1353,28 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
 let uaListener = null;
 
-function quoteClientHint(value) {
-  return `"${String(value).replace(/(["\\])/g, "\\$1")}"`;
-}
-
-function getUserAgentClientHintHeaders(preset, userAgent, curlProfile = null) {
-  if (curlProfile && curlProfile.httpHeaders) {
-    return { ...curlProfile.httpHeaders };
+function isCloudflareChallengeSessionActive(details, hostname) {
+  const tabId = Number(details && details.tabId);
+  if (!Number.isInteger(tabId) || tabId < 0 || !hostname) {
+    return false;
   }
-  const hints = USER_AGENT_CLIENT_HINTS[preset];
-  if (!hints) return null;
-  const versionToken = hints.brand === "Microsoft Edge" ? "Edg" : "Chrome";
-  const versionMatch = userAgent.match(
-    new RegExp(`${versionToken}\\/([\\d.]+)`),
-  );
-  const fullVersion = versionMatch ? versionMatch[1] : "0.0.0.0";
-  const majorVersion = fullVersion.split(".")[0];
-  const brands = [
-    ["Not_A Brand", "99"],
-    ["Chromium", majorVersion],
-    [hints.brand, majorVersion],
-  ];
-  const fullVersionList = [
-    ["Not_A Brand", "99.0.0.0"],
-    ["Chromium", fullVersion],
-    [hints.brand, fullVersion],
-  ];
-  const formatBrands = (values) =>
-    values
-      .map(
-        ([brand, version]) =>
-          `${quoteClientHint(brand)};v=${quoteClientHint(version)}`,
-      )
-      .join(", ");
 
-  return {
-    "sec-ch-ua": formatBrands(brands),
-    "sec-ch-ua-arch": quoteClientHint(hints.architecture),
-    "sec-ch-ua-bitness": quoteClientHint(hints.bitness),
-    "sec-ch-ua-form-factors": hints.formFactors
-      .map(quoteClientHint)
-      .join(", "),
-    "sec-ch-ua-full-version": quoteClientHint(fullVersion),
-    "sec-ch-ua-full-version-list": formatBrands(fullVersionList),
-    "sec-ch-ua-mobile": hints.mobile ? "?1" : "?0",
-    "sec-ch-ua-model": quoteClientHint(hints.model),
-    "sec-ch-ua-platform": quoteClientHint(hints.platform),
-    "sec-ch-ua-platform-version": quoteClientHint(hints.platformVersion),
-    "sec-ch-ua-wow64": hints.wow64 ? "?1" : "?0",
-  };
+  const now = Date.now();
+  const directChallenge = isCloudflareChallengeUrl(details.url);
+  if (directChallenge && !isCloudflareChallengeHostname(hostname)) {
+    cloudflareChallengeByTab.set(tabId, {
+      hostname,
+      expiresAt: now + CLOUDFLARE_CHALLENGE_SESSION_TTL_MS,
+    });
+  }
+
+  const challenge = cloudflareChallengeByTab.get(tabId);
+  if (!challenge) return false;
+  if (challenge.expiresAt <= now) {
+    cloudflareChallengeByTab.delete(tabId);
+    return false;
+  }
+  return challenge.hostname === hostname;
 }
 
 async function applyUserAgentSpoofing(configOverride) {
@@ -1402,26 +1392,17 @@ async function applyUserAgentSpoofing(configOverride) {
     return;
   }
 
-  const curlProfile = config.useragent.enabled
-    ? getCurlProfileForConfig(config, curlProfileCatalog)
+  let appliedCatalog = curlProfileCatalog;
+  let curlProfile = config.useragent.enabled
+    ? getCurlProfileForConfig(config, appliedCatalog)
     : null;
-  const userAgent = config.useragent.enabled
-    ? curlProfile?.userAgent || getUserAgentString(config.useragent.preset)
-    : null;
-  if (config.useragent.enabled && !userAgent) {
+  if (config.useragent.enabled && !curlProfile?.userAgent) {
     throw new Error(`Invalid User-Agent preset: ${config.useragent.preset}`);
   }
-  const clientHintHeaders = userAgent
-    ? getUserAgentClientHintHeaders(
-        config.useragent.preset,
-        userAgent,
-        curlProfile,
-      )
-    : null;
   const languageCache = new Map();
 
   uaListener = function (details) {
-    const requestHeaders = details.requestHeaders || [];
+    const originalHeaders = details.requestHeaders || [];
     const hostname = getHostnameFromUrl(details.url);
     const userAgentActive = Boolean(
       hostname && isFeatureActiveForHostname(config, "useragent", hostname),
@@ -1429,16 +1410,28 @@ async function applyUserAgentSpoofing(configOverride) {
     const languageActive = Boolean(
       hostname && isFeatureActiveForHostname(config, "language", hostname),
     );
+    const challengeSessionActive = isCloudflareChallengeSessionActive(
+      details,
+      hostname,
+    );
     if (
       !hostname ||
-      isCloudflareChallengeHostname(hostname) ||
+      isCloudflareChallengeUrl(details.url) ||
+      challengeSessionActive ||
       isDataDomeChallengeHostname(hostname) ||
       (!userAgentActive && !languageActive)
     ) {
-      return { requestHeaders };
+      return { requestHeaders: originalHeaders };
     }
 
+    const requestHeaders = originalHeaders.map((header) => ({ ...header }));
     if (userAgentActive) {
+      if (appliedCatalog !== curlProfileCatalog) {
+        appliedCatalog = curlProfileCatalog;
+        curlProfile = getCurlProfileForConfig(config, appliedCatalog);
+      }
+      const userAgent = curlProfile.userAgent;
+      const clientHintHeaders = curlProfile.httpHeaders;
       const header = requestHeaders.find(
         (entry) => entry.name.toLowerCase() === "user-agent",
       );
@@ -1491,8 +1484,7 @@ async function applyUserAgentSpoofing(configOverride) {
 }
 
 async function applyWebRTCPolicyValue(policy) {
-  const previousOperation = webRTCPolicyQueue.catch(() => {});
-  const operation = previousOperation.then(async () => {
+  return enqueueWebRTCPolicy(async () => {
     if (lastAppliedWebRTCPolicy === policy) {
       return;
     }
@@ -1516,9 +1508,6 @@ async function applyWebRTCPolicyValue(policy) {
     }
     lastAppliedWebRTCPolicy = policy;
   });
-
-  webRTCPolicyQueue = operation;
-  return operation;
 }
 
 function setWebRTCPolicySetting(policy) {
@@ -1550,6 +1539,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
   if (changeInfo.url) {
     const newHostname = getHostnameFromUrl(changeInfo.url);
+    const challenge = cloudflareChallengeByTab.get(tabId);
+    if (!newHostname || (challenge && challenge.hostname !== newHostname)) {
+      cloudflareChallengeByTab.delete(tabId);
+    }
     if (newHostname) {
       toolbarHostnamePerTab.set(tabId, newHostname);
     } else {
@@ -1577,6 +1570,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   triggeredFeaturesPerTab.delete(tabId);
   trackerActivityPerTab.delete(tabId);
   toolbarHostnamePerTab.delete(tabId);
+  cloudflareChallengeByTab.delete(tabId);
+  toolbarProxyColorPerTab.delete(tabId);
   toolbarIconRenderVersions.delete(tabId);
 });
 
@@ -1655,45 +1650,38 @@ async function handleGetConfigMessage() {
   return { config: cloneConfig(await getConfig()) };
 }
 
-function serializeConfigValue(value) {
-  return JSON.stringify(value);
+function areConfigValuesEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function didConfigSectionChange(previousConfig, nextConfig, key) {
-  return (
-    serializeConfigValue(previousConfig ? previousConfig[key] : undefined) !==
-    serializeConfigValue(nextConfig ? nextConfig[key] : undefined)
+  return !areConfigValuesEqual(
+    previousConfig ? previousConfig[key] : undefined,
+    nextConfig ? nextConfig[key] : undefined,
   );
 }
 
 function getConfigChangeFlags(previousConfig, nextConfig) {
-  const globalEnabledChanged = didConfigSectionChange(
-    previousConfig,
-    nextConfig,
-    "enabled",
-  );
-  const globalWhitelistChanged = didConfigSectionChange(
-    previousConfig,
-    nextConfig,
-    "globalWhitelist",
-  );
+  const changed = (key) => didConfigSectionChange(previousConfig, nextConfig, key);
+  const globalEnabledChanged = changed("enabled");
+  const globalWhitelistChanged = changed("globalWhitelist");
 
   return {
     userAgentChanged:
-      didConfigSectionChange(previousConfig, nextConfig, "useragent") ||
-      didConfigSectionChange(previousConfig, nextConfig, "language") ||
-      didConfigSectionChange(previousConfig, nextConfig, "proxy") ||
+      changed("useragent") ||
+      changed("language") ||
+      changed("proxy") ||
       globalWhitelistChanged ||
       globalEnabledChanged,
     trackerChanged:
-      didConfigSectionChange(previousConfig, nextConfig, "tracker") ||
+      changed("tracker") ||
       globalWhitelistChanged ||
       globalEnabledChanged,
     webrtcChanged:
-      didConfigSectionChange(previousConfig, nextConfig, "webrtc") ||
+      changed("webrtc") ||
       globalEnabledChanged,
     proxyChanged:
-      didConfigSectionChange(previousConfig, nextConfig, "proxy") ||
+      changed("proxy") ||
       globalWhitelistChanged ||
       globalEnabledChanged,
   };
@@ -1756,12 +1744,6 @@ async function saveConfigWithRollback(previousConfig, nextConfig) {
   await broadcastConfigUpdated(nextConfig);
 }
 
-function enqueueConfigMutation(operation) {
-  const queuedOperation = configMutationQueue.then(operation, operation);
-  configMutationQueue = queuedOperation.catch(() => {});
-  return queuedOperation;
-}
-
 function handleUpdateConfigMessage(request) {
   return enqueueConfigMutation(async () => {
     if (
@@ -1776,7 +1758,7 @@ function handleUpdateConfigMessage(request) {
     const previousConfig = cloneConfig(await getConfig());
     const nextConfig = normalizeConfig(request.config);
     if (
-      serializeConfigValue(previousConfig) === serializeConfigValue(nextConfig)
+      areConfigValuesEqual(previousConfig, nextConfig)
     ) {
       return { success: true };
     }
@@ -1797,8 +1779,7 @@ function updateGlobalWhitelist(request, mutator) {
     }
 
     nextConfig.globalWhitelist = mutator(domain, nextConfig.globalWhitelist);
-    const changed =
-      serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig);
+    const changed = !areConfigValuesEqual(previousConfig, nextConfig);
 
     if (changed) {
       await saveConfigWithRollback(previousConfig, nextConfig);
@@ -1822,7 +1803,7 @@ function handleResetConfigMessage() {
     const nextConfig = cloneConfig(DEFAULT_CONFIG);
 
     if (
-      serializeConfigValue(previousConfig) !== serializeConfigValue(nextConfig)
+      !areConfigValuesEqual(previousConfig, nextConfig)
     ) {
       await saveConfigWithRollback(previousConfig, nextConfig);
     }
@@ -2059,8 +2040,9 @@ async function handleGetIdentityDiagnosticsMessage(request, sender) {
   const curlProfile = getCurlProfileForConfig(config, curlProfileCatalog);
   const hostname = normalizeHostname(request && request.hostname);
   const tabId = Number(request && request.tabId);
-  const vpnLocation = resolveContentVpnLocation(config, hostname);
-  const languageIdentity = resolveLanguageIdentity(config, hostname);
+  const identity = resolveContentIdentity(config, hostname);
+  const vpnLocation = identity.vpnLocation;
+  const languageIdentity = identity.language;
   const trackerData = Number.isInteger(tabId)
     ? trackerActivityPerTab.get(tabId)
     : null;
@@ -2095,8 +2077,7 @@ async function handleGetIdentityDiagnosticsMessage(request, sender) {
         enabled: activeForSite("useragent"),
         preset: config.useragent.preset,
         curlProfile: curlProfile ? curlProfile.target : null,
-        value:
-          curlProfile?.userAgent || getUserAgentString(config.useragent.preset),
+        value: curlProfile?.userAgent || null,
       },
       language: {
         enabled: activeForSite("language"),
@@ -2144,6 +2125,7 @@ async function handleGetIdentityDiagnosticsMessage(request, sender) {
       },
       tracker: {
         enabled: activeForSite("tracker"),
+        totalRules: adblockEngine.compiled.stats.network + adblockEngine.compiled.stats.cosmetic,
         builtInRules: config.tracker.useBuiltIn
           ? BUILTIN_TRACKER_DOMAINS.length
           : 0,
@@ -2170,10 +2152,12 @@ async function handleGetIdentityDiagnosticsMessage(request, sender) {
   };
 }
 
-async function handleVerifyProxyConnectionMessage(request, sender) {
+function handleVerifyProxyConnectionMessage(request, sender) {
   assertExtensionPageSender(sender);
-  await applyProxyPolicy(await getConfig());
-  return { success: true, status: { ...proxyRuntimeStatus } };
+  return enqueueConfigMutation(async () => {
+    await applyProxyPolicy(await getConfig());
+    return { success: true, status: { ...proxyRuntimeStatus } };
+  });
 }
 
 async function handleGetProxyDiagnosticsMessage(request, sender) {
@@ -2230,8 +2214,9 @@ async function handleGetProxyDiagnosticsMessage(request, sender) {
 async function handleClearProxyHistoryMessage(request, sender) {
   assertExtensionPageSender(sender);
   proxyConnectionHistory = [];
-  await proxyHistoryWriteQueue.catch(() => {});
-  await storage.write({ [PROXY_CONNECTION_HISTORY_KEY]: [] });
+  await enqueueProxyHistoryWrite(() =>
+    storage.write({ [PROXY_CONNECTION_HISTORY_KEY]: [] }),
+  );
   return { success: true };
 }
 
@@ -2268,6 +2253,10 @@ const messageHandlers = {
 };
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // Extension pages opened in tabs still target the requested website tab.
+  if (sender?.url?.startsWith(chrome.runtime.getURL(""))) {
+    sender = { ...sender, tab: undefined };
+  }
   const messageType = request && request.type;
   debugLog(
     "Received message:",
@@ -2276,33 +2265,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sender && sender.tab ? "tab" : "popup/options",
   );
 
-  const handler = messageHandlers[messageType];
+  const handler = Object.hasOwn(messageHandlers, messageType) && messageHandlers[messageType];
   if (!handler) {
     return;
   }
 
-  try {
-    const result = handler(request, sender);
-    if (result && typeof result.then === "function") {
-      result
-        .then((payload) => {
-          sendResponse(payload === undefined ? { success: true } : payload);
-        })
-        .catch((error) => {
-          debugError(
-            `[Background] Handler failed for "${messageType}":`,
-            error,
-          );
-          sendResponse({ success: false, error: error.message });
-        });
-      return true;
-    }
-
-    sendResponse(result === undefined ? { success: true } : result);
-  } catch (error) {
-    debugError(`[Background] Handler crashed for "${messageType}":`, error);
-    sendResponse({ success: false, error: error.message });
-  }
+  ensureBackgroundInitialized()
+    .then(() => handler(request, sender))
+    .then((payload) => sendResponse(payload === undefined ? { success: true } : payload))
+    .catch((error) => {
+      debugError(`[Background] Handler failed for "${messageType}":`, error);
+      sendResponse({ success: false, error: error.message });
+    });
+  return true;
 });
 
 async function handleFingerprintDetection(feature, hostname) {
@@ -2376,13 +2351,8 @@ function showContextMenuNotification(message) {
 }
 
 function reloadTabAfterAllowlistChange(tabId) {
-  chrome.tabs.reload(tabId, () => {
-    if (chrome.runtime.lastError) {
-      debugWarn(
-        "Failed to reload tab after allowlist change:",
-        chrome.runtime.lastError.message,
-      );
-    }
+  callChromeApi(chrome.tabs, "reload", tabId).catch((error) => {
+    debugWarn("Failed to reload tab after allowlist change:", error.message);
   });
 }
 
@@ -2390,8 +2360,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (!tab || !tab.url) return;
 
   try {
-    const url = new URL(tab.url);
-    const hostname = normalizeHostname(url.hostname).replace(/^www\./, "");
+    const hostname = getHostnameFromUrl(tab.url)?.replace(/^www\./, "");
+    if (!hostname) throw new Error("Invalid tab URL");
 
     if (info.menuItemId === "add-to-global-whitelist") {
       const result = await handleAddToWhitelistMessage({ domain: hostname });

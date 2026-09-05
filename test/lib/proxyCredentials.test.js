@@ -34,7 +34,44 @@ const mainProfile = {
 };
 
 afterEach(() => {
+  delete globalThis.createSerialQueue;
   vi.restoreAllMocks();
+});
+
+test("credential writes serialize and publish only after persistence succeeds", async () => {
+  globalThis.createSerialQueue = require("../../lib/runtime.js").createSerialQueue;
+  const initial = { "proxy.test:8443": { username: "original", password: "secret" } };
+  const storage = createStorage(initial);
+  const manager = createProxyCredentialManager({ storageApi: storage, getConfig: () => null });
+  await manager.initialize();
+  let rejectWrite;
+  storage.write.mockImplementationOnce(() => new Promise((resolve, reject) => {
+    rejectWrite = reject;
+  }));
+  const failed = manager.setCredential(mainProfile, { username: "unsaved", password: "new" });
+  const rejection = expect(failed).rejects.toThrow("Disk full");
+  await Promise.resolve();
+  expect(manager.getStatus(mainProfile).username).toBe("original");
+  const next = manager.setCredential(mainProfile, {
+    username: "queued", password: "", keepPassword: true,
+  });
+  rejectWrite(new Error("Disk full"));
+  await rejection;
+  await next;
+  expect(storage.data[PROXY_CREDENTIALS_STORAGE_KEY]["proxy.test:8443"])
+    .toEqual({ username: "queued", password: "secret" });
+
+  for (const operation of [
+    () => manager.removeCredential(mainProfile),
+    () => manager.setCredential(mainProfile, { username: "temporary", persist: false }),
+    () => manager.clearAll(),
+  ]) {
+    storage.write.mockRejectedValueOnce(new Error("Disk full"));
+    await expect(operation()).rejects.toThrow("Disk full");
+    expect(manager.getStatus(mainProfile)).toMatchObject({ username: "queued", persisted: true });
+  }
+  await manager.removeCredential(mainProfile);
+  expect(manager.getStatus(mainProfile).configured).toBe(false);
 });
 
 test("credential helpers normalize only bounded endpoint records", () => {

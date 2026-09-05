@@ -2,7 +2,7 @@
 
 **Stealth Guard by okasi**
 
-_Last updated: August 2026_
+_Last updated: September 2026_
 
 ## Overview
 
@@ -29,17 +29,22 @@ Extension settings and configurations are stored locally in your browser using t
 - Downloaded ad-blocking filter lists, user rules, and allowlists
 - Per-tab blocked-domain counts kept only in memory
 - Proxy configurations (if configured)
+- Proxy credentials, either in background memory for the browser session or in
+  local extension storage when you choose to save them; normal settings exports
+  exclude credentials
 - Up to 100 recent proxy connection state changes, including timestamps, profile names, verified exit IPs, ownership state, and connection errors
 - Saved per-site session snapshots (cookies, localStorage, and sessionStorage) only when you use the Session Switcher feature
 
 ## Network Requests
 
-Stealth Guard may make the following optional network requests:
+Stealth Guard makes browser-profile update requests automatically. Filter
+subscriptions and proxy services are contacted as described below.
 
 ### Ad-Blocking Filter Updates
 
-When ad and tracker blocking is enabled, Stealth Guard automatically downloads
-the enabled filter subscriptions. The defaults are AdGuard Base, AdGuard
+When ad and tracker blocking and automatic updates are enabled, Stealth Guard
+downloads the enabled filter subscriptions. Manual updates remain available
+when automatic downloads are off. The defaults are AdGuard Base, AdGuard
 Tracking Protection, and AdGuard Cookie Notices from `filters.adtidy.org`.
 Downloads use no cookies or browser-history data and contain no page URL. Lists
 are parsed and stored locally. You can disable automatic updates, disable an
@@ -49,11 +54,12 @@ metadata associated with requesting its URL, such as your IP address.
 
 ### Browser/API Profile Updates
 
-When automatic curl-impersonate profile updates are enabled, Stealth Guard
+Every four hours, and when you request an update in Settings, Stealth Guard
 checks the public `lexiforest/curl-impersonate` GitHub API listing and downloads
 the selected wrapper files from GitHub's raw-content host. Only public profile
 metadata and wrapper files are requested; browsing data, cookies, and extension
-settings are not sent.
+settings are not sent. There is currently no separate switch for these
+profile updates; disabling protection does not cancel their schedule.
 
 ### Proxy Location Check (Optional)
 

@@ -23,6 +23,8 @@ afterEach(() => {
   delete globalThis.DEFAULT_FILTER_LISTS;
   delete globalThis.normalizeFilterListEntries;
   delete globalThis.normalizeGpuProfile;
+  delete globalThis.getUserAgentDefinition;
+  delete globalThis.isCurlProfileCompatible;
   vi.restoreAllMocks();
 });
 
@@ -38,12 +40,35 @@ test("uses the bundled filter-list API when it is available globally", () => {
   globalThis.DEFAULT_FILTER_LISTS = defaultFilterLists;
   globalThis.normalizeFilterListEntries = vi.fn((value) => value || defaultFilterLists);
   globalThis.normalizeGpuProfile = vi.fn(() => null);
+  globalThis.getUserAgentDefinition = vi.fn((preset) =>
+    preset === "windows" ? { preset } : null,
+  );
+  globalThis.isCurlProfileCompatible = vi.fn(
+    (preset, profile) => preset === "windows" && profile === "auto",
+  );
+  globalThis.getCurlProfileForConfig = vi.fn(() => null);
 
   const { DEFAULT_CONFIG, normalizeConfig } = loadConfigModule();
 
   expect(DEFAULT_CONFIG.tracker.filterLists).toEqual(defaultFilterLists);
   normalizeConfig({});
   expect(globalThis.normalizeGpuProfile).toHaveBeenCalled();
+  expect(globalThis.getUserAgentDefinition).toHaveBeenCalled();
+  expect(globalThis.isCurlProfileCompatible).toHaveBeenCalled();
+});
+
+test("curl-profile globals must expose the complete shared API", () => {
+  globalThis.getUserAgentDefinition = vi.fn();
+
+  const { normalizeConfig } = loadConfigModule();
+
+  expect(normalizeConfig({ useragent: { preset: "windows" } }).useragent).toEqual({
+    enabled: true,
+    whitelist: "*.soundcloud.com",
+    preset: "windows",
+    curlProfile: "auto",
+  });
+  expect(globalThis.getUserAgentDefinition).not.toHaveBeenCalled();
 });
 
 test("filter-list normalization can preserve custom identifiers as names", () => {
@@ -112,11 +137,8 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
     DEFAULT_CONFIG,
     LANGUAGE_PRESETS,
     PROTECTION_FEATURES,
-    USER_AGENT_CLIENT_HINTS,
-    USER_AGENT_STRINGS,
     cloneConfig,
     createContentConfig,
-    getUserAgentString,
   } = loadConfigModule();
   const source = {
     enabled: false,
@@ -164,14 +186,6 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
     "@@||public.servenobid.com/partner/163965/163966/wrapup_*.js$script,domain=techcrunch.com",
   );
   expect(LANGUAGE_PRESETS["en-US"].acceptLanguage).toBe("en-US,en;q=0.9");
-  expect(getUserAgentString("macos")).toBe(USER_AGENT_STRINGS.macos);
-  expect(getUserAgentString("missing")).toBeNull();
-  expect(USER_AGENT_CLIENT_HINTS.android).toMatchObject({
-    platform: "Android",
-    model: "Pixel 4",
-    mobile: true,
-  });
-  expect(USER_AGENT_CLIENT_HINTS.macos).toBeUndefined();
   expect(contentConfig.enabled).toBe(false);
   expect(contentConfig.canvas.enabled).toBe(false);
   expect(contentConfig.proxy).toBeUndefined();
@@ -229,7 +243,8 @@ test("content config resolves only coarse effective proxy location data", () => 
     createContentConfig,
     normalizeProxyLocation,
     parseCoarseCoordinates,
-    resolveContentVpnLocation,
+    resolveProxyProfile,
+    resolveContentIdentity,
   } = loadConfigModule();
   const config = {
     enabled: true,
@@ -294,11 +309,18 @@ test("content config resolves only coarse effective proxy location data", () => 
     latitude: 35.68,
     longitude: 139.65,
   });
-  expect(resolveContentVpnLocation(config, "direct.test")).toBeNull();
-  expect(resolveContentVpnLocation(config, "bypass.test")).toBeNull();
-  expect(resolveContentVpnLocation(config, "localhost")).toBeNull();
-  expect(resolveContentVpnLocation({ ...config, enabled: false }, "site.test")).toBeNull();
-  expect(resolveContentVpnLocation(config, "")).toBeNull();
+  const resolveLocation = (value, hostname) =>
+    resolveContentIdentity(value, hostname).vpnLocation;
+  expect(resolveLocation(config, "direct.test")).toBeNull();
+  expect(resolveLocation(config, "bypass.test")).toBeNull();
+  expect(resolveLocation(config, "localhost")).toBeNull();
+  expect(resolveProxyProfile(config, "site.test")).toMatchObject({ name: "Main" });
+  expect(resolveProxyProfile(config, "cdn.video.test")).toMatchObject({
+    name: "Video",
+  });
+  expect(resolveProxyProfile(config)).toBeNull();
+  expect(resolveLocation({ ...config, enabled: false }, "site.test")).toBeNull();
+  expect(resolveLocation(config, "")).toBeNull();
   expect(parseCoarseCoordinates({ loc: "invalid" })).toBeNull();
   expect(parseCoarseCoordinates({ loc: "91,181" })).toBeNull();
   expect(normalizeProxyLocation(null)).toEqual({
@@ -314,47 +336,34 @@ test("content config resolves only coarse effective proxy location data", () => 
   });
 
   globalThis.isDomainAllowlisted = () => false;
-  expect(resolveContentVpnLocation(config, "site.test")).toMatchObject({
+  expect(resolveLocation(config, "site.test")).toMatchObject({
     city: "Paris",
   });
   delete globalThis.isDomainAllowlisted;
 
   const selected = structuredClone(config);
   selected.proxy.routingMode = "protect-selected";
-  expect(resolveContentVpnLocation(selected, "unmatched.test")).toBeNull();
-  expect(resolveContentVpnLocation(selected, "cdn.video.test")).toMatchObject({
+  expect(resolveLocation(selected, "unmatched.test")).toBeNull();
+  expect(resolveLocation(selected, "cdn.video.test")).toMatchObject({
     city: "Tokyo",
   });
 });
 
 test("content config projects only the selected curl browser profile", () => {
   const { createContentConfig } = loadConfigModule();
-  globalThis.getCurlProfileForConfig = vi.fn().mockReturnValue({
-    target: "chrome131",
-    userAgent: "profile-agent",
-  });
 
   const contentConfig = createContentConfig({
-    useragent: { preset: "windows", curlProfile: "chrome131" },
+    useragent: { preset: "macos_chrome", curlProfile: "chrome131" },
   });
 
-  expect(contentConfig.useragent.profile).toEqual({
+  expect(contentConfig.useragent.profile).toMatchObject({
     target: "chrome131",
-    userAgent: "profile-agent",
+    family: "chrome",
+    navigator: { platform: "MacIntel" },
   });
-  expect(globalThis.getCurlProfileForConfig).toHaveBeenCalled();
-  globalThis.getCurlProfileForConfig.mockReturnValueOnce(null);
   expect(
     createContentConfig({ useragent: { preset: "windows" } }).useragent.profile,
-  ).toBeNull();
-});
-
-test("content config leaves the profile projection empty when no profile is available", () => {
-  globalThis.getCurlProfileForConfig = () => null;
-  const { createContentConfig } = loadConfigModule();
-  expect(
-    createContentConfig({ useragent: { preset: "windows" } }).useragent.profile,
-  ).toBeNull();
+  ).toMatchObject({ target: "edge101", family: "edge" });
 });
 
 test("normalizeConfig restores safe values for malformed configuration", () => {
@@ -543,15 +552,17 @@ test("normalizeConfig restores safe values for malformed configuration", () => {
 test("normalizeConfig preserves supported values and bounds user-controlled strings", () => {
   const { DEFAULT_CONFIG, normalizeConfig } = loadConfigModule();
   const longValue = "x".repeat(200);
+  const oversizedValue = "x".repeat(20000);
   const config = {
+    globalWhitelist: oversizedValue,
     useragent: { preset: "iphone", curlProfile: "chrome131" },
+    canvas: { noiseLevel: "high", whitelist: oversizedValue },
     webgl: {
       preset: "apple",
       mode: "strict",
       compatibilityWhitelist: "*.figma.com",
       strictWhitelist: "fingerprint.test, *.strict.test",
     },
-    canvas: { noiseLevel: "high" },
     language: { preset: "sv-SE" },
     tracker: {
       enabled: true,
@@ -593,15 +604,27 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
       syncLanguage: false,
       activeProfile: `  ${longValue}  `,
       fallbackProfiles: [" Backup ", "", 7, ...Array(12).fill("Extra")],
-      profiles: [],
-      domainRoutes: [],
-      bypassList: [],
+      profiles: Array.from({ length: 105 }, (_, index) => ({
+        name: `Profile ${index}`,
+        host: index === 0 ? oversizedValue : `proxy-${index}.test`,
+        port: 1080,
+        scheme: "socks5",
+      })),
+      domainRoutes: Array.from({ length: 501 }, (_, index) => ({
+        pattern: `route-${index}.test`,
+        profile: `Profile ${index % 100}`,
+      })),
+      bypassList: Array.from({ length: 501 }, (_, index) =>
+        index === 0 ? oversizedValue : `direct-${index}.test`,
+      ),
     },
   };
 
   const normalized = normalizeConfig(config);
 
   expect(normalized.useragent.preset).toBe("iphone");
+  expect(normalized.globalWhitelist).toHaveLength(16384);
+  expect(normalized.canvas.whitelist).toHaveLength(16384);
   expect(normalized.useragent.curlProfile).toBe("auto");
   expect(normalized.webgl.preset).toBe("apple");
   expect(normalized.webgl.mode).toBe("strict");
@@ -674,6 +697,11 @@ test("normalizeConfig preserves supported values and bounds user-controlled stri
     "Backup",
     ...Array(9).fill("Extra"),
   ]);
+  expect(normalized.proxy.profiles).toHaveLength(100);
+  expect(normalized.proxy.profiles[0].host).toHaveLength(255);
+  expect(normalized.proxy.domainRoutes).toHaveLength(500);
+  expect(normalized.proxy.bypassList).toHaveLength(500);
+  expect(normalized.proxy.bypassList[0]).toHaveLength(256);
 });
 
 test("language identities stay internally consistent and can follow proxy countries", () => {
