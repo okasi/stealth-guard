@@ -196,6 +196,29 @@ site.*##.entity-allowed
     .not.toContain(".scoped-ad");
 });
 
+test("matches R10 banner placement rules only on R10", () => {
+  const selectors = [
+    ".topbar.topbar1",
+    ".alert.alert-info.text-center",
+    ".rPanel[class*='-panel']",
+    "main > div:has(> .rPanel[class*='-panel'])",
+    ".rc7d74b",
+    ".ra135d7",
+    "#burtiModal",
+    "#burtiModal2",
+  ];
+  const engine = createAdblockEngine(
+    parseFilterList(selectors.map((selector) => `r10.net##${selector}`).join("\n")),
+  );
+
+  expect(getCosmeticSelectors(engine, "www.r10.net")).toEqual(
+    expect.arrayContaining(selectors),
+  );
+  expect(getCosmeticSelectors(engine, "example.com")).not.toEqual(
+    expect.arrayContaining(selectors),
+  );
+});
+
 test("merges filter lists larger than the JavaScript argument limit", () => {
   const compiled = parseFilterList("||large.example^");
   compiled.network.block = Array.from(

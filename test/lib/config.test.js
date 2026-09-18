@@ -182,6 +182,18 @@ test("User-Agent and content config helpers expose only trusted runtime data", (
   expect(BUILTIN_ADBLOCK_COMPATIBILITY_FILTERS).toContain(
     "techcrunch.com##.DCDOr",
   );
+  expect(BUILTIN_ADBLOCK_COMPATIBILITY_FILTERS).toEqual(
+    expect.arrayContaining([
+      "r10.net##.topbar.topbar1",
+      "r10.net##.alert.alert-info.text-center",
+      "r10.net##.rPanel[class*='-panel']",
+      "r10.net##main > div:has(> .rPanel[class*='-panel'])",
+      "r10.net##.rc7d74b",
+      "r10.net##.ra135d7",
+      "r10.net###burtiModal",
+      "r10.net###burtiModal2",
+    ]),
+  );
   expect(BUILTIN_ADBLOCK_COMPATIBILITY_FILTERS).toContain(
     "@@||public.servenobid.com/partner/163965/163966/wrapup_*.js$script,domain=techcrunch.com",
   );

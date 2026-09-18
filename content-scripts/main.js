@@ -979,7 +979,7 @@ function installMainWorldProtections(
       );
     };
 
-    const getSpoofedParameter = function (parameter, version, nativeValue) {
+    const getSpoofedParameter = function (parameter, version, profileValue) {
       const profile = getWebGLProfile(version);
       const presetValues = {
         7936: profile.maskedVendor,
@@ -1000,7 +1000,7 @@ function installMainWorldProtections(
             : importedDebug.SHADING_LANGUAGE_VERSION);
         if (typeof debugValue === "string" && debugValue) return debugValue;
       }
-      return getProfileWebGLParameter(parameter, version, nativeValue);
+      return profileValue;
     };
 
     const getProfileShaderPrecision = function (version, shader, precision) {
@@ -1042,10 +1042,7 @@ function installMainWorldProtections(
           ) {
             return nativeValue;
           }
-          const isProfileParameter =
-            isWebGLStrict() &&
-            getProfileWebGLParameter(args[0], version, nativeValue) !==
-              undefined;
+          const profileValue = getProfileWebGLParameter(args[0], version, nativeValue);
           const importedSurface = getConfiguredWebGLSurfaceProfile(version);
           const importedDebug = importedSurface && importedSurface.debug;
           const isProfileDebugParameter =
@@ -1057,7 +1054,7 @@ function installMainWorldProtections(
               "string";
           if (
             !identityParameters.has(args[0]) &&
-            !isProfileParameter &&
+            profileValue === undefined &&
             !isProfileDebugParameter
           ) {
             return nativeValue;
@@ -1066,7 +1063,7 @@ function installMainWorldProtections(
           const spoofedValue = getSpoofedParameter(
             args[0],
             version,
-            nativeValue,
+            profileValue,
           );
           return spoofedValue === undefined ? nativeValue : spoofedValue;
         },
@@ -1912,16 +1909,16 @@ function installMainWorldProtections(
   if (config.audiocontext) {
     const notifyAudioAccess = createOneTimeAlert("audiocontext");
     const protectedBuffers = new WeakSet();
-    const addFloatNoise = function (values, scale) {
+    const addFloatNoise = function (values, scale, length = values.length) {
       if (!values || typeof values.length !== "number") return;
-      for (let index = 0; index < values.length; index += 100) {
+      for (let index = 0; index < Math.min(values.length, length); index += 100) {
         values[index] += Math.random() * scale;
       }
     };
 
-    const addByteNoise = function (values) {
+    const addByteNoise = function (values, length) {
       if (!values || typeof values.length !== "number") return;
-      for (let index = 0; index < values.length; index += 100) {
+      for (let index = 0; index < Math.min(values.length, length); index += 100) {
         const value = values[index];
         values[index] = value >= 255 ? value - 1 : value + 1;
       }
@@ -1950,8 +1947,10 @@ function installMainWorldProtections(
         "copyFromChannel",
         (target, self, args) => {
           const result = Reflect.apply(target, self, args);
-          if (isFeatureActive("audiocontext") && args[0]) {
-            addFloatNoise(args[0], 0.0000001);
+          // Do not coerce caller objects a second time after the native call.
+          const offset = args[2] === undefined ? 0 : args[2];
+          if (isFeatureActive("audiocontext") && args[0] && typeof offset === "number") {
+            addFloatNoise(args[0], 0.0000001, Math.max(0, self.length - (offset >>> 0)));
             notifyAudioAccess();
           }
           return result;
@@ -1968,7 +1967,8 @@ function installMainWorldProtections(
           (target, self, args) => {
             const result = Reflect.apply(target, self, args);
             if (isFeatureActive("audiocontext") && args[0]) {
-              addNoise(args[0]);
+              const length = method.includes("Frequency") ? self.frequencyBinCount : self.fftSize;
+              addNoise(args[0], length);
               notifyAudioAccess();
             }
             return result;
@@ -1976,11 +1976,11 @@ function installMainWorldProtections(
           `AnalyserNode.${method}`,
         );
       };
-      protectAnalyserReadout("getFloatFrequencyData", (values) =>
-        addFloatNoise(values, 0.1),
+      protectAnalyserReadout("getFloatFrequencyData", (values, length) =>
+        addFloatNoise(values, 0.1, length),
       );
-      protectAnalyserReadout("getFloatTimeDomainData", (values) =>
-        addFloatNoise(values, 0.0000001),
+      protectAnalyserReadout("getFloatTimeDomainData", (values, length) =>
+        addFloatNoise(values, 0.0000001, length),
       );
       protectAnalyserReadout("getByteFrequencyData", addByteNoise);
       protectAnalyserReadout("getByteTimeDomainData", addByteNoise);
@@ -2385,10 +2385,41 @@ function installMainWorldProtections(
       wrappedWorkerUrls.set(cacheKey, wrappedUrl);
       return wrappedUrl;
     };
+    function installConstructors(scope, getPayload, getBaseUrl) {
+      for (const name of ["Worker", "SharedWorker"]) {
+        const nativeConstructor = scope[name];
+        if (typeof nativeConstructor !== "function" ||
+            nativeConstructor.__stealthGuardWorkerWrapper) continue;
+        const wrapped = new Proxy(nativeConstructor, {
+          construct(target, args, newTarget) {
+            if (!args.length) return Reflect.construct(target, args, newTarget);
+            const payload = getPayload();
+            if (!payload || !Object.values(payload.features).some(Boolean)) {
+              return Reflect.construct(target, args, newTarget);
+            }
+            let wrappedUrl;
+            try {
+              const originalUrl = new URL(String(args[0]), getBaseUrl()).href;
+              if (isInlineWorkerUrl(originalUrl)) {
+                wrappedUrl = createWrappedWorkerUrl(originalUrl, getWorkerType(args), payload);
+              }
+            } catch (error) {
+              // Let the native constructor report invalid URLs or use an unwrapped source.
+            }
+            const nextArgs = args.slice();
+            if (wrappedUrl) nextArgs[0] = wrappedUrl;
+            return Reflect.construct(target, nextArgs, newTarget);
+          },
+        });
+        try {
+          Object.defineProperty(wrapped, "__stealthGuardWorkerWrapper", { value: true });
+          scope[name] = wrapped;
+        } catch (error) {}
+      }
+    }
+
     return {
-      getWorkerType,
-      isInlineWorkerUrl,
-      createWrappedWorkerUrl,
+      installConstructors,
       dispose() {
         for (const url of wrappedWorkerUrls.values()) URL.revokeObjectURL(url);
         wrappedWorkerUrls.clear();
@@ -2857,58 +2888,14 @@ function installMainWorldProtections(
       return;
     }
 
-    const { getWorkerType, isInlineWorkerUrl, createWrappedWorkerUrl } =
-      createWorkerBootstrapTools(installWorkerWorldProtections, createWebGLNoiseTools);
-
-    const wrapWorkerConstructor = function (name) {
-      const nativeConstructor = scope[name];
-      if (typeof nativeConstructor !== "function") return;
-      if (nativeConstructor.__stealthGuardWorkerWrapper) return;
-      const wrapped = new Proxy(nativeConstructor, {
-        construct(target, args, newTarget) {
-          const originalArgs = Array.from(args || []);
-          if (!originalArgs.length) {
-            return Reflect.construct(target, originalArgs, newTarget);
-          }
-          let originalUrl;
-          try {
-            originalUrl = new URL(
-              String(originalArgs[0]),
-              payload.baseUrl || (scope.location && scope.location.href),
-            ).href;
-          } catch (error) {
-            return Reflect.construct(target, originalArgs, newTarget);
-          }
-          if (!isInlineWorkerUrl(originalUrl)) {
-            return Reflect.construct(target, originalArgs, newTarget);
-          }
-          const nextPayload = {
-            ...payload,
-            baseUrl: originalUrl,
-          };
-          try {
-            const wrappedUrl = createWrappedWorkerUrl(
-              originalUrl,
-              getWorkerType(originalArgs),
-              nextPayload,
-            );
-            originalArgs[0] = wrappedUrl;
-            return Reflect.construct(target, originalArgs, newTarget);
-          } catch (error) {
-            return Reflect.construct(target, originalArgs, newTarget);
-          }
-        },
-      });
-      try {
-        Object.defineProperty(wrapped, "__stealthGuardWorkerWrapper", {
-          value: true,
-        });
-        scope[name] = wrapped;
-      } catch (error) {}
-    };
-
-    wrapWorkerConstructor("Worker");
-    wrapWorkerConstructor("SharedWorker");
+    createWorkerBootstrapTools(
+      installWorkerWorldProtections,
+      createWebGLNoiseTools,
+    ).installConstructors(
+      scope,
+      () => payload,
+      () => payload.baseUrl || scope.location?.href,
+    );
   };
 
   const createWorkerProtectionPayload = function () {
@@ -2948,69 +2935,16 @@ function installMainWorldProtections(
     };
   };
 
-  const { getWorkerType, isInlineWorkerUrl, createWrappedWorkerUrl, dispose } =
-    createWorkerBootstrapTools(installWorkerWorldProtections, createWebGLNoiseTools);
-  window.addEventListener("pagehide", dispose, { once: true });
-
-  const installWorkerConstructors = function () {
-    if (typeof Worker === "undefined" && typeof SharedWorker === "undefined") {
-      return;
-    }
-    const nativeWorker =
-      typeof Worker === "undefined" ? null : Worker;
-    const nativeSharedWorker =
-      typeof SharedWorker === "undefined" ? null : SharedWorker;
-    const wrapConstructor = function (name, nativeConstructor) {
-      if (!nativeConstructor || nativeConstructor.__stealthGuardWorkerWrapper) {
-        return;
-      }
-      const wrapped = new Proxy(nativeConstructor, {
-        construct(target, args, newTarget) {
-          const originalArgs = Array.from(args || []);
-          if (!isFeatureActive("worker") || !originalArgs.length) {
-            return Reflect.construct(target, originalArgs, newTarget);
-          }
-          const payload = createWorkerProtectionPayload();
-          if (!Object.values(payload.features).some(Boolean)) {
-            return Reflect.construct(target, originalArgs, newTarget);
-          }
-          let originalUrl;
-          try {
-            originalUrl = new URL(
-              String(originalArgs[0]),
-              document.baseURI,
-            ).href;
-          } catch (error) {
-            return Reflect.construct(target, originalArgs, newTarget);
-          }
-          if (!isInlineWorkerUrl(originalUrl)) {
-            return Reflect.construct(target, originalArgs, newTarget);
-          }
-          try {
-            const wrappedUrl = createWrappedWorkerUrl(
-              originalUrl,
-              getWorkerType(originalArgs),
-              payload,
-            );
-            originalArgs[0] = wrappedUrl;
-            return Reflect.construct(target, originalArgs, newTarget);
-          } catch (error) {
-            return Reflect.construct(target, originalArgs, newTarget);
-          }
-        },
-      });
-      try {
-        Object.defineProperty(wrapped, "__stealthGuardWorkerWrapper", {
-          value: true,
-        });
-        window[name] = wrapped;
-      } catch (error) {}
-    };
-    wrapConstructor("Worker", nativeWorker);
-    wrapConstructor("SharedWorker", nativeSharedWorker);
-  };
-
-  installWorkerConstructors();
+  const workerBootstrap = createWorkerBootstrapTools(
+    installWorkerWorldProtections,
+    createWebGLNoiseTools,
+  );
+  window.addEventListener("pagehide", workerBootstrap.dispose, { once: true });
+  workerBootstrap.installConstructors(
+    window,
+    () => isFeatureActive("worker") ? createWorkerProtectionPayload() : null,
+    () => document.baseURI,
+  );
 
   if (
     bridge.diagnosticRequestEvent &&

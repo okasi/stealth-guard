@@ -1,7 +1,7 @@
 let currentConfig = null;
 let saveTimeout = null;
 let lastSavedSnapshot = null;
-let saveInFlightSnapshot = null;
+const enqueueOptionsSave = createSerialQueue();
 let editingProxyProfileName = null;
 let toastTimeout = null;
 let proxyCredentialStatuses = new Map();
@@ -74,10 +74,6 @@ async function initializeOptions() {
   }
 }
 
-function serializeConfig(config) {
-  return JSON.stringify(config);
-}
-
 function getConfigValue(path) {
   return path.reduce((value, key) => value[key], currentConfig);
 }
@@ -117,8 +113,7 @@ async function loadOptionsConfig() {
     refreshAdblockStatus(),
     refreshCurlProfileStatus(),
   ]);
-  lastSavedSnapshot = serializeConfig(currentConfig);
-  saveInFlightSnapshot = null;
+  lastSavedSnapshot = JSON.stringify(currentConfig);
   populateForm();
 }
 
@@ -174,16 +169,15 @@ async function refreshStoredProxyProfiles() {
   }));
 
   const normalizedNextConfig = normalizeConfig(nextConfig);
-  if (serializeConfig(normalizedNextConfig) === serializeConfig(currentConfig)) {
+  if (JSON.stringify(normalizedNextConfig) === JSON.stringify(currentConfig)) {
     return false;
   }
 
   try {
-    const response = await sendRuntimeMessage({
+    await sendRuntimeRequest({
       type: "update-config",
       config: normalizedNextConfig,
-    });
-    assertRuntimeResponse(response, "Failed to save proxy profile metadata");
+    }, "Failed to save proxy profile metadata");
     currentConfig = normalizedNextConfig;
     return true;
   } catch (error) {
@@ -282,11 +276,10 @@ function getProxyCredentialStatus(profile) {
 
 async function refreshProxyCredentialStatuses() {
   try {
-    const response = await sendRuntimeMessage({
+    const response = await sendRuntimeRequest({
       type: "get-proxy-credential-status",
       profiles: currentConfig.proxy.profiles,
-    });
-    assertRuntimeResponse(response, "Failed to load proxy credentials");
+    }, "Failed to load proxy credentials");
     proxyCredentialStatuses = new Map(
       (response.credentials || []).map((entry) => [entry.endpoint, entry]),
     );
@@ -300,10 +293,9 @@ async function refreshProxyCredentialStatuses() {
 
 async function refreshProxyRuntimeStatus() {
   try {
-    const response = await sendRuntimeMessage({
+    const response = await sendRuntimeRequest({
       type: "get-proxy-runtime-status",
-    });
-    assertRuntimeResponse(response, "Failed to load proxy connection status");
+    }, "Failed to load proxy connection status");
     proxyRuntimeStatus = response.status;
     return true;
   } catch (error) {
@@ -317,10 +309,9 @@ async function refreshProxyRuntimeStatus() {
 
 async function refreshProxyDiagnostics() {
   try {
-    const response = await sendRuntimeMessage({
+    const response = await sendRuntimeRequest({
       type: "get-proxy-diagnostics",
-    });
-    assertRuntimeResponse(response, "Failed to load proxy diagnostics");
+    }, "Failed to load proxy diagnostics");
     proxyDiagnostics = response.diagnostics;
     return true;
   } catch (error) {
@@ -530,43 +521,35 @@ function scheduleAutoSave() {
   }, AUTO_SAVE_DELAY_MS);
 }
 
-async function saveOptionsConfig(refreshTabs = false) {
-  const snapshot = serializeConfig(currentConfig);
-  if (snapshot === lastSavedSnapshot || snapshot === saveInFlightSnapshot) {
-    if (refreshTabs) {
-      await refreshAllHttpTabs();
+function saveOptionsConfig(refreshTabs = false) {
+  const snapshot = JSON.stringify(currentConfig);
+  return enqueueOptionsSave(async () => {
+    const changed = snapshot !== lastSavedSnapshot;
+    try {
+      if (changed) {
+        await sendRuntimeRequest({
+          type: "update-config",
+          config: JSON.parse(snapshot),
+        }, "Failed to save settings");
+        lastSavedSnapshot = snapshot;
+        await Promise.all([refreshProxyRuntimeStatus(), refreshProxyDiagnostics()]);
+        renderProxyRuntimeStatus();
+        renderProxyDiagnostics();
+      }
+      if (refreshTabs) {
+        await refreshAllHttpTabs();
+      } else if (changed) {
+        showToast("Settings saved", "success");
+      }
+      return true;
+    } catch (error) {
+      console.error("Failed to save settings:", error);
+      showToast(error.message, "error");
+      // A failed older save must not discard edits made while it was pending.
+      if (JSON.stringify(currentConfig) === snapshot) await loadOptionsConfig();
+      return false;
     }
-    return true;
-  }
-
-  saveInFlightSnapshot = snapshot;
-  try {
-    const response = await sendRuntimeMessage({
-      type: "update-config",
-      config: currentConfig,
-    });
-    assertRuntimeResponse(response, "Failed to save settings");
-    lastSavedSnapshot = snapshot;
-    await refreshProxyRuntimeStatus();
-    await refreshProxyDiagnostics();
-    renderProxyRuntimeStatus();
-    renderProxyDiagnostics();
-    if (refreshTabs) {
-      await refreshAllHttpTabs();
-    } else {
-      showToast("Settings saved", "success");
-    }
-    return true;
-  } catch (error) {
-    console.error("Failed to save settings:", error);
-    showToast(error.message, "error");
-    await loadOptionsConfig();
-    return false;
-  } finally {
-    if (saveInFlightSnapshot === snapshot) {
-      saveInFlightSnapshot = null;
-    }
-  }
+  });
 }
 
 async function saveWhenHidden() {
@@ -914,7 +897,7 @@ async function saveProxyProfile() {
     const username = document.getElementById("new-proxy-username").value;
     const password = document.getElementById("new-proxy-password").value;
     if (username) {
-      const credentialResponse = await sendRuntimeMessage({
+      await sendRuntimeRequest({
         type: "set-proxy-credentials",
         profile,
         credentials: {
@@ -924,11 +907,7 @@ async function saveProxyProfile() {
           sourceProfile: previousProfile,
           persist: document.getElementById("persist-proxy-credentials").checked,
         },
-      });
-      assertRuntimeResponse(
-        credentialResponse,
-        "Failed to save proxy credentials",
-      );
+      }, "Failed to save proxy credentials");
     }
 
     const saved = await saveOptionsConfig();
@@ -1006,11 +985,10 @@ async function clearEditingProxyCredentials() {
   }
 
   try {
-    const response = await sendRuntimeMessage({
+    await sendRuntimeRequest({
       type: "clear-proxy-credentials",
       profile,
-    });
-    assertRuntimeResponse(response, "Failed to clear proxy credentials");
+    }, "Failed to clear proxy credentials");
     await refreshProxyCredentialStatuses();
     document.getElementById("new-proxy-username").value = "";
     document.getElementById("new-proxy-password").value = "";
@@ -1024,8 +1002,7 @@ async function clearEditingProxyCredentials() {
 
 async function refreshAdblockStatus() {
   try {
-    const response = await sendRuntimeMessage({ type: "get-adblock-status" });
-    assertRuntimeResponse(response, "Ad-blocking status is unavailable");
+    const response = await sendRuntimeRequest({ type: "get-adblock-status" }, "Ad-blocking status is unavailable");
     adblockStatus = response.status;
   } catch (error) {
     adblockStatus = null;
@@ -1034,8 +1011,7 @@ async function refreshAdblockStatus() {
 
 async function refreshCurlProfileStatus() {
   try {
-    const response = await sendRuntimeMessage({ type: "get-curl-profile-status" });
-    assertRuntimeResponse(response, "curl-impersonate profile status is unavailable");
+    const response = await sendRuntimeRequest({ type: "get-curl-profile-status" }, "curl-impersonate profile status is unavailable");
     curlProfileStatus = response.status;
     curlProfileCatalog = normalizeCurlProfileCatalog(response.catalog);
   } catch (error) {
@@ -1180,54 +1156,31 @@ function setupEventListeners() {
       }
     });
 
-  document
-    .getElementById("reset-settings")
-    .addEventListener("click", resetSettings);
-  document
-    .getElementById("run-selftest")
-    .addEventListener("click", runSelfTest);
-  document
-    .getElementById("selftest-tab")
-    .addEventListener("change", runSelfTest);
-  document
-    .getElementById("useragent-preset")
-    .addEventListener("change", updateUserAgentString);
-  document
-    .getElementById("add-proxy-profile")
-    .addEventListener("click", saveProxyProfile);
-  document
-    .getElementById("clear-proxy-credentials")
-    .addEventListener("click", clearEditingProxyCredentials);
-  document
-    .getElementById("add-proxy-route")
-    .addEventListener("click", addProxyRoute);
-  document
-    .getElementById("verify-proxy-connection")
-    .addEventListener("click", verifyProxyConnection);
-  document
-    .getElementById("proxy-routing-mode")
-    .addEventListener("change", updateProxyRoutingModeUi);
-  document
-    .getElementById("refresh-proxy-diagnostics")
-    .addEventListener("click", async () => {
+  const actions = [
+    ["reset-settings", "click", resetSettings],
+    ["run-selftest", "click", runSelfTest],
+    ["selftest-tab", "change", runSelfTest],
+    ["useragent-preset", "change", updateUserAgentString],
+    ["add-proxy-profile", "click", saveProxyProfile],
+    ["clear-proxy-credentials", "click", clearEditingProxyCredentials],
+    ["add-proxy-route", "click", addProxyRoute],
+    ["verify-proxy-connection", "click", verifyProxyConnection],
+    ["proxy-routing-mode", "change", updateProxyRoutingModeUi],
+    ["refresh-proxy-diagnostics", "click", async () => {
       await refreshProxyDiagnostics();
       renderProxyDiagnostics();
-    });
-  document
-    .getElementById("export-proxy-diagnostics")
-    .addEventListener("click", exportProxyDiagnostics);
-  document
-    .getElementById("clear-proxy-history")
-    .addEventListener("click", clearProxyHistory);
-  document
-    .getElementById("update-filter-lists")
-    .addEventListener("click", updateAdblockFiltersNow);
-  document
-    .getElementById("update-curl-profiles")
-    .addEventListener("click", updateCurlProfilesNow);
-  document
-    .getElementById("export-config")
-    .addEventListener("click", exportConfig);
+    }],
+    ["export-proxy-diagnostics", "click", exportProxyDiagnostics],
+    ["clear-proxy-history", "click", clearProxyHistory],
+    ["update-filter-lists", "click", updateAdblockFiltersNow],
+    ["update-curl-profiles", "click", updateCurlProfilesNow],
+    ["export-config", "click", exportConfig],
+    ["clear-gpu-profile", "click", clearGpuProfile],
+    ["gpu-profile-preset", "change", selectBundledGpuProfile],
+  ];
+  for (const [id, event, handler] of actions) {
+    document.getElementById(id).addEventListener(event, handler);
+  }
   document.getElementById("import-config").addEventListener("click", () => {
     document.getElementById("import-file").click();
   });
@@ -1248,12 +1201,6 @@ function setupEventListeners() {
       event.target.value = "";
       if (file) importGpuProfile(file);
     });
-  document
-    .getElementById("clear-gpu-profile")
-    .addEventListener("click", clearGpuProfile);
-  document
-    .getElementById("gpu-profile-preset")
-    .addEventListener("change", selectBundledGpuProfile);
 }
 
 async function selectBundledGpuProfile(event) {
@@ -1265,8 +1212,9 @@ async function selectBundledGpuProfile(event) {
   try {
     currentConfig.gpuProfile = await loadBundledGpuProfile(profileId);
     renderGpuProfileStatus();
-    await saveOptionsConfig();
-    showToast(`GPU profile ${profileId} selected`, "success");
+    if (await saveOptionsConfig()) {
+      showToast(`GPU profile ${profileId} selected`, "success");
+    }
   } catch (error) {
     showToast(error.message, "error");
     populateGpuProfileOptions();
@@ -1322,8 +1270,7 @@ async function resetSettings() {
   }
 
   try {
-    const response = await sendRuntimeMessage({ type: "reset-config" });
-    assertRuntimeResponse(response, "Failed to reset settings");
+    await sendRuntimeRequest({ type: "reset-config" }, "Failed to reset settings");
     await loadOptionsConfig();
     showToast("Settings reset to defaults", "success");
   } catch (error) {
@@ -1335,10 +1282,9 @@ async function verifyProxyConnection() {
   const button = document.getElementById("verify-proxy-connection");
   button.disabled = true;
   try {
-    const response = await sendRuntimeMessage({
+    const response = await sendRuntimeRequest({
       type: "verify-proxy-connection",
-    });
-    assertRuntimeResponse(response, "Failed to verify proxy connection");
+    }, "Failed to verify proxy connection");
     proxyRuntimeStatus = response.status;
     await refreshProxyDiagnostics();
     renderProxyRuntimeStatus();
@@ -1383,8 +1329,7 @@ async function exportProxyDiagnostics() {
 
 async function clearProxyHistory() {
   try {
-    const response = await sendRuntimeMessage({ type: "clear-proxy-history" });
-    assertRuntimeResponse(response, "Failed to clear proxy history");
+    await sendRuntimeRequest({ type: "clear-proxy-history" }, "Failed to clear proxy history");
     await refreshProxyDiagnostics();
     renderProxyDiagnostics();
     showToast("Proxy connection history cleared", "success");
@@ -1445,11 +1390,10 @@ function importConfig(file) {
         throw new Error("Invalid config file");
       }
 
-      const response = await sendRuntimeMessage({
+      await sendRuntimeRequest({
         type: "update-config",
         config: data.config,
-      });
-      assertRuntimeResponse(response, "Failed to import settings");
+      }, "Failed to import settings");
       await loadOptionsConfig();
       showToast("Settings imported", "success");
     } catch (error) {
