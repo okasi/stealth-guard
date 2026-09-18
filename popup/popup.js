@@ -50,10 +50,9 @@ async function initializePopup() {
 
 async function loadCurlProfileCatalog() {
   try {
-    const response = await sendRuntimeMessage({
+    const response = await sendRuntimeRequest({
       type: "get-curl-profile-status",
-    });
-    assertRuntimeResponse(response, "Failed to load browser/API profiles");
+    }, "Failed to load browser/API profiles");
     curlProfileCatalog = normalizeCurlProfileCatalog(response.catalog);
   } catch (error) {
     curlProfileCatalog = normalizeCurlProfileCatalog(null);
@@ -62,10 +61,9 @@ async function loadCurlProfileCatalog() {
 
 async function loadProxyRuntimeStatus() {
   try {
-    const response = await sendRuntimeMessage({
+    const response = await sendRuntimeRequest({
       type: "get-proxy-runtime-status",
-    });
-    assertRuntimeResponse(response, "Failed to load proxy status");
+    }, "Failed to load proxy status");
     return response.status;
   } catch (error) {
     console.warn("Proxy runtime status is unavailable:", error);
@@ -489,11 +487,10 @@ async function refreshSessionList() {
   }
 
   try {
-    const response = await sendRuntimeMessage({
+    const response = await sendRuntimeRequest({
       type: "get-sessions",
       hostname: currentSessionHostname,
-    });
-    assertRuntimeResponse(response, "Failed to load sessions");
+    }, "Failed to load sessions");
     currentSessions = Array.isArray(response.sessions) ? response.sessions : [];
     activeSessionId = response.activeSessionId || null;
     renderSessionList();
@@ -505,11 +502,10 @@ async function refreshSessionList() {
 
 async function saveCurrentConfig() {
   try {
-    const response = await sendRuntimeMessage({
+    await sendRuntimeRequest({
       type: "update-config",
       config: currentConfig,
-    });
-    assertRuntimeResponse(response, "Failed to save settings");
+    }, "Failed to save settings");
     currentProxyRuntimeStatus = await loadProxyRuntimeStatus();
     renderProxyStatus();
     renderTrackerStatus();
@@ -681,11 +677,10 @@ async function toggleCurrentSiteAllowlist() {
   );
 
   try {
-    const response = await sendRuntimeMessage({
+    const response = await sendRuntimeRequest({
       type: allowlisted ? "remove-from-whitelist" : "add-to-whitelist",
       domain: currentSessionHostname,
-    });
-    assertRuntimeResponse(response, "Failed to update allowlist");
+    }, "Failed to update allowlist");
     currentConfig.globalWhitelist = response.whitelist;
     renderPopup();
     scheduleCurrentTabReload();
@@ -745,13 +740,12 @@ async function saveSession() {
   const input = document.getElementById("session-name-input");
   setSessionStatus("Saving session...");
   try {
-    const response = await sendRuntimeMessage({
+    await sendRuntimeRequest({
       type: "save-session",
       hostname: currentSessionHostname,
       tabId: currentTab.id,
       name: input.value,
-    });
-    assertRuntimeResponse(response, "Failed to save session");
+    }, "Failed to save session");
     input.value = "";
     setSessionStatus("Session saved.", "success");
     await refreshSessionList();
@@ -775,12 +769,11 @@ async function clearCurrentSession() {
 
   setSessionStatus("Clearing current session...");
   try {
-    const response = await sendRuntimeMessage({
+    await sendRuntimeRequest({
       type: "clear-current-session",
       hostname: currentSessionHostname,
       tabId: currentTab.id,
-    });
-    assertRuntimeResponse(response, "Failed to clear current session");
+    }, "Failed to clear current session");
     setSessionStatus("Current session cleared.", "success");
     await refreshSessionList();
   } catch (error) {

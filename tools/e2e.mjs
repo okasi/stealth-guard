@@ -1002,6 +1002,8 @@ async function exerciseProtections(page) {
         0,
       );
       copyBuffer.copyFromChannel(copiedAudio, 0);
+      const partialAudio = new Float32Array(256).fill(0.5);
+      copyBuffer.copyFromChannel(partialAudio.subarray(10, 230), 0, 120);
       const analyser = offline.createAnalyser();
       const nativeByteTimeDomain = new Uint8Array(analyser.frequencyBinCount);
       const byteTimeDomain = new Uint8Array(analyser.frequencyBinCount);
@@ -1010,6 +1012,17 @@ async function exerciseProtections(page) {
         nativeByteTimeDomain,
       );
       analyser.getByteTimeDomainData(byteTimeDomain);
+      const analyserTails = [];
+      for (const method of [
+        "getFloatFrequencyData", "getByteFrequencyData",
+        "getFloatTimeDomainData", "getByteTimeDomainData",
+      ]) {
+        const size = method.includes("Frequency") ? analyser.frequencyBinCount : analyser.fftSize;
+        const ArrayType = method.includes("Float") ? Float32Array : Uint8Array;
+        const samples = new ArrayType(size + 256).fill(42);
+        analyser[method](samples);
+        analyserTails.push(Array.from(samples.subarray(size)));
+      }
 
       const userAgent = navigator.userAgent;
       const language = navigator.language;
@@ -1214,6 +1227,8 @@ async function exerciseProtections(page) {
         repeatedAudioSample,
         nativeCopiedAudio: Array.from(nativeCopiedAudio.slice(0, 2)),
         copiedAudio: Array.from(copiedAudio.slice(0, 2)),
+        partialAudio: Array.from(partialAudio),
+        analyserTails,
         nativeByteTimeDomain: Array.from(nativeByteTimeDomain.slice(0, 2)),
         byteTimeDomain: Array.from(byteTimeDomain.slice(0, 2)),
         userAgent,
@@ -1414,6 +1429,9 @@ async function testProtectionRuntime(browser, port) {
   assert.equal(result.nativeCopiedAudio[0], 0.25);
   assert(result.copiedAudio[0] > result.nativeCopiedAudio[0]);
   assert.equal(result.copiedAudio[1], result.nativeCopiedAudio[1]);
+  assert(result.partialAudio.slice(0, 10).every((value) => value === 0.5));
+  assert(result.partialAudio.slice(18).every((value) => value === 0.5), "Audio copy changed samples beyond the source channel");
+  assert(result.analyserTails.flat().every((value) => value === 42), "Analyser changed unused output samples");
   assert.notEqual(result.byteTimeDomain[0], result.nativeByteTimeDomain[0]);
   assert.equal(result.byteTimeDomain[1], result.nativeByteTimeDomain[1]);
   const expectedNavigator = {
@@ -2993,6 +3011,40 @@ async function testOptions(browser) {
   const optionsGpuOptions = page.locator("#gpu-profile-preset option");
   assert((await optionsGpuOptions.count()) > 1);
   const optionsGpuProfileId = await optionsGpuOptions.nth(1).getAttribute("value");
+  const pendingSave = await page.evaluate(async () => {
+    const original = chrome.runtime.sendMessage.bind(chrome.runtime);
+    const reloads = window.__chromeState.reloads;
+    let release;
+    let writes = 0;
+    chrome.runtime.sendMessage = (message, callback) => {
+      if (message.type === "update-config") {
+        writes++;
+        const snapshot = structuredClone(message);
+        release = () => original(snapshot, callback);
+      } else original(message, callback);
+    };
+    currentConfig.notifications.enabled = true;
+    const first = saveOptionsConfig();
+    const second = saveOptionsConfig(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const reloadedBeforeSave = window.__chromeState.reloads !== reloads;
+    release();
+    const saved = await Promise.all([first, second]);
+    chrome.runtime.sendMessage = original;
+    return { reloadedBeforeSave, writes, saved };
+  });
+  assert.equal(pendingSave.reloadedBeforeSave, false, "Save & Refresh must wait for pending persistence");
+  assert.equal(pendingSave.writes, 1);
+  assert.deepEqual(pendingSave.saved, [true, true]);
+
+  await page.evaluate(() => {
+    window.__chromeState.failMessages["update-config"] = "Profile save denied";
+  });
+  await page.selectOption("#gpu-profile-preset", optionsGpuProfileId);
+  await page.waitForFunction(() => document.getElementById("gpu-profile-preset").value === "");
+  assert.match(await page.textContent("#toast"), /Profile save denied/);
+  assert.equal(await page.evaluate(() => window.__chromeState.config.gpuProfile), null);
+  await page.evaluate(() => { delete window.__chromeState.failMessages["update-config"]; });
   await page.selectOption("#gpu-profile-preset", optionsGpuProfileId);
   await page.waitForFunction(
     (profileId) => window.__chromeState.config.gpuProfile?.id === profileId,

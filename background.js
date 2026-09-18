@@ -469,14 +469,12 @@ function markTrackerBlocked(tabId, pageHostname, requestHostname) {
     trackerActivityPerTab.set(tabId, {
       hostname: pageHostname,
       count: 0,
-      domains: new Set(),
       domainCounts: new Map(),
     });
   }
   const activity = trackerActivityPerTab.get(tabId);
   activity.count += 1;
-  if (activity.domains.has(requestHostname) || activity.domains.size < 50) {
-    activity.domains.add(requestHostname);
+  if (activity.domainCounts.has(requestHostname) || activity.domainCounts.size < 50) {
     activity.domainCounts.set(
       requestHostname,
       (activity.domainCounts.get(requestHostname) || 0) + 1,
@@ -1821,7 +1819,7 @@ function handleGetTriggeredFeaturesMessage(request) {
     features: tabData && tabData.features ? Array.from(tabData.features) : [],
     tracker: {
       count: trackerData ? trackerData.count : 0,
-      domains: trackerData ? Array.from(trackerData.domains) : [],
+      domains: trackerData ? Array.from(trackerData.domainCounts.keys()) : [],
       entries: trackerData
         ? Array.from(trackerData.domainCounts, ([domain, count]) => ({
             domain,
@@ -2140,7 +2138,7 @@ async function handleGetIdentityDiagnosticsMessage(request, sender) {
         blockedDomains:
           trackerData &&
           (!hostname || isSameSiteHostname(trackerData.hostname, hostname))
-            ? Array.from(trackerData.domains)
+            ? Array.from(trackerData.domainCounts.keys())
             : [],
       },
       triggeredFeatures:

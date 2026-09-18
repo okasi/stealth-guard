@@ -13,6 +13,7 @@ const {
   getTimeZoneShortName,
   loadRuntimeConfig,
   sendRuntimeMessage,
+  sendRuntimeRequest,
   updateTimeZoneSelectLabels,
 } = require("../../lib/runtime.js");
 
@@ -80,6 +81,9 @@ test("Chrome callback helpers normalize success and error responses", async () =
     runtime,
   };
   await expect(sendRuntimeMessage({ type: "ping" })).resolves.toEqual({
+    echo: { type: "ping" },
+  });
+  await expect(sendRuntimeRequest({ type: "ping" }, "No response")).resolves.toEqual({
     echo: { type: "ping" },
   });
   const calculator = {
