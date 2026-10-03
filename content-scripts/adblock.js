@@ -11,6 +11,7 @@
   const appliedSelectors = new Set();
   const observedTokens = new Set();
   let requestTimer = null;
+  let enhancementTimer = null;
   let youtubeEnhancements = false;
   let pickerCleanup = null;
   let observer = null;
@@ -36,7 +37,9 @@
     if (!active) return;
     active = false;
     clearTimeout(requestTimer);
+    clearTimeout(enhancementTimer);
     requestTimer = null;
+    enhancementTimer = null;
     if (observer) observer.disconnect();
     if (pickerCleanup) pickerCleanup();
     try {
@@ -166,6 +169,16 @@
     if (!active) return;
     clearTimeout(requestTimer);
     requestTimer = setTimeout(requestCosmeticRules, 80);
+  }
+
+  // Mutation bursts can fire hundreds of times per second; the enhancement
+  // pass runs querySelector on each batch, so it is coalesced instead.
+  function scheduleYouTubeEnhancements() {
+    if (!active || !youtubeEnhancements || enhancementTimer) return;
+    enhancementTimer = setTimeout(() => {
+      enhancementTimer = null;
+      applyYouTubeEnhancements();
+    }, 120);
   }
 
   function cssEscape(value) {
@@ -322,7 +335,7 @@
       }
     }
     if (tokensChanged) scheduleRuleRequest();
-    applyYouTubeEnhancements();
+    scheduleYouTubeEnhancements();
   });
   if (active) observer.observe(document, {
     childList: true, subtree: true, attributes: true, attributeFilter: ["id", "class"],

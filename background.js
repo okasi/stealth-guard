@@ -75,6 +75,10 @@ const BLOCKED_BADGE_COLORS = {
   empty: "#5F6368",
 };
 const TOOLBAR_ICON_SIZES = [16, 32];
+// Badge updates are coalesced so a burst of blocked requests costs one
+// browserAction IPC round instead of three calls per request.
+const TOOLBAR_UPDATE_DELAY_MS = 120;
+const toolbarUpdateTimers = new Map();
 const toolbarIconRenderVersions = new Map();
 const toolbarIconImageDataByColor = new Map();
 const toolbarProxyColorPerTab = new Map();
@@ -441,10 +445,21 @@ function getRequestContextHostname(details) {
   return null;
 }
 
+let extensionRootUrl = null;
+
 function isExtensionInitiatedRequest(details) {
-  const extensionRoot = chrome.runtime.getURL("");
-  return [details?.initiator, details?.documentUrl, details?.originUrl].some(
-    (value) => typeof value === "string" && value.startsWith(extensionRoot),
+  if (!details) {
+    return false;
+  }
+  if (extensionRootUrl === null) {
+    extensionRootUrl = chrome.runtime.getURL("");
+  }
+  const { initiator, documentUrl, originUrl } = details;
+  return (
+    (typeof initiator === "string" && initiator.startsWith(extensionRootUrl)) ||
+    (typeof documentUrl === "string" &&
+      documentUrl.startsWith(extensionRootUrl)) ||
+    (typeof originUrl === "string" && originUrl.startsWith(extensionRootUrl))
   );
 }
 
@@ -481,7 +496,7 @@ function markTrackerBlocked(tabId, pageHostname, requestHostname) {
     );
   }
   markTriggeredFeatureForTab(tabId, pageHostname, "tracker");
-  updateToolbarIndicator(tabId, pageHostname);
+  scheduleToolbarIndicatorUpdate(tabId, pageHostname);
 }
 
 function isProxyBypassedForHostname(config, hostname) {
@@ -595,6 +610,26 @@ function updateToolbarIndicator(tabId, hostname = "") {
   } catch (error) {
     debugWarn("[Toolbar] Failed to update indicator:", error);
   }
+}
+
+function scheduleToolbarIndicatorUpdate(tabId, hostname = "") {
+  const pending = toolbarUpdateTimers.get(tabId);
+  if (pending) {
+    pending.hostname = hostname || pending.hostname;
+    return;
+  }
+  const entry = { hostname, timer: null };
+  entry.timer = setTimeout(() => {
+    toolbarUpdateTimers.delete(tabId);
+    // Prefer live per-tab state: a same-tab navigation may have replaced the
+    // hostname since this update was scheduled.
+    const freshHostname =
+      trackerActivityPerTab.get(tabId)?.hostname ||
+      toolbarHostnamePerTab.get(tabId) ||
+      entry.hostname;
+    updateToolbarIndicator(tabId, freshHostname);
+  }, TOOLBAR_UPDATE_DELAY_MS);
+  toolbarUpdateTimers.set(tabId, entry);
 }
 
 function refreshToolbarIndicators() {
@@ -1170,11 +1205,20 @@ function applyTrackerBlocking(config, { rebuild = true } = {}) {
   }
 
   trackerListener = function (details) {
+    // The extension-origin check needs no URL parsing, so it runs before the
+    // hostname extraction below.
+    if (isExtensionInitiatedRequest(details)) {
+      return {};
+    }
     const requestHostname = getHostnameFromUrl(details && details.url);
-    const pageHostname = getRequestContextHostname(details);
+    if (!requestHostname) {
+      return {};
+    }
+    const pageHostname =
+      details.type === "main_frame"
+        ? requestHostname
+        : getRequestContextHostname(details);
     if (
-      isExtensionInitiatedRequest(details) ||
-      !requestHostname ||
       !pageHostname ||
       !isAdblockFeatureActiveForHostname(config, pageHostname) ||
       !shouldBlockRequest(
@@ -1534,6 +1578,12 @@ async function applyWebRTCPolicy(configOverride) {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "loading") {
     trackerActivityPerTab.delete(tabId);
+    // A pending badge flush would carry the previous page's hostname.
+    const pendingToolbarUpdate = toolbarUpdateTimers.get(tabId);
+    if (pendingToolbarUpdate) {
+      clearTimeout(pendingToolbarUpdate.timer);
+      toolbarUpdateTimers.delete(tabId);
+    }
   }
   if (changeInfo.url) {
     const newHostname = getHostnameFromUrl(changeInfo.url);
@@ -1565,6 +1615,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const pendingToolbarUpdate = toolbarUpdateTimers.get(tabId);
+  if (pendingToolbarUpdate) {
+    clearTimeout(pendingToolbarUpdate.timer);
+    toolbarUpdateTimers.delete(tabId);
+  }
   triggeredFeaturesPerTab.delete(tabId);
   trackerActivityPerTab.delete(tabId);
   toolbarHostnamePerTab.delete(tabId);

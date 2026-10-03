@@ -33,13 +33,25 @@ async function initializePopup() {
       queryCurrentTab(),
       loadProxyRuntimeStatus(),
     ]);
-    await auxiliaryLoads;
     currentConfig = config;
     currentTab = tab;
     currentProxyRuntimeStatus = proxyStatus;
     currentSessionHostname = getTabHostname(currentTab);
     renderPopup();
     setupEventListeners();
+    // The profile catalog and GPU index only feed the quick-selects, so the
+    // first paint does not wait on them; a second pass fills them in.
+    await auxiliaryLoads;
+    populateUserAgentQuickSelect();
+    setSelectValue(
+      document.getElementById("useragent-quick-select"),
+      getUserAgentSelectionValue(
+        curlProfileCatalog,
+        currentConfig.useragent.preset,
+        currentConfig.useragent.curlProfile,
+      ),
+    );
+    populateGpuProfileQuickSelect();
     await Promise.all([updateTriggeredFeatures(), refreshSessionList()]);
   } catch (error) {
     console.error("Failed to initialize popup:", error);

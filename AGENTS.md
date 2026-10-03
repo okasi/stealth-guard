@@ -67,5 +67,10 @@ Inline Workers inherit the effective configuration at construction.
 - Run `OPERA_PATH=/path/to/opera npm run e2e:extension` for release validation.
   It needs an MV2-capable Opera and OpenSSL; it uses a temporary browser profile
   and local HTTPS/proxy fixtures. See `BENCHMARKS.md` for scope and detector checks.
+- After completing and validating a change set, commit and push it to GitHub
+  unless the user explicitly asks to keep it local. For release changes, check
+  the GitHub Actions run and verify that the published ZIP downloads work.
+  If authentication or network access blocks publication, keep the local commit
+  and report the blocker explicitly; do not describe local changes as published.
 - `reverse-engineering/` contains research and a proposed PRD, not an inventory
   of implemented features. Keep README focused on installation and use.

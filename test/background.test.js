@@ -688,6 +688,8 @@ test("background blocks configured third-party trackers and reports identity dia
       { domain: "metrics.test", count: 2 },
     ],
   });
+  // Badge updates are coalesced; wait for the debounced indicator flush.
+  await new Promise((resolve) => setTimeout(resolve, 150));
   expect(state.badgeTexts.at(-1)).toEqual({ tabId: tab.id, text: "3" });
   expect(state.badgeColors.at(-1)).toEqual({
     tabId: tab.id,
@@ -753,6 +755,48 @@ test("background blocks configured third-party trackers and reports identity dia
     await sendMessage({ type: "update-config", config: current }),
   ).toEqual({ success: true });
   expect(events.onBeforeRequest.listeners).toHaveLength(0);
+});
+
+test("background coalesces badge updates and cancels pending flushes on navigation", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.enabled = true;
+  config.tracker.customDomains = "metrics.test";
+  const { events, state, tab } = await installBackground(config);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const blockRequest = events.onBeforeRequest.listeners[0];
+
+  const badgeWritesBefore = state.badgeTexts.length;
+  for (let index = 0; index < 3; index += 1) {
+    expect(
+      blockRequest({
+        tabId: tab.id,
+        url: `https://metrics.test/pixel-${index}`,
+        initiator: tab.url,
+      }),
+    ).toEqual({ cancel: true });
+  }
+  // A burst of blocked requests collapses into one debounced badge write.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(state.badgeTexts.length).toBe(badgeWritesBefore + 1);
+  expect(state.badgeTexts.at(-1)).toEqual({ tabId: tab.id, text: "3" });
+
+  // Navigating away cancels the pending flush so a stale page hostname cannot
+  // overwrite the fresh indicator state.
+  expect(
+    blockRequest({
+      tabId: tab.id,
+      url: "https://metrics.test/pixel-3",
+      initiator: tab.url,
+    }),
+  ).toEqual({ cancel: true });
+  events.onUpdated.listeners[0](tab.id, {
+    status: "loading",
+    url: "https://other.test/",
+  });
+  const writesAfterNavigation = state.badgeTexts.length;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  expect(state.badgeTexts.length).toBe(writesAfterNavigation);
+  expect(state.badgeTexts.at(-1)).toEqual({ tabId: tab.id, text: "0" });
 });
 
 test("background downloads filter subscriptions and serves cosmetic and user rules", async () => {

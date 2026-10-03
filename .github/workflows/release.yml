@@ -2,13 +2,19 @@ name: Build and Release
 
 on:
   push:
+    branches: [main]
     tags:
       - "v*"
   workflow_dispatch:
 
+concurrency:
+  group: releases
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
 
@@ -47,25 +53,35 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Package extension and source ZIPs
+        run: |
+          mkdir -p build/extension
+          cp manifest.json background.js LICENSE build/extension/
+          cp -R content-scripts icons lib options popup profiles build/extension/
+          (cd build/extension && zip -qr ../stealth-guard.zip .)
+          git archive --format=zip --output=build/stealth-guard-source.zip "$GITHUB_SHA"
+          unzip -t build/stealth-guard.zip
+          unzip -t build/stealth-guard-source.zip
+
       - name: Decode extension signing key
+        id: signing
         env:
           EXTENSION_KEY_B64: ${{ secrets.STEALTH_GUARD_EXTENSION_KEY_B64 }}
         run: |
           if [ -z "$EXTENSION_KEY_B64" ]; then
-            echo "Missing STEALTH_GUARD_EXTENSION_KEY_B64 repository secret"
-            exit 1
+            echo "Signing key is not configured; publishing ZIP downloads only."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           printf '%s' "$EXTENSION_KEY_B64" | base64 --decode > extension-key.pem
           chmod 600 extension-key.pem
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
 
-      - name: Package signed CRX and source ZIP
+      - name: Package signed CRX
+        if: steps.signing.outputs.enabled == 'true'
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         run: |
-          rm -rf build
-          mkdir -p build/extension
-          cp manifest.json background.js LICENSE build/extension/
-          cp -R content-scripts icons lib options popup profiles build/extension/
           CHROME_PATH=$(node --input-type=module -e 'import { chromium } from "playwright-core"; process.stdout.write(chromium.executablePath())')
           test -x "$CHROME_PATH"
           xvfb-run --auto-servernum -- "$CHROME_PATH" \
@@ -80,15 +96,21 @@ jobs:
             --manifest build/extension/manifest.json \
             --codebase "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/stealth-guard-${RELEASE_TAG}.crx" \
             --output build/updates.xml
-          git archive --format=zip --output="stealth-guard-${RELEASE_TAG}-source.zip" "$GITHUB_SHA"
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f extension-key.pem
 
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Release ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
           files: |
-            build/stealth-guard-${{ steps.version.outputs.tag }}.crx
-            build/updates.xml
-            stealth-guard-${{ steps.version.outputs.tag }}-source.zip
+            build/*.zip
+            ${{ steps.signing.outputs.enabled == 'true' && 'build/*.crx' || '' }}
+            ${{ steps.signing.outputs.enabled == 'true' && 'build/updates.xml' || '' }}
+          fail_on_unmatched_files: true
           generate_release_notes: true

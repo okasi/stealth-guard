@@ -63,8 +63,18 @@ All notable changes are documented here. This project follows [Semantic Versioni
   Navigator, client-hint, Worker, and diagnostic browser identity.
 - Session operations verify the target tab before mutating cookies or web storage.
 - Session cookie mutation and tab broadcasts now use bounded concurrency.
+- Per-request blocking work is leaner: URL tokens are scanned without regex
+  match allocations, extension-initiated requests short-circuit before URL
+  parsing, and toolbar badge writes are coalesced during blocked-request
+  bursts.
+- The popup paints before auxiliary profile catalogs load, and cosmetic
+  MutationObserver batches coalesce YouTube enhancement passes.
 
 ### Fixed
+
+- Release ZIP downloads no longer require a CRX signing secret. Successful
+  `main` builds publish extension and full-source ZIPs with stable download
+  names; signed CRX updates remain available when a key is configured.
 
 - Startup config projection and late storage reads no longer discard proxy
   locale settings or overwrite newer broadcasts.

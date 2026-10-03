@@ -27,9 +27,16 @@ telemetry, analytics, or Stealth Guard server.
 Stealth Guard requires **Manifest V2 support**. Current Google Chrome cannot
 load it; the unpacked extension has been tested in Opera 135.
 
-1. Download or clone this repository.
+1. Download the [latest extension ZIP](https://github.com/okasi/stealth-guard/releases/latest/download/stealth-guard.zip) and extract it.
 2. Open `opera://extensions/` and enable **Developer mode**.
-3. Choose **Load unpacked** and select this directory.
+3. Choose **Load unpacked** and select the extracted directory containing `manifest.json`.
+
+The [latest release](https://github.com/okasi/stealth-guard/releases/latest) also
+includes a [complete source ZIP](https://github.com/okasi/stealth-guard/releases/latest/download/stealth-guard-source.zip).
+For the newest committed code on `main`, download the
+[repository ZIP](https://github.com/okasi/stealth-guard/archive/refs/heads/main.zip).
+Releases publish after checks pass on `main` updates or matching version tags;
+signed CRX updates are included when the repository signing key is configured.
 
 Use the toolbar popup for everyday controls and sessions. **Advanced Settings**
 contains subscriptions, proxy profiles, allowlists, import/export, and self-tests.
