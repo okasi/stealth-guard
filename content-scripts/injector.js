@@ -14,8 +14,14 @@
   }
 
   let curlProfileCatalog = normalizeCurlProfileCatalog(null);
+  // Storage arrives asynchronously. Keep the native browser identity until the
+  // user's saved profile is ready: an early default identity can make sites
+  // reject the browser before the saved configuration replaces it.
   let config = createContentConfig(
-    DEFAULT_CONFIG,
+    {
+      ...DEFAULT_CONFIG,
+      useragent: { ...DEFAULT_CONFIG.useragent, enabled: false },
+    },
     window.location.hostname,
     curlProfileCatalog,
   );

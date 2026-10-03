@@ -72,6 +72,9 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Fixed
 
+- Preserve the native browser identity until saved settings load, preventing an
+  obsolete default User-Agent from triggering Notion's unsupported-browser page.
+
 - Release ZIP downloads no longer require a CRX signing secret. Successful
   `main` builds publish extension and full-source ZIPs with stable download
   names; signed CRX updates remain available when a key is configured.

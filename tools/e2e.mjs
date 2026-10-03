@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { chromium } from "playwright-core";
@@ -59,7 +59,7 @@ async function routeExtensionAssets(context) {
       "." + decodeURIComponent(new URL(route.request().url()).pathname),
     );
     if (
-      (assetPath !== root && !assetPath.startsWith(root + "/")) ||
+      (assetPath !== root && !assetPath.startsWith(root + sep)) ||
       !existsSync(assetPath)
     ) {
       await route.fulfill({ status: 404, body: "Not found" });
@@ -2113,7 +2113,7 @@ async function testConfigurationBootstrap(browser) {
   for (const lateRead of [false, true]) {
     const context = await browser.newContext();
     await context.route("https://www.youtube.com/**", (route) =>
-      route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>` }),
+      route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><script>${protectionSources}\nwindow.__sgFirstUserAgent = navigator.userAgent;</script></head><body></body></html>` }),
     );
     await context.addInitScript({ content: protectionInitScript(config) + (lateRead ? `
       const storedGet = chrome.storage.local.get;
@@ -2123,7 +2123,16 @@ async function testConfigurationBootstrap(browser) {
     ` : "") });
     const page = await context.newPage();
     await page.goto("https://www.youtube.com/watch?v=bootstrap");
+    // Browser compatibility gates may run before the saved settings arrive.
+    assert.equal(
+      await page.evaluate(() => window.__sgFirstUserAgent),
+      await page.evaluate(() => window.__sgNativeUserAgent),
+    );
     if (lateRead) {
+      assert.equal(
+        await page.evaluate(() => navigator.userAgent),
+        await page.evaluate(() => window.__sgNativeUserAgent),
+      );
       await page.evaluate(() => {
         window.__sgUpdateConfig({ enabled: false });
         window.__sgReleaseStoredConfig();
@@ -2134,6 +2143,10 @@ async function testConfigurationBootstrap(browser) {
       assert.equal(await page.evaluate(() => navigator.userAgent), await page.evaluate(() => window.__sgNativeUserAgent));
     } else {
       await page.waitForFunction(() => navigator.language === "ja-JP");
+      assert.notEqual(
+        await page.evaluate(() => navigator.userAgent),
+        await page.evaluate(() => window.__sgNativeUserAgent),
+      );
       assert.equal(await page.evaluate(() => new Intl.DateTimeFormat().resolvedOptions().timeZone), "Asia/Tokyo");
       const position = await page.evaluate(() => new Promise((resolve) =>
         navigator.geolocation.getCurrentPosition((value) => resolve([value.coords.latitude, value.coords.longitude])),
