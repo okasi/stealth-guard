@@ -101,6 +101,7 @@ function protectionInitScript(config) {
         Navigator.prototype,
         "languages",
       );
+      window.__sgNativeTimezone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
       window.__sgNativeLanguage = nativeLanguageDescriptor.get.call(navigator);
       window.__sgNativeLanguages = Array.from(
         nativeLanguagesDescriptor.get.call(navigator),
@@ -2110,10 +2111,18 @@ async function testConfigurationBootstrap(browser) {
     profiles: [{ name: "Tokyo", scheme: "http", host: "proxy.test", port: 8080,
       location: { countryCode: "JP", timezone: "Asia/Tokyo", loc: "35.68,139.69" } }],
   };
-  for (const lateRead of [false, true]) {
+  for (const delivery of ["immediate", "delayed", "superseded"]) {
+    const lateRead = delivery !== "immediate";
     const context = await browser.newContext();
     await context.route("https://www.youtube.com/**", (route) =>
-      route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><script>${protectionSources}\nwindow.__sgFirstUserAgent = navigator.userAgent;</script></head><body></body></html>` }),
+      route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><script>${protectionSources}\nwindow.__sgFirstUserAgent = navigator.userAgent;
+window.__sgFirstLanguage = navigator.language;
+window.__sgFirstLanguages = Array.from(navigator.languages);
+window.__sgFirstTimezone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+const startupCanvas = document.createElement("canvas");
+startupCanvas.width = startupCanvas.height = 16;
+startupCanvas.getContext("2d").fillRect(0, 0, 16, 16);
+window.__sgFirstCanvasProtected = startupCanvas.toDataURL() !== window.__sgNativeCanvasToDataURL.call(startupCanvas);</script></head><body></body></html>` }),
     );
     await context.addInitScript({ content: protectionInitScript(config) + (lateRead ? `
       const storedGet = chrome.storage.local.get;
@@ -2128,7 +2137,23 @@ async function testConfigurationBootstrap(browser) {
       await page.evaluate(() => window.__sgFirstUserAgent),
       await page.evaluate(() => window.__sgNativeUserAgent),
     );
-    if (lateRead) {
+    const firstIdentity = await page.evaluate(() => ({
+      language: window.__sgFirstLanguage,
+      nativeLanguage: window.__sgNativeLanguage,
+      languages: window.__sgFirstLanguages,
+      nativeLanguages: window.__sgNativeLanguages,
+      timezone: window.__sgFirstTimezone,
+      nativeTimezone: window.__sgNativeTimezone,
+      canvasProtected: window.__sgFirstCanvasProtected,
+    }));
+    assert.equal(firstIdentity.language, firstIdentity.nativeLanguage);
+    assert.deepEqual(firstIdentity.languages, firstIdentity.nativeLanguages);
+    assert.equal(firstIdentity.timezone, firstIdentity.nativeTimezone);
+    assert.equal(firstIdentity.canvasProtected, true);
+    if (delivery === "delayed") {
+      await page.evaluate(() => window.__sgReleaseStoredConfig());
+    }
+    if (delivery === "superseded") {
       assert.equal(
         await page.evaluate(() => navigator.userAgent),
         await page.evaluate(() => window.__sgNativeUserAgent),
@@ -2141,6 +2166,8 @@ async function testConfigurationBootstrap(browser) {
       // Let the old read's promise continuation run before checking it again.
       await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 0)));
       assert.equal(await page.evaluate(() => navigator.userAgent), await page.evaluate(() => window.__sgNativeUserAgent));
+      assert.equal(await page.evaluate(() => navigator.language), firstIdentity.nativeLanguage);
+      assert.equal(await page.evaluate(() => new Intl.DateTimeFormat().resolvedOptions().timeZone), firstIdentity.nativeTimezone);
     } else {
       await page.waitForFunction(() => navigator.language === "ja-JP");
       assert.notEqual(
@@ -2158,6 +2185,32 @@ async function testConfigurationBootstrap(browser) {
     ), "keep");
     await context.close();
   }
+}
+
+async function testPayPalProtections(browser) {
+  const config = structuredClone(DEFAULT_CONFIG);
+  const context = await browser.newContext();
+  await context.addInitScript({ content: protectionInitScript(config) });
+  await context.route(/^https:\/\/(www\.paypal\.com|geo\.ddc\.paypal\.com)\//, (route) =>
+    route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>` }),
+  );
+  const page = await context.newPage();
+  for (const url of ["https://www.paypal.com/webapps/hermes", "https://geo.ddc.paypal.com/captcha/"]) {
+    await page.goto(url);
+    await page.waitForFunction(() => navigator.userAgent !== window.__sgNativeUserAgent);
+    const protectedState = await page.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = canvas.height = 16;
+      canvas.getContext("2d").fillRect(0, 0, 16, 16);
+      return {
+        canvas: canvas.toDataURL() !== window.__sgNativeCanvasToDataURL.call(canvas),
+        worker: window.Worker !== window.__sgNativeWorker,
+      };
+    });
+    assert.equal(protectedState.canvas, true, url);
+    assert.equal(protectedState.worker, true, url);
+  }
+  await context.close();
 }
 
 async function testAllowlistAndChallengeFrames(browser, port) {
@@ -2243,7 +2296,7 @@ async function testAllowlistAndChallengeFrames(browser, port) {
       body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>`,
     }),
   );
-  await challengeContext.route(/^https:\/\/(geo\.captcha-delivery\.com|geo\.ddc\.paypal\.com)\//, (route) =>
+  await challengeContext.route("https://geo.captcha-delivery.com/**", (route) =>
     route.fulfill({
       contentType: "text/html",
       body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>`,
@@ -2354,18 +2407,6 @@ async function testAllowlistAndChallengeFrames(browser, port) {
   }));
   assert.equal(dataDomeChallenge.userAgent, dataDomeChallenge.nativeUserAgent);
   assert.equal(dataDomeChallenge.reports, 0);
-  await challengePage.goto("https://geo.ddc.paypal.com/captcha/");
-  const paypalChallenge = await challengePage.evaluate(() => ({
-    userAgent: navigator.userAgent,
-    nativeUserAgent: window.__sgNativeUserAgent,
-    canvasNative: CanvasRenderingContext2D.prototype.getImageData === window.__sgNativeGetImageData,
-    workerNative: window.Worker === window.__sgNativeWorker,
-    reports: window.__sgReports.length,
-  }));
-  assert.equal(paypalChallenge.userAgent, paypalChallenge.nativeUserAgent);
-  assert.equal(paypalChallenge.canvasNative, true);
-  assert.equal(paypalChallenge.workerNative, true);
-  assert.equal(paypalChallenge.reports, 0);
   await challengeContext.close();
 }
 
@@ -3515,6 +3556,7 @@ async function main() {
 
   try {
     await testConfigurationBootstrap(browser);
+    await testPayPalProtections(browser);
     await testProtectionRuntime(browser, server.port);
     await testUrlBackedWorkerCompatibility(browser, server.port);
     await testInlineWorkerVariants(browser, server.port);

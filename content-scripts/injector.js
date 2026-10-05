@@ -16,11 +16,14 @@
   let curlProfileCatalog = normalizeCurlProfileCatalog(null);
   // Storage arrives asynchronously. Keep the native browser identity until the
   // user's saved profile is ready: an early default identity can make sites
-  // reject the browser before the saved configuration replaces it.
+  // cache a temporary locale/timezone or reject a temporary browser profile.
+  // Noise/readback protections remain active while the trusted settings load.
   let config = createContentConfig(
     {
       ...DEFAULT_CONFIG,
       useragent: { ...DEFAULT_CONFIG.useragent, enabled: false },
+      language: { ...DEFAULT_CONFIG.language, enabled: false },
+      timezone: { ...DEFAULT_CONFIG.timezone, enabled: false },
     },
     window.location.hostname,
     curlProfileCatalog,

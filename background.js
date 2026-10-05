@@ -1211,7 +1211,7 @@ function applyTrackerBlocking(config, { rebuild = true } = {}) {
       return {};
     }
     const requestHostname = getHostnameFromUrl(details && details.url);
-    if (!requestHostname || isDataDomeChallengeHostname(requestHostname)) {
+    if (!requestHostname) {
       return {};
     }
     const pageHostname =
@@ -1220,7 +1220,6 @@ function applyTrackerBlocking(config, { rebuild = true } = {}) {
         : getRequestContextHostname(details);
     if (
       !pageHostname ||
-      isDataDomeChallengeHostname(pageHostname) ||
       !isAdblockFeatureActiveForHostname(config, pageHostname) ||
       !shouldBlockRequest(
         adblockEngine,
