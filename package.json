@@ -1,6 +1,6 @@
 {
   "name": "stealth-guard-by-okasi",
-  "version": "1.0.78",
+  "version": "1.0.79",
   "private": true,
   "description": "MV2-compatible browser fingerprinting protection extension.",
   "license": "MIT",

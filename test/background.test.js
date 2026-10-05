@@ -507,6 +507,13 @@ test("background initializes policies and applies config changes atomically", as
     }).requestHeaders,
   ).toBe(challengeHeaders);
 
+  expect(
+    events.onBeforeSendHeaders.listeners[0]({
+      url: "https://geo.ddc.paypal.com/captcha/",
+      requestHeaders: challengeHeaders,
+    }).requestHeaders,
+  ).toBe(challengeHeaders);
+
   const broadcastsBeforeNoop = state.broadcasts.length;
   expect(
     await sendMessage({ type: "update-config", config: initial.config }),
@@ -628,6 +635,18 @@ test("User-Agent policy keeps existing client-hint headers consistent", async ()
     await sendMessage({ type: "update-config", config: safariConfig }),
   ).toEqual({ success: true });
   expect(events.onBeforeSendHeaders.listeners).toHaveLength(0);
+});
+
+test("challenge documents and delivery requests survive custom network filters", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.customDomains = "geo.ddc.paypal.com, metrics.test, captcha-delivery.com";
+  const { events, tab } = await installBackground(config);
+  const block = events.onBeforeRequest.listeners[0];
+  for (const host of ["geo.ddc.paypal.com", "geo.captcha-delivery.com"]) {
+    expect(block({ tabId: tab.id, url: `https://${host}/captcha/`, initiator: tab.url })).toEqual({});
+    expect(block({ tabId: tab.id, url: "https://metrics.test/pixel", documentUrl: `https://${host}/captcha/` })).toEqual({});
+  }
+  expect(block({ tabId: tab.id, url: "https://metrics.test/pixel", documentUrl: "https://www.paypal.com/checkout" })).toEqual({ cancel: true });
 });
 
 test("background blocks configured third-party trackers and reports identity diagnostics", async () => {

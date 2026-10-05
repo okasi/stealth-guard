@@ -2243,7 +2243,7 @@ async function testAllowlistAndChallengeFrames(browser, port) {
       body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>`,
     }),
   );
-  await challengeContext.route("https://geo.captcha-delivery.com/**", (route) =>
+  await challengeContext.route(/^https:\/\/(geo\.captcha-delivery\.com|geo\.ddc\.paypal\.com)\//, (route) =>
     route.fulfill({
       contentType: "text/html",
       body: `<!doctype html><html><head><script>${protectionSources}</script></head><body></body></html>`,
@@ -2354,6 +2354,18 @@ async function testAllowlistAndChallengeFrames(browser, port) {
   }));
   assert.equal(dataDomeChallenge.userAgent, dataDomeChallenge.nativeUserAgent);
   assert.equal(dataDomeChallenge.reports, 0);
+  await challengePage.goto("https://geo.ddc.paypal.com/captcha/");
+  const paypalChallenge = await challengePage.evaluate(() => ({
+    userAgent: navigator.userAgent,
+    nativeUserAgent: window.__sgNativeUserAgent,
+    canvasNative: CanvasRenderingContext2D.prototype.getImageData === window.__sgNativeGetImageData,
+    workerNative: window.Worker === window.__sgNativeWorker,
+    reports: window.__sgReports.length,
+  }));
+  assert.equal(paypalChallenge.userAgent, paypalChallenge.nativeUserAgent);
+  assert.equal(paypalChallenge.canvasNative, true);
+  assert.equal(paypalChallenge.workerNative, true);
+  assert.equal(paypalChallenge.reports, 0);
   await challengeContext.close();
 }
 

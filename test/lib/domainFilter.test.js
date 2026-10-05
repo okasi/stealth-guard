@@ -243,9 +243,13 @@ test("Cloudflare challenge URL detection covers first-party challenge flows", ()
   expect(isCloudflareChallengeUrl("not a URL")).toBe(false);
 });
 
-test("DataDome challenge detection accepts only the delivery domain", () => {
+test("DataDome challenge detection accepts only known delivery hosts", () => {
   expect(isDataDomeChallengeHostname("captcha-delivery.com")).toBe(true);
   expect(isDataDomeChallengeHostname("geo.captcha-delivery.com.")).toBe(true);
+  expect(isDataDomeChallengeHostname("GEO.DDC.PAYPAL.COM.")).toBe(true);
+  for (const host of ["www.paypal.com", "ddc.paypal.com", "geo.ddc.paypal.com.evil.test", "evilgeo.ddc.paypal.com"]) {
+    expect(isDataDomeChallengeHostname(host)).toBe(false);
+  }
   expect(isDataDomeChallengeHostname("datadome.co")).toBe(false);
   expect(isDataDomeChallengeHostname(null)).toBe(false);
 });
