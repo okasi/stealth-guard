@@ -2122,7 +2122,13 @@ window.__sgFirstTimezone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
 const startupCanvas = document.createElement("canvas");
 startupCanvas.width = startupCanvas.height = 16;
 startupCanvas.getContext("2d").fillRect(0, 0, 16, 16);
-window.__sgFirstCanvasProtected = startupCanvas.toDataURL() !== window.__sgNativeCanvasToDataURL.call(startupCanvas);</script></head><body></body></html>` }),
+const startupRandom = Math.random;
+try {
+  Math.random = () => 0.9;
+  window.__sgFirstCanvasProtected = startupCanvas.toDataURL() !== window.__sgNativeCanvasToDataURL.call(startupCanvas);
+} finally {
+  Math.random = startupRandom;
+}</script></head><body></body></html>` }),
     );
     await context.addInitScript({ content: protectionInitScript(config) + (lateRead ? `
       const storedGet = chrome.storage.local.get;
@@ -2202,10 +2208,16 @@ async function testPayPalProtections(browser) {
       const canvas = document.createElement("canvas");
       canvas.width = canvas.height = 16;
       canvas.getContext("2d").fillRect(0, 0, 16, 16);
-      return {
-        canvas: canvas.toDataURL() !== window.__sgNativeCanvasToDataURL.call(canvas),
-        worker: window.Worker !== window.__sgNativeWorker,
-      };
+      const originalRandom = Math.random;
+      try {
+        Math.random = () => 0.9;
+        return {
+          canvas: canvas.toDataURL() !== window.__sgNativeCanvasToDataURL.call(canvas),
+          worker: window.Worker !== window.__sgNativeWorker,
+        };
+      } finally {
+        Math.random = originalRandom;
+      }
     });
     assert.equal(protectedState.canvas, true, url);
     assert.equal(protectedState.worker, true, url);
