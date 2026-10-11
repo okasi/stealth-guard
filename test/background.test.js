@@ -891,6 +891,43 @@ test("background downloads filter subscriptions and serves cosmetic and user rul
   });
 });
 
+test("background allows ojrq redirect navigation while blocking embedded tracking", async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.tracker.useBuiltIn = false;
+  config.tracker.filterLists = [{
+    id: "redirect-list",
+    name: "Redirect list",
+    url: "https://filters.test/list.txt",
+    enabled: true,
+  }];
+  const { events, sendMessage, tab } = await installBackground(config, {
+    filterText: "||ojrq.net^\n||ojrq.net.evil.test^\n||other-redirect.test^",
+  });
+  await sendMessage({ type: "update-adblock-filters" });
+  const block = events.onBeforeRequest.listeners[0];
+  for (const host of ["ojrq.net", "www.ojrq.net", "redirect.ojrq.net"]) {
+    for (const query of ["return=", "return=https%3A%2F%2Fshop.test%2Fitem"]) {
+      const details = {
+        tabId: tab.id,
+        url: `https://${host}/p/?${query}`,
+        initiator: tab.url,
+      };
+      expect(block({ ...details, type: "main_frame" })).toEqual({});
+      for (const type of ["script", "image", "xmlhttprequest", "ping", "sub_frame"]) {
+        expect(block({ ...details, type })).toEqual({ cancel: true });
+      }
+    }
+  }
+  for (const host of ["ojrq.net.evil.test", "other-redirect.test"]) {
+    expect(block({
+      tabId: tab.id,
+      url: `https://${host}/p/?return=`,
+      type: "main_frame",
+      initiator: tab.url,
+    })).toEqual({ cancel: true });
+  }
+});
+
 test("background keeps blocking active and hides TradingView's anti-adblock dialog", async () => {
   const config = structuredClone(DEFAULT_CONFIG);
   config.tracker.filterLists = [
