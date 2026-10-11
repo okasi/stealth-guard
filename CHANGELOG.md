@@ -72,6 +72,8 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Fixed
 
+- Update test dependencies to patched Vitest 4.1.11 and source-map-js 1.2.2 so the CI dependency audit passes.
+
 - Preserve native inline Workers in opaque-origin sandboxes so ChatGPT reply rendering does not fail when its Content Security Policy blocks bootstrap imports.
 
 - Preserve the native browser identity until saved settings load, preventing an
