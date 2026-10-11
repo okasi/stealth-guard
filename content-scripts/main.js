@@ -2400,7 +2400,10 @@ function installMainWorldProtections(
             let wrappedUrl;
             try {
               const originalUrl = new URL(String(args[0]), getBaseUrl()).href;
-              if (isInlineWorkerUrl(originalUrl)) {
+              // Opaque-origin blobs cannot be imported by the bootstrap. Sandboxed
+              // renderers (including ChatGPT replies) must keep their native Worker.
+              if (isInlineWorkerUrl(originalUrl) &&
+                  !originalUrl.startsWith("blob:null/") && scope.origin !== "null") {
                 wrappedUrl = createWrappedWorkerUrl(originalUrl, getWorkerType(args), payload);
               }
             } catch (error) {

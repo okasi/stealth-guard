@@ -2581,6 +2581,56 @@ async function testInlineWorkerVariants(browser, port) {
   await context.close();
 }
 
+async function testSandboxedInlineWorkers(browser, port) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(`http://site.test:${port}/`);
+  const sources = contentScriptFiles
+    .filter((file) => !["content-scripts/injector.js", "content-scripts/adblock.js"].includes(file))
+    .map(readSource).join("\n");
+  const result = await page.evaluate(({ sources, config }) => new Promise((resolve, reject) => {
+    const frame = document.createElement("iframe");
+    frame.sandbox = "allow-scripts";
+    const timeout = setTimeout(() => finish(new Error("Sandboxed Worker timed out")), 5000);
+    function finish(error, value) {
+      clearTimeout(timeout);
+      window.removeEventListener("message", receive);
+      frame.remove();
+      error ? reject(error) : resolve(value);
+    }
+    function receive(event) {
+      if (event.source !== frame.contentWindow || event.data?.channel !== "sandbox-worker-test") return;
+      event.data.error ? finish(new Error(event.data.error)) : finish(null, event.data);
+    }
+    window.addEventListener("message", receive);
+    // Blob Worker construction is permitted, but importing blob scripts is not.
+    // This models the opaque-origin sandbox used to render ChatGPT replies.
+    frame.srcdoc = `<meta http-equiv="Content-Security-Policy" content="script-src 'unsafe-inline' 'unsafe-eval'; worker-src blob:"><script>
+      ${sources}
+      const nativeUserAgent = navigator.userAgent;
+      installMainWorldProtections(createContentConfig(${JSON.stringify(config)}),
+        {configEvent:"sandbox-config",configToken:"sandbox-token",alertChannel:"sandbox-alert",alertToken:"sandbox-token"},
+        createDomainPatternTools, createCloudflareChallengeUrlMatcher);
+      const url = URL.createObjectURL(new Blob([
+        "postMessage({userAgent:navigator.userAgent,origin:self.origin,href:self.location.href})"
+      ], {type:"application/javascript"}));
+      const options = Object.freeze({name:"reply-renderer"});
+      const worker = new Worker(url, options);
+      worker.onmessage = event => {
+        parent.postMessage({...event.data,channel:"sandbox-worker-test",url,nativeUserAgent,name:options.name}, "*");
+        worker.terminate(); URL.revokeObjectURL(url);
+      };
+      worker.onerror = event => parent.postMessage({channel:"sandbox-worker-test",error:event.message}, "*");
+    </script>`;
+    document.body.appendChild(frame);
+  }), { sources, config: DEFAULT_CONFIG });
+  assert.equal(result.origin, "null");
+  assert.equal(result.href, result.url);
+  assert.equal(result.userAgent, result.nativeUserAgent);
+  assert.equal(result.name, "reply-renderer");
+  await context.close();
+}
+
 async function testInvalidatedExtensionContext(browser, port) {
   const context = await browser.newContext();
   await context.addInitScript({
@@ -3572,6 +3622,7 @@ async function main() {
     await testProtectionRuntime(browser, server.port);
     await testUrlBackedWorkerCompatibility(browser, server.port);
     await testInlineWorkerVariants(browser, server.port);
+    await testSandboxedInlineWorkers(browser, server.port);
     await testAllowlistAndChallengeFrames(browser, server.port);
     await testInvalidatedExtensionContext(browser, server.port);
     await testCosmeticFilteringAndElementPicker(browser, server.port);
