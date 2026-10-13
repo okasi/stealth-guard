@@ -2397,6 +2397,18 @@ function installMainWorldProtections(
             if (!payload || !Object.values(payload.features).some(Boolean)) {
               return Reflect.construct(target, args, newTarget);
             }
+            // Trusted script URLs must retain their brand. A blob bootstrap also
+            // inherits Trusted Types enforcement, but not the page's policies,
+            // so its string-based importScripts cannot load the original source.
+            // Keep these Workers native instead of creating a permissive policy.
+            if (scope.trustedTypes && (
+              scope.trustedTypes.isScriptURL(args[0]) ||
+              (scope.document && Array.from(scope.document.querySelectorAll(
+                'meta[http-equiv="Content-Security-Policy" i]',
+              )).some((meta) => /(?:^|;)\s*require-trusted-types-for\s+'script'(?:\s|;|$)/i.test(meta.content)))
+            )) {
+              return Reflect.construct(target, args, newTarget);
+            }
             let wrappedUrl;
             try {
               const originalUrl = new URL(String(args[0]), getBaseUrl()).href;

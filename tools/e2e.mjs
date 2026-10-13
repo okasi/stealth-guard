@@ -2581,6 +2581,73 @@ async function testInlineWorkerVariants(browser, port) {
   await context.close();
 }
 
+async function testTrustedTypesInlineWorkers(browser, port) {
+  for (const enforcement of ["meta", "header"]) {
+    const context = await browser.newContext();
+    await context.addInitScript({ content: protectionInitScript(DEFAULT_CONFIG) });
+    if (enforcement === "header") {
+      await context.route("**/trusted-workers", (route) => route.fulfill({
+        contentType: "text/html",
+        headers: { "Content-Security-Policy": "require-trusted-types-for 'script'; trusted-types worker-test" },
+        body: "<!doctype html><title>Trusted Workers</title>",
+      }));
+    }
+    const page = await context.newPage();
+    await page.goto(`http://site.test:${port}/trusted-workers`);
+    const result = await page.evaluate(async (enforcement) => {
+      const policy = trustedTypes.createPolicy(
+        enforcement === "meta" ? "default" : "worker-test",
+        { createScriptURL: (url) => url },
+      );
+      if (enforcement === "meta") {
+        const meta = document.createElement("meta");
+        meta.httpEquiv = "Content-Security-Policy";
+        meta.content = "require-trusted-types-for 'script'; trusted-types default";
+        document.head.appendChild(meta);
+      }
+      const results = [];
+      for (const shared of [false, true]) {
+        for (const type of ["classic", "module"]) {
+          const snapshot = "({userAgent:navigator.userAgent,name:self.name})";
+          const source = shared
+            ? `onconnect=e=>e.ports[0].postMessage(${snapshot})`
+            : `postMessage(${snapshot})`;
+          const url = URL.createObjectURL(new Blob([source], { type: "application/javascript" }));
+          const scriptUrl = enforcement === "meta" ? url : policy.createScriptURL(url);
+          const options = Object.freeze({ type, name: `trusted-${shared}-${type}` });
+          const value = await new Promise((resolve, reject) => {
+            const worker = shared ? new SharedWorker(scriptUrl, options) : new Worker(scriptUrl, options);
+            const port = shared ? worker.port : worker;
+            const timeout = setTimeout(() => finish(new Error("Trusted Worker timed out")), 5000);
+            function finish(error, value) {
+              clearTimeout(timeout);
+              shared ? port.close() : worker.terminate();
+              URL.revokeObjectURL(url);
+              error ? reject(error) : resolve(value);
+            }
+            port.onmessage = (event) => finish(null, event.data);
+            worker.onerror = (event) => finish(new Error(event.message));
+            if (shared) port.start();
+          });
+          results.push({ ...value, expectedName: options.name });
+        }
+      }
+      let untrustedRejected = false;
+      if (enforcement === "header") {
+        try { new Worker("data:text/javascript,postMessage(1)"); }
+        catch (error) { untrustedRejected = error instanceof TypeError; }
+      }
+      return { results, untrustedRejected, nativeUserAgent: window.__sgNativeUserAgent };
+    }, enforcement);
+    for (const worker of result.results) {
+      assert.equal(worker.userAgent, result.nativeUserAgent);
+      assert.equal(worker.name, worker.expectedName);
+    }
+    if (enforcement === "header") assert(result.untrustedRejected);
+    await context.close();
+  }
+}
+
 async function testSandboxedInlineWorkers(browser, port) {
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -3622,6 +3689,7 @@ async function main() {
     await testProtectionRuntime(browser, server.port);
     await testUrlBackedWorkerCompatibility(browser, server.port);
     await testInlineWorkerVariants(browser, server.port);
+    await testTrustedTypesInlineWorkers(browser, server.port);
     await testSandboxedInlineWorkers(browser, server.port);
     await testAllowlistAndChallengeFrames(browser, server.port);
     await testInvalidatedExtensionContext(browser, server.port);
